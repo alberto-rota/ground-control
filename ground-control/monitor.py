@@ -416,6 +416,6 @@ class VMMonitor(App):
                 mem_total=meminfo.total / (1024**3)
             )
 
-if __name__ == "__main__":
+def main():
     app = VMMonitor()
     app.run()
