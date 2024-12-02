@@ -419,3 +419,6 @@ class VMMonitor(App):
 def main():
     app = VMMonitor()
     app.run()
+    
+if __name__ == "__main__":
+    main()
