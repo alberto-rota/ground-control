@@ -129,72 +129,85 @@ class CPUWidget(MetricWidget):
     """
     
     def compose(self) -> ComposeResult:
-        #yield Static(self.title, classes="metric-title")
         yield Static("", id="cpu-content", classes="cpu-metric-value")
 
-    def update_content(self, cpu_percentages):
+    def update_content(self, cpu_percentages, cpu_freqs, mem_percent):
         bar_width = self.size.width - 16
         
         lines = []
-        for idx, percent in enumerate(cpu_percentages):
+        for idx, (percent, freq) in enumerate(zip(cpu_percentages, cpu_freqs)):
             core_name = f"Core {idx}: "
             percentage = f"{percent:5.1f}%"
-            # Alternate between different shades of green for better distinction
+            frequency = f"{freq.current:5.0f}MHz"
             color = "green" if idx % 2 == 0 else "dark_green"
-            bar = self.create_gradient_bar(percent, bar_width,color="dodger_blue1")
-
-            line = f"{core_name:<4}{bar}{percentage:>7}"
+            bar = self.create_gradient_bar(percent, bar_width, color="dodger_blue1")
+            line = f"{core_name:<4}{bar}{percentage:>7} {frequency}"
             lines.append(line)
             
+        # RAM usage
+        bar_width = self.size.width - 16
+        bar = self.create_gradient_bar(mem_percent, bar_width, color="orange1")
+        ram_line = f"{'RAM':<4}{bar}{mem_percent:>7.1f}%"
+        lines.append(ram_line)
+        
         self.query_one("#cpu-content").update("\n".join(lines))
 
-class HistoryWidget(MetricWidget):
-    """Widget for metrics with history plot."""
-    
-    def compose(self) -> ComposeResult:
-        yield Static("", id="current-value", classes="metric-value")
-        yield Static("", id="history-plot", classes="metric-plot")
-
-    def update_content(self, value: float, suffix: str = "%", y_min=0, y_max=100, label="RAM:"):
-        self.history.append(value)
-        label = self.title
-        bar_width = self.size.width - 10
-        valuet = f"{value:.1f}% "
-        bar = self.create_gradient_bar(value, bar_width,color=self.color)
-        self.query_one("#current-value").update(f"{label:<4}{bar}{valuet:>7}")
-        self.query_one("#history-plot").update(self.get_plot(y_min, y_max))
-
 class DiskIOWidget(MetricWidget):
-    """Widget for disk I/O with dual plots."""
+    """Widget for disk I/O with dual plots and disk usage bar."""
     def __init__(self, title: str, history_size: int = 120):
         super().__init__(title, "magenta", history_size)
         self.read_history = deque(maxlen=history_size)
         self.write_history = deque(maxlen=history_size)
         self.max_io = 100
+        self.disk_total = 0
+        self.disk_used = 0
+        self.first = True
 
     def compose(self) -> ComposeResult:
         yield Static("", id="current-value", classes="metric-value")
         yield Static("", id="history-plot", classes="metric-plot")
+        yield Static("", id="disk-usage", classes="metric-value")
 
-    def create_center_bar(self, read_speed: float, write_speed: float, total_width: int = 40) -> str:
-        half_width = total_width // 2-3
+    def create_center_bar(self, read_speed: float, write_speed: float, total_width: int) -> str:
+        half_width = total_width // 2
         read_percent = min((read_speed / self.max_io) * 100, 100)
         write_percent = min((write_speed / self.max_io) * 100, 100)
         
         read_blocks = int((half_width * read_percent) / 100)
         write_blocks = int((half_width * write_percent) / 100)
         
-        left_bar = f"{'─' * (half_width - read_blocks)}[cyan]{'█' * read_blocks}[/]"
-        right_bar = f"[magenta]{'█' * write_blocks}[/]{'─' * (half_width - write_blocks)}"
+        left_bar = f"{'─' * (half_width - read_blocks)}[magenta]{''}{'█' * (read_blocks-1)}[/]" if read_blocks >= 1 else f"{'─' * half_width}"
+        right_bar = f"[cyan]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
         
-        return f"DISK "+f"{read_speed:6.1f} MB/s {left_bar}│{right_bar} {write_speed:6.1f} MB/s"
+        return f"DISK {read_speed:6.1f} MB/s {left_bar}│{right_bar} {write_speed:6.1f} MB/s"
+
+    def create_usage_bar(self, total_width: int = 40) -> str:
+        if self.disk_total == 0:
+            return "No disk usage data..."
+        
+        usage_percent = (self.disk_used / self.disk_total) * 100
+        available = self.disk_total - self.disk_used
+
+        # Calculate bar width, leaving space for text
+        usable_width = total_width - 2
+        used_blocks = int((usable_width * usage_percent) / 100)
+        free_blocks = usable_width - used_blocks
+
+        # Create the bar with matching colors (cyan for used, magenta for available)
+        usage_bar = f"[magenta]{'█' * used_blocks}[/][green]{'█' * free_blocks}[/]"
+
+        # Format sizes in GB with one decimal place
+        used_gb = self.disk_used / (1024 ** 3)
+        available_gb = available / (1024 ** 3)
+
+        return f"USED {used_gb:6.1f}GB [{usage_bar}] {available_gb:6.1f}GB FREE"
 
     def get_dual_plot(self) -> str:
         if not self.read_history:
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width+1)
+        plt.plot_size(height=self.plot_height-1, width=self.plot_width+1)
         plt.theme("pro")
         plt.plot(list(self.read_history), marker="braille", label="Read")
         plt.plot(list(self.write_history), marker="braille", label="Write")
@@ -202,11 +215,73 @@ class DiskIOWidget(MetricWidget):
         plt.xfrequency(0)
         return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[magenta]").replace("[green]","[cyan]")
 
-    def update_content(self, read_speed: float, write_speed: float):
+    def update_content(self, read_speed: float, write_speed: float, disk_used: int = None, disk_total: int = None):
+        if self.first:
+            self.first = False
+            return
         self.read_history.append(read_speed)
         self.write_history.append(write_speed)
+        # Update disk usage if provided
+        if disk_used is not None and disk_total is not None:
+            self.disk_used = disk_used
+            self.disk_total = disk_total
+
+        total_width = self.size.width - len("DISK ") - len(f"{read_speed:6.1f} MB/s ") - len(f"{write_speed:6.1f} MB/s") - 2
         self.query_one("#current-value").update(
-            self.create_center_bar(read_speed, write_speed)
+            self.create_center_bar(read_speed, write_speed, total_width=total_width)
+        )
+        self.query_one("#history-plot").update(self.get_dual_plot())
+        self.query_one("#disk-usage").update(self.create_usage_bar())
+
+class NetworkIOWidget(MetricWidget):
+    """Widget for network I/O with dual plots."""
+    def __init__(self, title: str, history_size: int = 120):
+        super().__init__(title, "blue", history_size)
+        self.download_history = deque(maxlen=history_size)
+        self.upload_history = deque(maxlen=history_size)
+        self.max_net = 100  # Adjust as per expected max network speed
+        self.first = True
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="current-value", classes="metric-value")
+        yield Static("", id="history-plot", classes="metric-plot")
+
+    def create_center_bar(self, download_speed: float, upload_speed: float, total_width: int) -> str:
+        half_width = total_width // 2
+        download_percent = min((download_speed / self.max_net) * 100, 100)
+        upload_percent = min((upload_speed / self.max_net) * 100, 100)
+        
+        download_blocks = int((half_width * download_percent) / 100)
+        upload_blocks = int((half_width * upload_percent) / 100)
+        
+        left_bar = f"{'─' * (half_width - download_blocks)}[blue]{''}{'█' * (download_blocks-1)}[/]" if download_blocks >= 1 else f"{'─' * half_width}"
+        right_bar = f"[green]{'█' * (upload_blocks-1)}{''}[/]{'─' * (half_width - upload_blocks)}" if upload_blocks >=1 else f"{'─' * half_width}"
+        
+        return f"NET  {download_speed:6.1f} MB/s {left_bar}│{right_bar} {upload_speed:6.1f} MB/s"
+
+    def get_dual_plot(self) -> str:
+        if not self.download_history:
+            return "No data yet..."
+
+        plt.clear_figure()
+        plt.plot_size(height=self.plot_height, width=self.plot_width+1)
+        plt.theme("pro")
+        plt.plot(list(self.download_history), marker="braille", label="Download")
+        plt.plot(list(self.upload_history), marker="braille", label="Upload")
+        plt.yfrequency(3)
+        plt.xfrequency(0)
+        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[blue]").replace("[green]","[green]")
+
+    def update_content(self, download_speed: float, upload_speed: float):
+        if self.first:
+            self.first = False
+            return
+        self.download_history.append(download_speed)
+        self.upload_history.append(upload_speed)
+        
+        total_width = self.size.width - len("NET  ") - len(f"{download_speed:6.1f} MB/s ") - len(f"{upload_speed:6.1f} MB/s") - 2
+        self.query_one("#current-value").update(
+            self.create_center_bar(download_speed, upload_speed, total_width=total_width)
         )
         self.query_one("#history-plot").update(self.get_dual_plot())
 
@@ -218,7 +293,6 @@ class GPUWidget(MetricWidget):
         self.mem_history = deque(maxlen=history_size)
 
     def compose(self) -> ComposeResult:
-        # yield Static("GPU Stats", classes="metric-title")
         yield Static("", id="gpu-util-value", classes="metric-value")
         yield Static("", id="gpu-util-plot", classes="metric-plot")
         yield Static("", id="gpu-mem-value", classes="metric-value")
@@ -228,22 +302,21 @@ class GPUWidget(MetricWidget):
         self.util_history.append(gpu_util)
         mem_percent = (mem_used / mem_total) * 100
         self.mem_history.append(mem_percent)
-        mem_used = f"{mem_used / 1024:.1f}GB "  # Convert to GB
-        gpu_utilt = f"{gpu_util:.1f}% "
+        mem_used_str = f"{mem_used:.1f}GB"  # Convert to GB
+        gpu_util_str = f"{gpu_util:.1f}%"
         # Update utilization with yellow theme
         bar_width = self.size.width - 10
         bar = self.create_gradient_bar(gpu_util, bar_width, color="green")
-        self.query_one("#gpu-util-value").update(f"{'GUTL':<4}{bar}{gpu_utilt:>7}% ")
+        self.query_one("#gpu-util-value").update(f"{'GUTL':<4}{bar}{gpu_util_str:>7}")
         self.query_one("#gpu-util-plot").update(self.get_plot(
             data=self.util_history, 
             height=self.plot_height // 2-1,
             color="green"
         ))
 
-        # Update memory with orange theme
-        bar_width = self.size.width - 10
+        # Update memory with cyan theme
         bar = self.create_gradient_bar(mem_percent, bar_width, color="cyan")
-        self.query_one("#gpu-mem-value").update(f"{'GMEM':<4}{bar}{mem_used:>7}")
+        self.query_one("#gpu-mem-value").update(f"{'GMEM':<4}{bar}{mem_used_str:>7}")
         self.query_one("#gpu-mem-plot").update(self.get_plot(
             data=self.mem_history, 
             height=self.plot_height // 2,
@@ -263,7 +336,7 @@ class GPUWidget(MetricWidget):
         plt.xfrequency(0)
         return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]",f"[{color}]")
 
-class VMMonitor(App):
+class GroundControl(App):
     """Main system monitor application with dynamic layout."""
     
     # Define layout breakpoints
@@ -300,8 +373,10 @@ class VMMonitor(App):
         super().__init__()
         self.prev_read_bytes = 0
         self.prev_write_bytes = 0
+        self.prev_net_bytes_recv = 0
+        self.prev_net_bytes_sent = 0
         self.prev_time = time.time()
-        self.current_layout = "horizontal"
+        self.current_layout = "vertical"
         self.auto_layout = True
 
     def get_layout_class(self, width: int, height: int) -> str:
@@ -319,8 +394,8 @@ class VMMonitor(App):
         yield Header()
         with Grid():
             yield CPUWidget("CPU Cores")
-            yield HistoryWidget("RAM",color="yellow")
             yield DiskIOWidget("Disk")
+            yield NetworkIOWidget("Network")
             if NVML_AVAILABLE:
                 yield GPUWidget("GPU")
             else:
@@ -357,6 +432,10 @@ class VMMonitor(App):
 
     async def on_mount(self) -> None:
         """Initialize the app and start update intervals."""
+        self.prev_net_bytes_recv = psutil.net_io_counters().bytes_recv
+        self.prev_net_bytes_sent = psutil.net_io_counters().bytes_sent
+        self.prev_read_bytes = psutil.disk_io_counters().read_bytes
+        self.prev_write_bytes = psutil.disk_io_counters().write_bytes
         self.set_interval(1.0, self.update_metrics)
         self.update_layout()
 
@@ -381,26 +460,44 @@ class VMMonitor(App):
         # CPU Update
         cpu_widget = self.query_one(CPUWidget)
         cpu_percentages = psutil.cpu_percent(percpu=True)
-        cpu_widget.update_content(cpu_percentages)
-
-        # RAM Update
-        ram_widget = self.query_one("HistoryWidget")
-        mem = psutil.virtual_memory()
-        ram_widget.update_content(mem.percent)
+        cpu_freqs = psutil.cpu_freq(percpu=True)
+        mem_percent = psutil.virtual_memory().percent
+        cpu_widget.update_content(cpu_percentages, cpu_freqs, mem_percent)
 
         # Disk I/O Update
         current_time = time.time()
         io_counters = psutil.disk_io_counters()
+        net_io_counters = psutil.net_io_counters()
+        disk_usage = psutil.disk_usage('/')  # Gets usage for root partition
+    
         time_delta = current_time - self.prev_time
+        if time_delta == 0:
+            time_delta = 1e-6  # Avoid division by zero
         
         read_speed = (io_counters.read_bytes - self.prev_read_bytes) / (1024**2) / time_delta
         write_speed = (io_counters.write_bytes - self.prev_write_bytes) / (1024**2) / time_delta
-        
+
+        download_speed = (net_io_counters.bytes_recv - self.prev_net_bytes_recv) / (1024 ** 2) / time_delta
+        upload_speed = (net_io_counters.bytes_sent - self.prev_net_bytes_sent) / (1024 ** 2) / time_delta
+
         disk_widget = self.query_one(DiskIOWidget)
-        disk_widget.update_content(read_speed, write_speed)
+        disk_widget.update_content(
+            read_speed, 
+            write_speed,
+            disk_used=disk_usage.used,
+            disk_total=disk_usage.total
+        )
+
+        network_widget = self.query_one(NetworkIOWidget)
+        network_widget.update_content(
+            download_speed,
+            upload_speed
+        )
 
         self.prev_read_bytes = io_counters.read_bytes
         self.prev_write_bytes = io_counters.write_bytes
+        self.prev_net_bytes_recv = net_io_counters.bytes_recv
+        self.prev_net_bytes_sent = net_io_counters.bytes_sent
         self.prev_time = current_time
 
         # GPU Update if available
@@ -417,7 +514,7 @@ class VMMonitor(App):
             )
 
 def main():
-    app = VMMonitor()
+    app = GroundControl()
     app.run()
     
 if __name__ == "__main__":
