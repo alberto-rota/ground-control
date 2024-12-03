@@ -141,13 +141,13 @@ class CPUWidget(MetricWidget):
             frequency = f"{freq.current:5.0f}MHz"
             color = "green" if idx % 2 == 0 else "dark_green"
             bar = self.create_gradient_bar(percent, bar_width, color="dodger_blue1")
-            line = f"{core_name:<4}{bar}{percentage:>7} {frequency}"
+            line = f"{core_name:<4}{bar}{percentage:>7}"
             lines.append(line)
             
         # RAM usage
         bar_width = self.size.width - 16
         bar = self.create_gradient_bar(mem_percent, bar_width, color="orange1")
-        ram_line = f"{'RAM':<4}{bar}{mem_percent:>7.1f}%"
+        ram_line = f"{'RAM   : ':<4}{bar}{mem_percent:>7.1f}%"
         lines.append(ram_line)
         
         self.query_one("#cpu-content").update("\n".join(lines))
@@ -189,7 +189,7 @@ class DiskIOWidget(MetricWidget):
         available = self.disk_total - self.disk_used
 
         # Calculate bar width, leaving space for text
-        usable_width = total_width - 2
+        usable_width = total_width - 16
         used_blocks = int((usable_width * usage_percent) / 100)
         free_blocks = usable_width - used_blocks
 
@@ -200,7 +200,7 @@ class DiskIOWidget(MetricWidget):
         used_gb = self.disk_used / (1024 ** 3)
         available_gb = available / (1024 ** 3)
 
-        return f"USED {used_gb:6.1f}GB [{usage_bar}] {available_gb:6.1f}GB FREE"
+        return f"USED {used_gb:5.1f}GB {usage_bar} {available_gb:5.1f}GB FREE"
 
     def get_dual_plot(self) -> str:
         if not self.read_history:
