@@ -2,12 +2,12 @@ from setuptools import setup, find_packages
 
 setup(
     name="ground-control-tui",
-    version="0.1.1",
+    version="0.1.2",
     packages=find_packages(),
     install_requires=[],  # Add dependencies listed in requirements.txt
     entry_points={
         "console_scripts": [
-            "groundcontrol = ground_control_tui.monitor:main",  # Change main to your entry function
+            "groundcontrol = ground_control.main:main",  # Change main to your entry function
         ],
     },
     description="A Python Textual app for monitoring VMs in the terminal",
