@@ -3,11 +3,11 @@ from textual.containers import Grid
 from textual.widgets import Header, Static
 from textual.widgets import Footer, Header
 
-from widgets.cpu import CPUWidget
-from widgets.disk import DiskIOWidget
-from widgets.network import NetworkIOWidget
-from widgets.gpu import GPUWidget
-from utils.system_metrics import SystemMetrics, NVML_AVAILABLE
+from ground_control.widgets.cpu import CPUWidget
+from ground_control.widgets.disk import DiskIOWidget
+from ground_control.widgets.network import NetworkIOWidget
+from ground_control.widgets.gpu import GPUWidget
+from ground_control.utils.system_metrics import SystemMetrics, NVML_AVAILABLE
 
 class GroundControl(App):
     """Main system monitor application with dynamic layout."""

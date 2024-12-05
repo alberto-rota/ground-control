@@ -1,9 +1,9 @@
 from collections import deque
 from textual.app import ComposeResult
 from textual.widgets import Static
-from .base import MetricWidget
+from ground_control.base import MetricWidget
 import plotext as plt
-from utils.formatting import ansi2rich
+from ground_control.utils.formatting import ansi2rich
 
 class NetworkIOWidget(MetricWidget):
     """Widget for network I/O with dual plots."""
