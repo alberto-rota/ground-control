@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ground-control-tui",
-    version="0.1.3",
+    version="0.1.4",
     packages=find_packages(),
     install_requires=[],  # Add dependencies listed in requirements.txt
     entry_points={
