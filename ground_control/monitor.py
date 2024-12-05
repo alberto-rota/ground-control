@@ -95,7 +95,7 @@ class MetricWidget(Static):
         if value < 20:
             return f"[{self.color if color is None else color}]{'█' * filled}[/]{'─' * empty}"
         
-        # For higher values, create a gradient from base color to bright_red
+        # For higher values, create a gradient from .base color to bright_red
         light_section = filled // 2
         dark_section = filled - light_section
         
