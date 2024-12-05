@@ -1,6 +1,6 @@
 from textual.app import ComposeResult
 from textual.widgets import Static
-from ground_control.base import MetricWidget
+from base import MetricWidget
 import plotext as plt
 from ground_control.utils.formatting import ansi2rich
 

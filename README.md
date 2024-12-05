@@ -6,7 +6,7 @@
 
 A modern, responsive Terminal User Interface (TUI) for real-time system monitoring, built with [Textual](https://textual.textualize.io/).
 
-![Ground Control Demo](https://raw.githubusercontent.com/alberto-rota/ground-control/main/docs/demo.gif)
+![Ground Control Demo](assets/gc.png)
 
 ## Features
 
