@@ -7,8 +7,8 @@ from utils.formatting import ansi2rich
 
 class DiskIOWidget(MetricWidget):
     """Widget for disk I/O with dual plots and disk usage bar."""
-    def __init__(self, title: str, history_size: int = 120):
-        super().__init__(title, "magenta", history_size)
+    def __init__(self, title: str, id:str = None, history_size: int = 120):
+        super().__init__(title=title, color="magenta", history_size=history_size, id=id)
         self.read_history = deque(maxlen=history_size)
         self.write_history = deque(maxlen=history_size)
         self.max_io = 100
@@ -45,7 +45,7 @@ class DiskIOWidget(MetricWidget):
         used_blocks = int((usable_width * usage_percent) / 100)
         free_blocks = usable_width - used_blocks
 
-        usage_bar = f"[magenta]{'█' * used_blocks}[/][green]{'█' * free_blocks}[/]"
+        usage_bar = f"[magenta]{'█' * used_blocks}[/][cyan]{'█' * free_blocks}[/]"
 
         used_gb = self.disk_used / (1024 ** 3)
         available_gb = available / (1024 ** 3)
@@ -57,12 +57,39 @@ class DiskIOWidget(MetricWidget):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height-1, width=self.plot_width+1)
+        plt.plot_size(height=self.plot_height-2, width=self.plot_width+1)
         plt.theme("pro")
-        plt.plot(list(self.read_history), marker="braille", label="Read")
+        
+        # Create negative values for download operations
+        negative_downloads = [-x for x in self.read_history]
+        
+        # Find the maximum value between uploads and downloads to set symmetric y-axis limits
+        max_value = max(
+            max(self.write_history, default=0),
+            max(negative_downloads, key=abs, default=0)
+        )
+        
+        # Add some padding to the max value
+        y_limit = max_value * 1.1
+        
+        # Set y-axis limits symmetrically around zero
+        # plt.ylim(-y_limit, y_limit)
+        
+        # Plot upload values above zero (positive)
         plt.plot(list(self.write_history), marker="braille", label="Write")
-        plt.yfrequency(3)
+        
+        # Plot download values below zero (negative)
+        plt.plot(negative_downloads, marker="braille", label="Read")
+        
+        # Add a zero line
+        plt.hline(0.0)
+        
+        plt.yfrequency(2)  # Increased to show more y-axis labels
         plt.xfrequency(0)
+        # plt.title(len(self.read_history))
+        # Customize y-axis labels to show absolute values
+        # plt.ylabels([f"{abs(x):.0f}" for x in plt.yticks(return_values=True)])
+        
         return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[magenta]").replace("[green]","[cyan]")
 
     def update_content(self, read_speed: float, write_speed: float, disk_used: int = None, disk_total: int = None):

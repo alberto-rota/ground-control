@@ -1,6 +1,8 @@
 from textual.app import App, ComposeResult
 from textual.containers import Grid
 from textual.widgets import Header, Static
+from textual.widgets import Footer, Header
+
 from widgets.cpu import CPUWidget
 from widgets.disk import DiskIOWidget
 from widgets.network import NetworkIOWidget
@@ -32,6 +34,7 @@ class GroundControl(App):
     """
     
     BINDINGS = [
+        ("q", "action_quit", "quit"),
         ("h", "set_horizontal", "Horizontal Layout"),
         ("v", "set_vertical", "Vertical Layout"),
         ("g", "set_grid", "Grid Layout"),
@@ -65,6 +68,7 @@ class GroundControl(App):
                 yield GPUWidget("GPU")
             else:
                 yield Static("GPU Not Available")
+        yield Footer()
 
     def action_set_horizontal(self) -> None:
         """Switch to horizontal layout."""
@@ -155,3 +159,12 @@ class GroundControl(App):
                     gpu_metrics['mem_used'],
                     gpu_metrics['mem_total']
                 )
+
+    def action_quit(self) -> None:
+        """Quit the application."""
+        self.quit()
+        
+    def action_set_horizontal(self) -> None:
+        """Switch to horizontal layout."""
+        self.auto_layout = False
+        self.set_layout("horizontal")

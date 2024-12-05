@@ -4,7 +4,8 @@ def ansi2rich(text: str) -> str:
     """Replace ANSI color sequences with Rich markup."""
     color_map = {
         '12': 'blue',
-        '10': 'green'
+        '10': 'green',
+        '7': 'bold',
     }
     
     for ansi_code, rich_color in color_map.items():

@@ -7,8 +7,8 @@ from utils.formatting import ansi2rich
 
 class NetworkIOWidget(MetricWidget):
     """Widget for network I/O with dual plots."""
-    def __init__(self, title: str, history_size: int = 120):
-        super().__init__(title, "blue", history_size)
+    def __init__(self, title: str, id:str = None, color:str = "blue",  history_size: int = 120):
+        super().__init__(title=title, color="blue", history_size=history_size, id=id)
         self.download_history = deque(maxlen=history_size)
         self.upload_history = deque(maxlen=history_size)
         self.max_net = 100
@@ -38,10 +38,37 @@ class NetworkIOWidget(MetricWidget):
         plt.clear_figure()
         plt.plot_size(height=self.plot_height, width=self.plot_width+1)
         plt.theme("pro")
-        plt.plot(list(self.download_history), marker="braille", label="Download")
+        
+        # Create negative values for download operations
+        negative_downloads = [-x for x in self.download_history]
+        
+        # Find the maximum value between uploads and downloads to set symmetric y-axis limits
+        max_value = max(
+            max(self.upload_history, default=0),
+            max(negative_downloads, key=abs, default=0)
+        )
+        
+        # Add some padding to the max value
+        y_limit = max_value * 1.1
+        
+        # Set y-axis limits symmetrically around zero
+        plt.ylim(-y_limit, y_limit)
+        
+        # Plot upload values above zero (positive)
         plt.plot(list(self.upload_history), marker="braille", label="Upload")
-        plt.yfrequency(3)
+        
+        # Plot download values below zero (negative)
+        plt.plot(negative_downloads, marker="braille", label="Download")
+        
+        # Add a zero line
+        plt.hline(0.0)
+        
+        plt.yfrequency(5)  # Increased to show more y-axis labels
         plt.xfrequency(0)
+        
+        # Customize y-axis labels to show absolute values
+        # plt.ylabels([f"{abs(x):.0f}" for x in plt.yticks(return_values=True)])
+        
         return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[blue]").replace("[green]","[green]")
 
     def update_content(self, download_speed: float, upload_speed: float):

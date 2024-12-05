@@ -32,8 +32,8 @@ class MetricWidget(Static):
     }
     """
 
-    def __init__(self, title: str, color: str = "blue", history_size: int = 120):
-        super().__init__()
+    def __init__(self, title: str, id: str, color: str = "blue", history_size: int = 120):
+        super().__init__(id=id)
         self.title = title
         self.color = color
         self.history = deque(maxlen=history_size)
