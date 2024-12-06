@@ -4,7 +4,13 @@ setup(
     name="ground-control-tui",
     version="0.1.7",
     packages=find_packages(),
-    install_requires=[],  # Add dependencies listed in requirements.txt
+    install_requires=[
+        "nvidia_ml_py==12.535.161",
+        "plotext==5.3.2",
+        "psutil==6.0.0",
+        "setuptools==75.1.0",
+        "textual==0.89.1",
+    ],  
     entry_points={
         "console_scripts": [
             "groundcontrol = ground_control.main:main",  # Change main to your entry function
