@@ -3,11 +3,11 @@ from textual.containers import Grid
 from textual.widgets import Header, Static
 from textual.widgets import Footer, Header
 
-from ground_control.widgets.cpu import CPUWidget
-from ground_control.widgets.disk import DiskIOWidget
-from ground_control.widgets.network import NetworkIOWidget
-from ground_control.widgets.gpu import GPUWidget
-from ground_control.utils.system_metrics import SystemMetrics, NVML_AVAILABLE
+from widgets.cpu import CPUWidget
+from widgets.disk import DiskIOWidget
+from widgets.network import NetworkIOWidget
+from widgets.gpu import GPUWidget
+from utils.system_metrics import SystemMetrics, NVML_AVAILABLE
 
 class GroundControl(App):
     """Main system monitor application with dynamic layout."""
@@ -124,15 +124,17 @@ class GroundControl(App):
         """Update all system metrics."""
         # CPU Update
         cpu_metrics = self.system_metrics.get_cpu_metrics()
+        disk_metrics = self.system_metrics.get_disk_metrics()
         cpu_widget = self.query_one(CPUWidget)
         cpu_widget.update_content(
             cpu_metrics['cpu_percentages'],
             cpu_metrics['cpu_freqs'],
-            cpu_metrics['mem_percent']
+            cpu_metrics['mem_percent'],
+            disk_metrics['disk_used'],
+            disk_metrics['disk_total']
         )
 
         # Disk I/O Update
-        disk_metrics = self.system_metrics.get_disk_metrics()
         disk_widget = self.query_one(DiskIOWidget)
         disk_widget.update_content(
             disk_metrics['read_speed'],
@@ -162,7 +164,7 @@ class GroundControl(App):
 
     def action_quit(self) -> None:
         """Quit the application."""
-        self.quit()
+        self.exit()
         
     def action_set_horizontal(self) -> None:
         """Switch to horizontal layout."""

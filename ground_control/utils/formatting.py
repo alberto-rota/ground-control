@@ -12,3 +12,21 @@ def ansi2rich(text: str) -> str:
         pattern = fr'\x1b\[38;5;{ansi_code}m(.*?)\x1b\[0m'
         text = re.sub(pattern, fr'[{rich_color}]\1[/]', text)
     return text
+
+def align(input_str, max_length, alignment):
+    if alignment == "left":
+        # Trim the string from the right side if it exceeds the max_length
+        input_str = input_str[:max_length]
+        return input_str.ljust(max_length)
+    elif alignment == "right":
+        # Trim the string from the left side if it exceeds the max_length
+        input_str = input_str[-max_length:]
+        return input_str.rjust(max_length)
+    elif alignment == "center":
+        # For center alignment, take characters from the middle if trimming is needed
+        if len(input_str) > max_length:
+            start = (len(input_str) - max_length) // 2
+            input_str = input_str[start : start + max_length]
+        return input_str.center(max_length)
+    else:
+        raise ValueError("Alignment must be 'left', 'right', or 'center'.")

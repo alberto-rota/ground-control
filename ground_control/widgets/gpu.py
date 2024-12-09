@@ -3,7 +3,7 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-from ground_control.utils.formatting import ansi2rich
+from utils.formatting import ansi2rich, align
 
 class GPUWidget(MetricWidget):
     """Widget for GPU metrics with dual plots."""
@@ -25,17 +25,17 @@ class GPUWidget(MetricWidget):
         mem_used_str = f"{mem_used:.1f}GB"
         gpu_util_str = f"{gpu_util:.1f}%"
 
-        bar_width = self.size.width - 10
+        bar_width = self.size.width - 11
         bar = self.create_gradient_bar(gpu_util, bar_width, color="green")
-        self.query_one("#gpu-util-value").update(f"{'GUTL':<4}{bar}{gpu_util_str:>7}")
+        self.query_one("#gpu-util-value").update(f"{'GUTL':<4}{bar}{align(gpu_util_str, 7, 'right')}")
         self.query_one("#gpu-util-plot").update(self.get_plot(
             data=self.util_history, 
-            height=self.plot_height // 2-1,
+            height=self.plot_height // 2,
             color="green"
         ))
 
         bar = self.create_gradient_bar(mem_percent, bar_width, color="cyan")
-        self.query_one("#gpu-mem-value").update(f"{'GMEM':<4}{bar}{mem_used_str:>7}")
+        self.query_one("#gpu-mem-value").update(f"{'GMEM':<4}{bar}{align(mem_used_str, 7, 'right')}")
         self.query_one("#gpu-mem-plot").update(self.get_plot(
             data=self.mem_history, 
             height=self.plot_height // 2,

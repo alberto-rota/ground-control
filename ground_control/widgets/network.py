@@ -3,7 +3,7 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-from ground_control.utils.formatting import ansi2rich
+from utils.formatting import ansi2rich, align
 
 class NetworkIOWidget(MetricWidget):
     """Widget for network I/O with dual plots."""
@@ -18,18 +18,21 @@ class NetworkIOWidget(MetricWidget):
         yield Static("", id="current-value", classes="metric-value")
         yield Static("", id="history-plot", classes="metric-plot")
 
-    def create_center_bar(self, download_speed: float, upload_speed: float, total_width: int) -> str:
-        half_width = total_width // 2
-        download_percent = min((download_speed / self.max_net) * 100, 100)
-        upload_percent = min((upload_speed / self.max_net) * 100, 100)
+    def create_center_bar(self, read_speed: float, write_speed: float, total_width: int) -> str:
+        read_speed_withunits = align(f"{read_speed:.1f} MB/s", 12, "right")
+        write_speed_withunits = align(f"{write_speed:.1f} MB/s", 12, "left")
+        aval_width = total_width #s- len(read_speed_withunits) - len(write_speed_withunits) - 2
+        half_width = aval_width // 2
+        read_percent = min((read_speed / self.max_net) * 100, 100)
+        write_percent = min((write_speed / self.max_net) * 100, 100)
         
-        download_blocks = int((half_width * download_percent) / 100)
-        upload_blocks = int((half_width * upload_percent) / 100)
+        read_blocks = int((half_width * read_percent) / 100)
+        write_blocks = int((half_width * write_percent) / 100)
         
-        left_bar = f"{'─' * (half_width - download_blocks)}[blue]{''}{'█' * (download_blocks-1)}[/]" if download_blocks >= 1 else f"{'─' * half_width}"
-        right_bar = f"[green]{'█' * (upload_blocks-1)}{''}[/]{'─' * (half_width - upload_blocks)}" if upload_blocks >=1 else f"{'─' * half_width}"
+        left_bar = f"{'─' * (half_width - read_blocks)}[green]{''}{'█' * (read_blocks-1)}[/]" if read_blocks >= 1 else f"{'─' * half_width}"
+        right_bar = f"[cyan]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
         
-        return f"NET  {download_speed:6.1f} MB/s {left_bar}│{right_bar} {upload_speed:6.1f} MB/s"
+        return f"NET  {read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
 
     def get_dual_plot(self) -> str:
         if not self.download_history:
@@ -40,7 +43,8 @@ class NetworkIOWidget(MetricWidget):
         plt.theme("pro")
         
         # Create negative values for download operations
-        negative_downloads = [-x for x in self.download_history]
+        negative_downloads = [-x+0.1 for x in self.download_history]
+        positive_downloads = [-x-0.1 for x in self.download_history]
         
         # Find the maximum value between uploads and downloads to set symmetric y-axis limits
         max_value = max(
@@ -55,7 +59,7 @@ class NetworkIOWidget(MetricWidget):
         plt.ylim(-y_limit, y_limit)
         
         # Plot upload values above zero (positive)
-        plt.plot(list(self.upload_history), marker="braille", label="Upload")
+        plt.plot(positive_downloads, marker="braille", label="Upload")
         
         # Plot download values below zero (negative)
         plt.plot(negative_downloads, marker="braille", label="Download")

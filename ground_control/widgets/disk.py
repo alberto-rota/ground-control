@@ -3,7 +3,7 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-from ground_control.utils.formatting import ansi2rich
+from utils.formatting import ansi2rich, align
 
 class DiskIOWidget(MetricWidget):
     """Widget for disk I/O with dual plots and disk usage bar."""
@@ -19,20 +19,23 @@ class DiskIOWidget(MetricWidget):
     def compose(self) -> ComposeResult:
         yield Static("", id="current-value", classes="metric-value")
         yield Static("", id="history-plot", classes="metric-plot")
-        yield Static("", id="disk-usage", classes="metric-value")
+        # yield Static("", id="disk-usage", classes="metric-value")
 
     def create_center_bar(self, read_speed: float, write_speed: float, total_width: int) -> str:
-        half_width = total_width // 2
+        read_speed_withunits = align(f"{read_speed:.1f} MB/s", 12, "right")
+        write_speed_withunits = align(f"{write_speed:.1f} MB/s", 12, "left")
+        aval_width = total_width #s- len(read_speed_withunits) - len(write_speed_withunits) - 2
+        half_width = aval_width // 2
         read_percent = min((read_speed / self.max_io) * 100, 100)
         write_percent = min((write_speed / self.max_io) * 100, 100)
         
         read_blocks = int((half_width * read_percent) / 100)
         write_blocks = int((half_width * write_percent) / 100)
         
-        left_bar = f"{'─' * (half_width - read_blocks)}[magenta]{''}{'█' * (read_blocks-1)}[/]" if read_blocks >= 1 else f"{'─' * half_width}"
-        right_bar = f"[cyan]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
+        left_bar = f"{'─' * (half_width - read_blocks)}[magenta]{''}{'█' * (read_blocks-1)}[/]" if read_blocks >= 1 else f"{'─' * half_width}"
+        right_bar = f"[cyan]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
         
-        return f"DISK {read_speed:6.1f} MB/s {left_bar}│{right_bar} {write_speed:6.1f} MB/s"
+        return f"DSK  {read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
 
     def create_usage_bar(self, total_width: int = 40) -> str:
         if self.disk_total == 0:
@@ -57,40 +60,41 @@ class DiskIOWidget(MetricWidget):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height-2, width=self.plot_width+1)
+        plt.plot_size(height=self.plot_height, width=self.plot_width+1)
         plt.theme("pro")
         
         # Create negative values for download operations
-        negative_downloads = [-x for x in self.read_history]
+        positive_downloads = [x+0.1 for x in self.read_history]
+        negative_downloads = [-x-0.1 for x in self.write_history]
         
         # Find the maximum value between uploads and downloads to set symmetric y-axis limits
-        max_value = max(
-            max(self.write_history, default=0),
-            max(negative_downloads, key=abs, default=0)
-        )
+        max_value = int(max(
+            max(positive_downloads, default=0),
+            max(self.read_history, default=0)
+        ))
         
         # Add some padding to the max value
-        y_limit = max_value * 1.1
+        y_limit = max_value *1.1
         
         # Set y-axis limits symmetrically around zero
-        # plt.ylim(-y_limit, y_limit)
+        plt.ylim(-y_limit, y_limit)
         
         # Plot upload values above zero (positive)
-        plt.plot(list(self.write_history), marker="braille", label="Write")
+        plt.plot(positive_downloads, marker="braille", label="Read")
         
         # Plot download values below zero (negative)
-        plt.plot(negative_downloads, marker="braille", label="Read")
+        plt.plot(negative_downloads, marker="braille", label="Write")
         
         # Add a zero line
         plt.hline(0.0)
         
-        plt.yfrequency(2)  # Increased to show more y-axis labels
+        plt.yfrequency(5)  # Increased to show more y-axis labels
         plt.xfrequency(0)
-        # plt.title(len(self.read_history))
+        
         # Customize y-axis labels to show absolute values
         # plt.ylabels([f"{abs(x):.0f}" for x in plt.yticks(return_values=True)])
-        
-        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[magenta]").replace("[green]","[cyan]")
+        # return str(y_limit)
+        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[blue]").replace("[green]","[magenta]")
 
     def update_content(self, read_speed: float, write_speed: float, disk_used: int = None, disk_total: int = None):
         if self.first:
@@ -108,4 +112,4 @@ class DiskIOWidget(MetricWidget):
             self.create_center_bar(read_speed, write_speed, total_width=total_width)
         )
         self.query_one("#history-plot").update(self.get_dual_plot())
-        self.query_one("#disk-usage").update(self.create_usage_bar())
+        # self.query_one("#disk-usage").update(self.create_usage_bar())
