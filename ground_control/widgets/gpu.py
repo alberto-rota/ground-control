@@ -3,7 +3,7 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-from utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align
 
 class GPUWidget(MetricWidget):
     """Widget for GPU metrics with dual plots."""

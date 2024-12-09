@@ -1,4 +1,4 @@
-from app import GroundControl
+from .app import GroundControl
 
 def main():
     appl = GroundControl()

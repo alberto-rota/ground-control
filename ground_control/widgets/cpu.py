@@ -2,7 +2,7 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-from ground_control.utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align
 
 class CPUWidget(MetricWidget):
     """CPU usage display widget."""

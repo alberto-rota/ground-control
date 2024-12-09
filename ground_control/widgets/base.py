@@ -2,7 +2,7 @@ from collections import deque
 from textual.widgets import Static
 from textual.message import Message
 import plotext as plt
-from ground_control.utils.formatting import ansi2rich
+from ..utils.formatting import ansi2rich
 
 class MetricWidget(Static):
     """Base widget for system metrics with plot."""

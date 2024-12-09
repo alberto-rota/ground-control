@@ -3,7 +3,7 @@ from textual.app import ComposeResult
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-from utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align
 
 class DiskIOWidget(MetricWidget):
     """Widget for disk I/O with dual plots and disk usage bar."""

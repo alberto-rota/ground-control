@@ -3,11 +3,11 @@ from textual.containers import Grid
 from textual.widgets import Header, Static
 from textual.widgets import Footer, Header
 
-from widgets.cpu import CPUWidget
-from widgets.disk import DiskIOWidget
-from widgets.network import NetworkIOWidget
-from widgets.gpu import GPUWidget
-from utils.system_metrics import SystemMetrics, NVML_AVAILABLE
+from .widgets.cpu import CPUWidget
+from .widgets.disk import DiskIOWidget
+from .widgets.network import NetworkIOWidget
+from .widgets.gpu import GPUWidget
+from .utils.system_metrics import SystemMetrics, NVML_AVAILABLE
 
 class GroundControl(App):
     """Main system monitor application with dynamic layout."""
@@ -34,7 +34,7 @@ class GroundControl(App):
     """
     
     BINDINGS = [
-        ("q", "action_quit", "quit"),
+        ("q", "action_quit", "Quit"),
         ("h", "set_horizontal", "Horizontal Layout"),
         ("v", "set_vertical", "Vertical Layout"),
         ("g", "set_grid", "Grid Layout"),
@@ -162,7 +162,7 @@ class GroundControl(App):
                     gpu_metrics['mem_total']
                 )
 
-    def action_quit(self) -> None:
+    def action_quit(self, ) -> None:
         """Quit the application."""
         self.exit()
         
