@@ -30,7 +30,7 @@ class NetworkIOWidget(MetricWidget):
         write_blocks = int((half_width * write_percent) / 100)
         
         left_bar = f"{'─' * (half_width - read_blocks)}[green]{''}{'█' * (read_blocks-1)}[/]" if read_blocks >= 1 else f"{'─' * half_width}"
-        right_bar = f"[cyan]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
+        right_bar = f"[dark_orange]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
         
         return f"NET  {read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
 
@@ -39,12 +39,12 @@ class NetworkIOWidget(MetricWidget):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width+1)
+        plt.plot_size(height=self.plot_height, width=self.plot_width-1)
         plt.theme("pro")
         
         # Create negative values for download operations
-        negative_downloads = [-x+0.1 for x in self.download_history]
-        positive_downloads = [-x-0.1 for x in self.download_history]
+        negative_downloads = [-x-0.1 for x in self.download_history]
+        positive_downloads = [x+0.1 for x in self.upload_history]
         
         # Find the maximum value between uploads and downloads to set symmetric y-axis limits
         max_value = max(
@@ -72,8 +72,7 @@ class NetworkIOWidget(MetricWidget):
         
         # Customize y-axis labels to show absolute values
         # plt.ylabels([f"{abs(x):.0f}" for x in plt.yticks(return_values=True)])
-        
-        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[blue]").replace("[green]","[green]")
+        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]","[dark_orange]").replace("[green]","[green]")
 
     def update_content(self, download_speed: float, upload_speed: float):
         if self.first:

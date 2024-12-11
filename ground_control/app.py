@@ -1,7 +1,8 @@
 from textual.app import App, ComposeResult
-from textual.containers import Grid
-from textual.widgets import Header, Static
+from textual.containers import Grid, VerticalScroll
+from textual.widgets import Header, Static, Collapsible
 from textual.widgets import Footer, Header
+
 
 from .widgets.cpu import CPUWidget
 from .widgets.disk import DiskIOWidget
@@ -61,7 +62,8 @@ class GroundControl(App):
         """Create the initial layout."""
         yield Header()
         with Grid():
-            yield CPUWidget("CPU Cores")
+            with VerticalScroll():
+                yield CPUWidget("CPU Cores")
             yield DiskIOWidget("Disk")
             yield NetworkIOWidget("Network")
             if NVML_AVAILABLE:

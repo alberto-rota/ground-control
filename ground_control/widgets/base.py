@@ -3,7 +3,8 @@ from textual.widgets import Static
 from textual.message import Message
 import plotext as plt
 from ..utils.formatting import ansi2rich
-
+from textual.scroll_view import ScrollView
+from textual.geometry import Size
 class MetricWidget(Static):
     """Base widget for system metrics with plot."""
     DEFAULT_CSS = """
@@ -44,6 +45,7 @@ class MetricWidget(Static):
         """Handle resize events to update plot dimensions."""
         self.plot_width = event.size.width - 3
         self.plot_height = event.size.height - 3
+        self.virtual_size = Size(event.size.height/4,event.size.width)
         self.refresh()
 
     def get_plot(self, y_min=0, y_max=100) -> str:
@@ -51,7 +53,7 @@ class MetricWidget(Static):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width+1)
+        plt.plot_size(height=self.plot_height, width=self.plot_width)
         plt.theme("pro")
         plt.plot(list(self.history), marker="braille")
         plt.ylim(y_min, y_max)

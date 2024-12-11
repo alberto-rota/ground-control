@@ -44,7 +44,7 @@ class DiskIOWidget(MetricWidget):
         usage_percent = (self.disk_used / self.disk_total) * 100
         available = self.disk_total - self.disk_used
 
-        usable_width = total_width - 16
+        usable_width = total_width - 17
         used_blocks = int((usable_width * usage_percent) / 100)
         free_blocks = usable_width - used_blocks
 
@@ -60,12 +60,12 @@ class DiskIOWidget(MetricWidget):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width+1)
+        plt.plot_size(height=self.plot_height, width=self.plot_width-1)
         plt.theme("pro")
         
         # Create negative values for download operations
-        positive_downloads = [x+0.1 for x in self.read_history]
-        negative_downloads = [-x-0.1 for x in self.write_history]
+        positive_downloads = [x+1 for x in self.read_history]
+        negative_downloads = [-x-1 for x in self.write_history]
         
         # Find the maximum value between uploads and downloads to set symmetric y-axis limits
         max_value = int(max(

@@ -1,5 +1,5 @@
 from textual.app import ComposeResult
-from textual.widgets import Static
+from textual.widgets import Static, Sparkline
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
@@ -28,6 +28,7 @@ class CPUWidget(MetricWidget):
         
     def compose(self) -> ComposeResult:
         yield Static("", id="cpu-content", classes="cpu-metric-value")
+        # yield Sparkline([0,0,0,0,0,0,0,0], id="cpu-content", classes="cpu-metric-value")
         
     def create_disk_usage_bar(self,disk_used: float, disk_total: float, total_width: int = 40) -> str:
         if disk_total == 0:
@@ -36,7 +37,7 @@ class CPUWidget(MetricWidget):
         usage_percent = (disk_used / disk_total) * 100
         available = disk_total - disk_used
 
-        usable_width = total_width
+        usable_width = total_width-2
         used_blocks = int((usable_width * usage_percent) / 100)
         free_blocks = usable_width - used_blocks
 
@@ -51,7 +52,7 @@ class CPUWidget(MetricWidget):
     def create_bar_chart(self, cpu_percentages, cpu_freqs, mem_percent, disk_used, disk_total, width, height):
         plt.clear_figure()
         plt.theme("pro")
-        plt.plot_size(width=width+4, height=len(cpu_percentages) + 2)
+        plt.plot_size(width=width+2, height=len(cpu_percentages) + 2)
         # plt.xticks([1, 25, 50, 75, 100],["0", "25", "50", "75", "100"])  # Show more x-axis labels
         plt.xfrequency(0)
         plt.xlim(5, 100)  # Set x-axis limits to 0-100%
@@ -71,7 +72,7 @@ class CPUWidget(MetricWidget):
         
         plt.clear_figure()
         plt.theme("pro")
-        plt.plot_size(width=width+4, height=1 + 3)
+        plt.plot_size(width=width+2, height=1 + 3)
         plt.xticks([1, 25, 50, 75, 100],["0", "25", "50", "75", "100"])  # Show more x-axis labels
         plt.xlim(5, 100)  # Set x-axis limits to 0-100%
         # Create labels for CPU cores and RAM
@@ -90,7 +91,7 @@ class CPUWidget(MetricWidget):
         
         # plt.clear_figure()
         # plt.theme("pro")
-        # plt.plot_size(width=width+4, height=1 + 3)
+        # plt.plot_size(width=width+2, height=1 + 3)
         # plt.xticks([1, 25, 50, 75, 100],["0", "25", "50", "75", "100"])  # Show more x-axis labels
         # plt.xlim(5, 100)  # Set x-axis limits to 0-100%
         # # Create labels for CPU cores and RAM
@@ -125,3 +126,5 @@ class CPUWidget(MetricWidget):
         )
         disk_chart = self.create_disk_usage_bar(disk_used, disk_total,width+2)
         self.query_one("#cpu-content").update(cpuram_chart+"\n"+disk_chart)
+        # self.query_one("#cpu-content").data = cpu_percentages
+        

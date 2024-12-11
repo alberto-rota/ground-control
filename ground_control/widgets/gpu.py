@@ -47,7 +47,7 @@ class GPUWidget(MetricWidget):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=height, width=self.plot_width+1)
+        plt.plot_size(height=height, width=self.plot_width-1)
         plt.theme("pro")
         plt.plot(list(data), marker="braille")
         plt.ylim(y_min, y_max)
