@@ -8,7 +8,7 @@ from .widgets.cpu import CPUWidget
 from .widgets.disk import DiskIOWidget
 from .widgets.network import NetworkIOWidget
 from .widgets.gpu import GPUWidget
-from .utils.system_metrics import SystemMetrics, NVML_AVAILABLE
+from .utils.system_metrics import SystemMetrics#, NVML_AVAILABLE
 
 class GroundControl(App):
     """Main system monitor application with dynamic layout."""
@@ -66,10 +66,10 @@ class GroundControl(App):
                 yield CPUWidget("CPU Cores")
             yield DiskIOWidget("Disk")
             yield NetworkIOWidget("Network")
-            if NVML_AVAILABLE:
-                yield GPUWidget("GPU")
-            else:
-                yield Static("GPU Not Available")
+            # if NVML_AVAILABLE:
+            yield GPUWidget("GPU")
+            # else:
+            #     yield Static("GPU Not Available")
         yield Footer()
 
     def action_set_horizontal(self) -> None:
@@ -154,15 +154,15 @@ class GroundControl(App):
         )
 
         # GPU Update if available
-        if NVML_AVAILABLE:
-            gpu_metrics = self.system_metrics.get_gpu_metrics()
-            if gpu_metrics:
-                gpu_widget = self.query_one(GPUWidget)
-                gpu_widget.update_content(
-                    gpu_metrics['gpu_util'],
-                    gpu_metrics['mem_used'],
-                    gpu_metrics['mem_total']
-                )
+        # if NVML_AVAILABLE:
+        gpu_metrics = self.system_metrics.get_gpu_metrics()
+        if gpu_metrics:
+            gpu_widget = self.query_one(GPUWidget)
+            gpu_widget.update_content(
+                gpu_metrics['gpu_util'],
+                gpu_metrics['mem_used'],
+                gpu_metrics['mem_total']
+            )
 
     def action_quit(self, ) -> None:
         """Quit the application."""

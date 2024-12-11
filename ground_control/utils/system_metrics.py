@@ -6,6 +6,7 @@ try:
     NVML_AVAILABLE = True
 except:
     NVML_AVAILABLE = False
+from nvitop import Device, NA
 
 class SystemMetrics:
     def __init__(self):
@@ -15,6 +16,7 @@ class SystemMetrics:
         self.prev_net_bytes_sent = 0
         self.prev_time = time.time()
         self._initialize_counters()
+        self.devices = Device.all()
 
     def _initialize_counters(self):
         io_counters = psutil.net_io_counters()
@@ -71,15 +73,15 @@ class SystemMetrics:
         }
 
     def get_gpu_metrics(self):
-        if not NVML_AVAILABLE:
-            return None
+        gpu_metrics = []
+        for device in self.devices:
+            with device.oneshot():
+                gpu_metrics.append({
+                    'gpu_util': device.gpu_utilization() if device.gpu_utilization() is not NA else -1,
+                    'mem_used': device.memory_used() / (1024**3) if device.memory_used() is not NA else -1,
+                    'mem_total': device.memory_total() / (1024**3) if device.memory_total() is not NA else -1,
+                    'temperature': device.temperature() if device.temperature() is not NA else -1,
+                    'fan_speed': device.fan_speed() if device.fan_speed() is not NA else -1,
+                })
             
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-        meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        
-        return {
-            'gpu_util': util.gpu,
-            'mem_used': meminfo.used / (1024**3),
-            'mem_total': meminfo.total / (1024**3)
-        }
+        return gpu_metrics[2]
