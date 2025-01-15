@@ -57,24 +57,25 @@ class DiskIOWidget(MetricWidget):
 
     def get_dual_plot(self) -> str:
         if not self.read_history:
-            return "No data yet..."
+            positive_downloads = [0,0,0,0,0,0,0,0,0,0]
+            negative_downloads = [0,0,0,0,0,0,0,0,0,0]
 
         plt.clear_figure()
         plt.plot_size(height=self.plot_height, width=self.plot_width-1)
         plt.theme("pro")
         
         # Create negative values for download operations
-        positive_downloads = [x+1 for x in self.read_history]
-        negative_downloads = [-x-1 for x in self.write_history]
+        positive_downloads = [x+0.1 for x in self.read_history]
+        negative_downloads = [-x-0.1 for x in self.write_history]
         
         # Find the maximum value between uploads and downloads to set symmetric y-axis limits
         max_value = int(max(
             max(positive_downloads, default=0),
             max(self.read_history, default=0)
         ))
-        
+        max_value = max(max_value, 1)
         # Add some padding to the max value
-        y_limit = max_value *1.1
+        y_limit = max_value 
         
         # Set y-axis limits symmetrically around zero
         plt.ylim(-y_limit, y_limit)
@@ -84,7 +85,7 @@ class DiskIOWidget(MetricWidget):
         
         # Plot download values below zero (negative)
         plt.plot(negative_downloads, marker="braille", label="Write")
-        
+
         # Add a zero line
         plt.hline(0.0)
         

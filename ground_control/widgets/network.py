@@ -53,7 +53,9 @@ class NetworkIOWidget(MetricWidget):
         )
         
         # Add some padding to the max value
-        y_limit = max_value * 1.1
+        y_limit = max_value
+        if y_limit < 10:
+            y_limit=10
         
         # Set y-axis limits symmetrically around zero
         plt.ylim(-y_limit, y_limit)

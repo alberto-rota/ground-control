@@ -2,16 +2,36 @@ import re
 
 def ansi2rich(text: str) -> str:
     """Replace ANSI color sequences with Rich markup."""
+    # Define a mapping of ANSI codes to Rich markup colors or styles
     color_map = {
         '12': 'blue',
         '10': 'green',
         '7': 'bold',
+        # Add more mappings as needed
     }
     
-    for ansi_code, rich_color in color_map.items():
-        pattern = fr'\x1b\[38;5;{ansi_code}m(.*?)\x1b\[0m'
-        text = re.sub(pattern, fr'[{rich_color}]\1[/]', text)
+    # Regular expression to match ANSI escape sequences (foreground 38;5;<code>)
+    ansi_pattern = re.compile(r'\x1b\[38;5;(\d+)m(.*?)\x1b\[0m')
+    
+    def replace_ansi_with_rich(match):
+        ansi_code = match.group(1)
+        text_content = match.group(2)
+        rich_color = color_map.get(ansi_code, None)
+        if rich_color:
+            return f"[{rich_color}]{text_content}[/]"
+        else:
+            # If the ANSI code is not in the map, return the text without formatting
+            return text_content
+    
+    # Apply the replacement
+    text = ansi_pattern.sub(replace_ansi_with_rich, text)
+    
+    # Clean up any remaining unsupported or stray ANSI sequences
+    # Matches all ANSI escape sequences
+    text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+    
     return text
+
 
 def align(input_str, max_length, alignment):
     if alignment == "left":

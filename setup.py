@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ground-control-tui",
-    version="0.1.8",
+    version="0.1.9",
     packages=find_packages(),
     install_requires=[
         "nvidia_ml_py==12.535.161",

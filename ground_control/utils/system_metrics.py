@@ -84,4 +84,4 @@ class SystemMetrics:
                     'fan_speed': device.fan_speed() if device.fan_speed() is not NA else -1,
                 })
             
-        return gpu_metrics[2]
+        return gpu_metrics[0]
