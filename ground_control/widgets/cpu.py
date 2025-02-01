@@ -24,7 +24,7 @@ class CPUWidget(MetricWidget):
     """
     def __init__(self, title: str, id: str = None):
         super().__init__(title=title,id=id)
-        self.title = title
+        self.title = "CPU"
         
     def compose(self) -> ComposeResult:
         yield Static("", id="cpu-content", classes="cpu-metric-value")

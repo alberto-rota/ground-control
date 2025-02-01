@@ -1,174 +1,210 @@
+import asyncio
 from textual.app import App, ComposeResult
-from textual.containers import Grid, VerticalScroll
-from textual.widgets import Header, Static, Collapsible
-from textual.widgets import Footer, Header
-
-
-from .widgets.cpu import CPUWidget
-from .widgets.disk import DiskIOWidget
-from .widgets.network import NetworkIOWidget
-from .widgets.gpu import GPUWidget
-from .utils.system_metrics import SystemMetrics#, NVML_AVAILABLE
+from textual.containers import Grid
+from textual.widgets import Header, Footer, SelectionList
+from textual.widgets.selection_list import Selection
+import math
+from textual import on
+from textual.events import Mount
+from ground_control.widgets.cpu import CPUWidget
+from ground_control.widgets.disk import DiskIOWidget
+from ground_control.widgets.network import NetworkIOWidget
+from ground_control.widgets.gpu import GPUWidget
+from ground_control.utils.system_metrics import SystemMetrics
 
 class GroundControl(App):
-    """Main system monitor application with dynamic layout."""
-    
-    HORIZONTAL_RATIO_THRESHOLD = 6
-    VERTICAL_RATIO_THRESHOLD = 1
-    
     CSS = """
     Grid {
-        grid-gutter: 0;
-        padding: 0;
-    }
-    Grid.default {
-        grid-size: 2 2;
-    }
-    
-    Grid.horizontal {
-        grid-size: 4 1;
-    }
-    
-    Grid.vertical {
-        grid-size: 1 4;
+        grid-size: 3 3;
     }
     """
-    
+
     BINDINGS = [
-        ("q", "action_quit", "Quit"),
+        ("q", "quit", "Quit"),
         ("h", "set_horizontal", "Horizontal Layout"),
         ("v", "set_vertical", "Vertical Layout"),
         ("g", "set_grid", "Grid Layout"),
         ("a", "toggle_auto", "Toggle Auto Layout"),
+        ("c", "configure", "Configure"),
     ]
 
     def __init__(self):
         super().__init__()
-        self.current_layout = "vertical"
-        self.auto_layout = True
+        self.current_layout = "horizontal"
+        self.auto_layout = False
         self.system_metrics = SystemMetrics()
+        self.gpu_widgets = []
+        self.grid = None
+        self.select = None
 
-    def get_layout_class(self, width: int, height: int) -> str:
-        """Determine the appropriate layout based on terminal dimensions."""
-        ratio = width / height if height > 0 else 0
-        if ratio >= self.HORIZONTAL_RATIO_THRESHOLD:
-            return "horizontal"
-        elif ratio <= self.VERTICAL_RATIO_THRESHOLD:
-            return "vertical"
-        else:
-            return "default"
+    def get_layout_columns(self, num_gpus: int) -> int:
+        base_columns = 3  # CPU, Disk, Network
+        return base_columns + num_gpus
 
     def compose(self) -> ComposeResult:
-        """Create the initial layout."""
         yield Header()
-        with Grid():
-            with VerticalScroll():
-                yield CPUWidget("CPU Cores")
-            yield DiskIOWidget("Disk")
-            yield NetworkIOWidget("Network")
-            # if NVML_AVAILABLE:
-            yield GPUWidget("GPU")
-            # else:
-            #     yield Static("GPU Not Available")
+        # Disable multiple selection to ensure only one is selected at a time.
+        self.select = SelectionList[str]()
+        yield self.select
+        self.grid = Grid(classes=self.current_layout)
+        yield self.grid
         yield Footer()
 
-    def action_set_horizontal(self) -> None:
-        """Switch to horizontal layout."""
-        self.auto_layout = False
-        self.set_layout("horizontal")
+    async def on_mount(self) -> None:
+        await self.setup_widgets()
+        self.set_interval(1.0, self.update_metrics)
 
-    def action_set_vertical(self) -> None:
-        """Switch to vertical layout."""
-        self.auto_layout = False
-        self.set_layout("vertical")
+    async def setup_widgets(self) -> None:
+        self.grid.remove_children()
+        gpu_metrics = self.system_metrics.get_gpu_metrics()
+        num_gpus = len(gpu_metrics)
+        grid_columns = self.get_layout_columns(num_gpus)
+        if self.current_layout == "horizontal":
+            self.grid.styles.grid_size_rows = 1
+            self.grid.styles.grid_size_columns = grid_columns
+        elif self.current_layout == "vertical":
+            self.grid.styles.grid_size_rows = grid_columns
+            self.grid.styles.grid_size_columns = 1
+        elif self.current_layout == "grid":
+            if grid_columns <= 12:
+                self.grid.styles.grid_size_rows = 2
+                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
+            else:
+                self.grid.styles.grid_size_rows = 3
+                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
 
-    def action_set_grid(self) -> None:
-        """Switch to grid layout."""
-        self.auto_layout = False
-        self.set_layout("default")
+        cpu_widget = CPUWidget("CPU Cores")
+        disk_widget = DiskIOWidget("Disk I/O")
+        network_widget = NetworkIOWidget("Network")
+        await self.grid.mount(cpu_widget)
+        await self.grid.mount(disk_widget)
+        await self.grid.mount(network_widget)
+
+        self.gpu_widgets = []
+        for idx in range(num_gpus):
+            gpu_widget = GPUWidget(f"GPU {idx}")
+            self.gpu_widgets.append(gpu_widget)
+            await self.grid.mount(gpu_widget)
+
+        self.update_selection_list()
+
+    def update_selection_list(self) -> None:
+        self.select.clear_options()
+        for widget in self.grid.children:
+            if hasattr(widget, "title"):
+                self.select.add_option(Selection(widget.title, widget.title, True))
+        # Select the first widget by default.
+        if self.select.children:
+            self.select.index = 0
+            self.toggle_widget_visibility(self.select.children[0].value)
+
+    # @on(Mount)
+    @on(SelectionList.SelectedChanged)
+    async def on_selection_list_selected(self) -> None:
+        # if event.selection:
+        self.toggle_widget_visibility(self.query_one(SelectionList).selected)
+
+    def toggle_widget_visibility(self, selected_title: str) -> None:
+        
+        # self.notify(f"{selected_title}")
+        for widget in self.grid.children:
+            if hasattr(widget, "title"):
+                # self.notify(f"Changes {widget.title}")
+                widget.styles.display = "block" if widget.title in selected_title else "none"
+
+    def update_metrics(self):
+        cpu_metrics = self.system_metrics.get_cpu_metrics()
+        disk_metrics = self.system_metrics.get_disk_metrics()
+        try:
+            cpu_widget = self.query_one(CPUWidget)
+            cpu_widget.update_content(
+                cpu_metrics['cpu_percentages'],
+                cpu_metrics['cpu_freqs'],
+                cpu_metrics['mem_percent'],
+                disk_metrics['disk_used'],
+                disk_metrics['disk_total']
+            )
+        except Exception as e:
+            print(f"Error updating CPUWidget: {e}")
+
+        try:
+            disk_widget = self.query_one(DiskIOWidget)
+            disk_widget.update_content(
+                disk_metrics['read_speed'],
+                disk_metrics['write_speed'],
+                disk_metrics['disk_used'],
+                disk_metrics['disk_total']
+            )
+        except Exception as e:
+            print(f"Error updating DiskIOWidget: {e}")
+
+        network_metrics = self.system_metrics.get_network_metrics()
+        try:
+            network_widget = self.query_one(NetworkIOWidget)
+            network_widget.update_content(
+                network_metrics['download_speed'],
+                network_metrics['upload_speed']
+            )
+        except Exception as e:
+            print(f"Error updating NetworkIOWidget: {e}")
+
+        gpu_metrics = self.system_metrics.get_gpu_metrics()
+        for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
+            try:
+                gpu_widget.update_content(
+                    gpu_metric['gpu_util'],
+                    gpu_metric['mem_used'],
+                    gpu_metric['mem_total']
+                )
+            except Exception as e:
+                print(f"Error updating {gpu_widget.title}: {e}")
 
     def action_toggle_auto(self) -> None:
-        """Toggle automatic layout adjustment."""
         self.auto_layout = not self.auto_layout
         if self.auto_layout:
             self.update_layout()
 
-    def set_layout(self, new_layout: str) -> None:
-        """Apply the specified layout."""
-        if new_layout != self.current_layout:
-            grid = self.query_one(Grid)
-            grid.remove_class(self.current_layout)
-            grid.add_class(new_layout)
-            self.current_layout = new_layout
+    def action_set_horizontal(self) -> None:
+        self.auto_layout = False
+        self.set_layout("horizontal")
 
-    async def on_mount(self) -> None:
-        """Initialize the app and start update intervals."""
-        self.set_interval(1.0, self.update_metrics)
-        self.update_layout()
+    def action_set_vertical(self) -> None:
+        self.auto_layout = False
+        self.set_layout("vertical")
+
+    def action_set_grid(self) -> None:
+        self.auto_layout = False
+        self.set_layout("grid")
+
+    def action_configure(self) -> None:
+        widgetslist = self.select
+        widgetslist.styles.display = "block" if widgetslist.styles.display == "none" else "none"
+
+    def action_quit(self) -> None:
+        self.exit()
 
     def on_resize(self) -> None:
-        """Handle terminal resize events."""
         if self.auto_layout:
             self.update_layout()
 
     def update_layout(self) -> None:
-        """Update the grid layout based on terminal dimensions."""
         if not self.is_mounted:
             return
-            
         if self.auto_layout:
             width = self.size.width
             height = self.size.height
-            new_layout = self.get_layout_class(width, height)
-            self.set_layout(new_layout)
+            ratio = width / height if height > 0 else 0
+            if ratio >= 3:
+                self.set_layout("horizontal")
+            elif ratio <= 0.33:
+                self.set_layout("vertical")
+            else:
+                self.set_layout("grid")
 
-    def update_metrics(self):
-        """Update all system metrics."""
-        # CPU Update
-        cpu_metrics = self.system_metrics.get_cpu_metrics()
-        disk_metrics = self.system_metrics.get_disk_metrics()
-        cpu_widget = self.query_one(CPUWidget)
-        cpu_widget.update_content(
-            cpu_metrics['cpu_percentages'],
-            cpu_metrics['cpu_freqs'],
-            cpu_metrics['mem_percent'],
-            disk_metrics['disk_used'],
-            disk_metrics['disk_total']
-        )
-
-        # Disk I/O Update
-        disk_widget = self.query_one(DiskIOWidget)
-        disk_widget.update_content(
-            disk_metrics['read_speed'],
-            disk_metrics['write_speed'],
-            disk_metrics['disk_used'],
-            disk_metrics['disk_total']
-        )
-
-        # Network I/O Update
-        network_metrics = self.system_metrics.get_network_metrics()
-        network_widget = self.query_one(NetworkIOWidget)
-        network_widget.update_content(
-            network_metrics['download_speed'],
-            network_metrics['upload_speed']
-        )
-
-        # GPU Update if available
-        # if NVML_AVAILABLE:
-        gpu_metrics = self.system_metrics.get_gpu_metrics()
-        if gpu_metrics:
-            gpu_widget = self.query_one(GPUWidget)
-            gpu_widget.update_content(
-                gpu_metrics['gpu_util'],
-                gpu_metrics['mem_used'],
-                gpu_metrics['mem_total']
-            )
-
-    def action_quit(self, ) -> None:
-        """Quit the application."""
-        self.exit()
-        
-    def action_set_horizontal(self) -> None:
-        """Switch to horizontal layout."""
-        self.auto_layout = False
-        self.set_layout("horizontal")
+    def set_layout(self, layout: str):
+        if layout != self.current_layout:
+            grid = self.query_one(Grid)
+            grid.remove_class(self.current_layout)
+            self.current_layout = layout
+            grid.add_class(layout)
+        asyncio.create_task(self.setup_widgets())

@@ -6,7 +6,9 @@ try:
     NVML_AVAILABLE = True
 except:
     NVML_AVAILABLE = False
-from nvitop import Device, NA
+from nvitop import Device, MigDevice,NA
+from typing import List, Union
+import nvitop  # Ensure nvitop is installed: pip install nvitop
 
 class SystemMetrics:
     def __init__(self):
@@ -16,7 +18,7 @@ class SystemMetrics:
         self.prev_net_bytes_sent = 0
         self.prev_time = time.time()
         self._initialize_counters()
-        self.devices = Device.all()
+        self.devices = self._get_all_gpu_devices() if NVML_AVAILABLE else []
 
     def _initialize_counters(self):
         io_counters = psutil.net_io_counters()
@@ -78,10 +80,43 @@ class SystemMetrics:
             with device.oneshot():
                 gpu_metrics.append({
                     'gpu_util': device.gpu_utilization() if device.gpu_utilization() is not NA else -1,
-                    'mem_used': device.memory_used() / (1024**3) if device.memory_used() is not NA else -1,
-                    'mem_total': device.memory_total() / (1024**3) if device.memory_total() is not NA else -1,
-                    'temperature': device.temperature() if device.temperature() is not NA else -1,
-                    'fan_speed': device.fan_speed() if device.fan_speed() is not NA else -1,
+                    'mem_used': device.memory_used() / (1000**3) if device.memory_used() is not NA else -1,
+                    'mem_total': device.memory_total() / (1000**3) if device.memory_total() is not NA else -1,
+                    # 'temperature': device.temperature() if device.temperature() is not NA else -1,
+                    # 'fan_speed': device.fan_speed() if device.fan_speed() is not NA else -1,
                 })
             
-        return gpu_metrics[0]
+        return gpu_metrics
+
+
+    def _get_all_gpu_devices(self) -> List[Union[nvitop.Device, nvitop.MigDevice]]:
+        """
+        Combine Physical Devices and MIG Devices into a single list.
+        If a PhysicalDevice has MIGs, include the MIGs instead of the PhysicalDevice.
+        If not, include the PhysicalDevice itself.
+    
+        Returns:
+            List of GPU devices (PhysicalDevice or MigDevice)
+        """
+        physical_devices = nvitop.Device.all()
+        mig_devices = nvitop.MigDevice.all()
+    
+        # Create a mapping from PhysicalDevice index to its MigDevices
+        mig_map = {}
+        for mig in mig_devices:
+            phys_idx, mig_idx = mig.index  # Assuming index is a tuple (physical_idx, mig_idx)
+            if phys_idx not in mig_map:
+                mig_map[phys_idx] = []
+            mig_map[phys_idx].append(mig)
+    
+        # Build the combined device list
+        combined_devices = []
+        for phys_dev in physical_devices:
+            if phys_dev.index in mig_map:
+                # If PhysicalDevice has MIGs, include all its MIGs
+                combined_devices.extend(mig_map[phys_dev.index])
+            else:
+                # If no MIGs, include the PhysicalDevice itself
+                combined_devices.append(phys_dev)
+    
+        return combined_devices
