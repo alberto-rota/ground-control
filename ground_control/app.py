@@ -38,8 +38,8 @@ class GroundControl(App):
         self.select = None
 
     def get_layout_columns(self, num_gpus: int) -> int:
-        base_columns = 3  # CPU, Disk, Network
-        return base_columns + num_gpus
+        self.notify(f"{self.select.selected}")
+        return len(self.select.selected)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -52,6 +52,8 @@ class GroundControl(App):
 
     async def on_mount(self) -> None:
         await self.setup_widgets()
+        self.update_selection_list()
+        
         self.set_interval(1.0, self.update_metrics)
 
     async def setup_widgets(self) -> None:
@@ -85,8 +87,8 @@ class GroundControl(App):
             gpu_widget = GPUWidget(f"GPU {idx}")
             self.gpu_widgets.append(gpu_widget)
             await self.grid.mount(gpu_widget)
-
-        self.update_selection_list()
+        self.toggle_widget_visibility(self.query_one(SelectionList).selected)
+        # self.update_selection_list()
 
     def update_selection_list(self) -> None:
         self.select.clear_options()

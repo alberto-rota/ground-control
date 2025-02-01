@@ -16,6 +16,7 @@ class DiskIOWidget(MetricWidget):
         self.disk_used = 0
         self.first = True
         self.title = "Disk I/O"
+        self.border_title = self.title
 
     def compose(self) -> ComposeResult:
         yield Static("", id="current-value", classes="metric-value")

@@ -7,6 +7,7 @@ from ..utils.formatting import ansi2rich, align
 
 class GPUWidget(MetricWidget):
     """Widget for GPU metrics with dual plots."""
+    
     def __init__(self, title: str, id:str = None, color: str = "blue", history_size: int = 120):
         super().__init__(title=title, color="yellow", history_size=history_size,id=id)
         self.util_history = deque(maxlen=history_size)
