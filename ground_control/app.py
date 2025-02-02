@@ -4,7 +4,7 @@ from textual.containers import Grid
 from textual.widgets import Header, Footer, SelectionList
 from textual.widgets.selection_list import Selection
 import math
-import os 
+import os
 import json
 from textual import on
 from textual.events import Mount
@@ -13,8 +13,14 @@ from ground_control.widgets.disk import DiskIOWidget
 from ground_control.widgets.network import NetworkIOWidget
 from ground_control.widgets.gpu import GPUWidget
 from ground_control.utils.system_metrics import SystemMetrics
+from platformdirs import user_config_dir  # Import for cross-platform config directory
 
-CONFIG_FILE = "/home/arota/ground-control/selection_config.json"
+# Set up the user-specific config file path
+CONFIG_DIR = user_config_dir("ground-control")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "selection_config.json")
+
+# Ensure the directory exists
+os.makedirs(CONFIG_DIR, exist_ok=True)
 
 class GroundControl(App):
     CSS = """
@@ -40,15 +46,14 @@ class GroundControl(App):
         self.gpu_widgets = []
         self.grid = None
         self.select = None
-        self.selected_widgets = self.load_selection()
-        # self.notify(self.select.selected)
-        self.current_layout = self.load_layout()
+        
+        self.json_exists = os.path.exists(CONFIG_FILE)
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r") as f:
-                    return json.load(f)["selected"]
+                    return json.load(f).get("selected", [])
             except json.JSONDecodeError:
                 return []
         return []
@@ -57,10 +62,10 @@ class GroundControl(App):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r") as f:   
-                    return json.load(f)["layout"]
+                    return json.load(f).get("layout", "grid")
             except json.JSONDecodeError:
-                return "horizontal"
-        # return "horizontal"
+                return "grid"
+        return "grid"
 
     def save_selection(self):
         try:
@@ -103,16 +108,21 @@ class GroundControl(App):
         yield Header()
         # Disable multiple selection to ensure only one is selected at a time.
         self.select = SelectionList[str]()
+        self.select.styles.display = "none"
         yield self.select
-        self.grid = Grid(classes=self.current_layout)
+        self.grid = Grid(classes="grid")
         yield self.grid
         yield Footer()
 
     async def on_mount(self) -> None:
+        self.current_layout = "grid"
         await self.setup_widgets()
-        self.create_selection_list()
-        # self.current_layout = self.load_layout()
+        if not self.json_exists:
+            self.create_json()
         self.set_layout(self.load_layout())
+        self.selected_widgets = self.load_selection()
+        
+        self.create_selection_list()
         self.set_interval(1.0, self.update_metrics)
 
     async def setup_widgets(self) -> None:
@@ -149,18 +159,26 @@ class GroundControl(App):
             await self.grid.mount(gpu_widget)
         self.toggle_widget_visibility(self.query_one(SelectionList).selected)
 
+    def create_json(self) -> None:
+        create_json_selections = []
+            
+        for widget in self.grid.children:
+            if hasattr(widget, "title"):
+                create_json_selections.append(widget.title)
+            default_config = {
+                "selected": create_json_selections,
+                "layout": "grid"
+            }
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(default_config, f, indent=4) 
+                
     def create_selection_list(self) -> None:
         self.select.clear_options()
         for widget in self.grid.children:
             if hasattr(widget, "title"):
                 selected = widget.title in self.selected_widgets
                 self.select.add_option(Selection(widget.title, widget.title, selected))
-        self.select.styles.display = "none"
-        
-        # Select the first widget by default.
-        # if self.select.children:
-        #     self.select.index = 0
-        # self.toggle_widget_visibility(self.select.children[0].value)
+
 
     # @on(Mount)
     @on(SelectionList.SelectedChanged)
