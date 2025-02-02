@@ -1,1 +1,1 @@
-["AMD EPYC 7452 32-Core Processor [64 cores]", "Disk I/O", "Network", "4 NVIDIA A100-PCIE-40GB"]
+{"selected": ["AMD EPYC 7452 32-Core Processor [64 cores]", "Disk I/O", "Network", "(0, 1) NVIDIA A100-PCIE-40GB MIG 3g.20gb", "(1, 1) NVIDIA A100-PCIE-40GB MIG 3g.20gb", "4 NVIDIA A100-PCIE-40GB"], "layout": "grid"}

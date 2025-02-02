@@ -34,26 +34,67 @@ class GroundControl(App):
 
     def __init__(self):
         super().__init__()
-        self.current_layout = "horizontal"
+        # self.set_layout(self.current_layout)
         self.auto_layout = False
         self.system_metrics = SystemMetrics()
         self.gpu_widgets = []
         self.grid = None
         self.select = None
         self.selected_widgets = self.load_selection()
+        # self.notify(self.select.selected)
+        self.current_layout = self.load_layout()
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r") as f:
-                    return json.load(f)
+                    return json.load(f)["selected"]
             except json.JSONDecodeError:
                 return []
         return []
+    
+    def load_layout(self):  
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:   
+                    return json.load(f)["layout"]
+            except json.JSONDecodeError:
+                return "horizontal"
+        # return "horizontal"
 
     def save_selection(self):
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(self.select.selected, f)
+        try:
+            # First read the existing data
+            with open(CONFIG_FILE, "r") as f:
+                config_data = json.load(f)
+        
+            # Update only the selected key
+            config_data["selected"] = self.select.selected
+        
+            # Write back the entire updated config
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config_data, f)
+        except FileNotFoundError:
+            # If file doesn't exist, create it with just the selected data
+            with open(CONFIG_FILE, "w") as f:
+                json.dump({"selected": self.select.selected}, f)
+    
+    def save_layout(self):
+        try:
+            # First read the existing data
+            with open(CONFIG_FILE, "r") as f:
+                config_data = json.load(f)
+        
+            # Update only the selected key
+            config_data["layout"] = self.current_layout
+        
+            # Write back the entire updated config
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config_data, f)
+        except FileNotFoundError:
+            # If file doesn't exist, create it with just the selected data
+            with open(CONFIG_FILE, "w") as f:
+                json.dump({"layout": self.current_layout}, f)
 
     def get_layout_columns(self, num_gpus: int) -> int:
         return len(self.select.selected)
@@ -69,8 +110,9 @@ class GroundControl(App):
 
     async def on_mount(self) -> None:
         await self.setup_widgets()
-        self.set_layout("grid")
         self.create_selection_list()
+        # self.current_layout = self.load_layout()
+        self.set_layout(self.load_layout())
         self.set_interval(1.0, self.update_metrics)
 
     async def setup_widgets(self) -> None:
@@ -231,3 +273,5 @@ class GroundControl(App):
             self.current_layout = layout
             grid.add_class(layout)
         asyncio.create_task(self.setup_widgets())
+        self.save_layout()
+        
