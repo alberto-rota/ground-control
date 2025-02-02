@@ -113,7 +113,7 @@ class SystemMetrics:
         for device in self.devices:
             with device.oneshot():
                 gpu_metrics.append({
-                    'gpu_name': f"{device.index} {device.name()}",
+                    'gpu_name': f"{list(device.index) if isinstance(device.index,tuple) else [device.index]} {device.name()}",
                     'gpu_util': device.gpu_utilization() if device.gpu_utilization() is not NA else -1,
                     'mem_used': device.memory_used() / (1000**3) if device.memory_used() is not NA else -1,
                     'mem_total': device.memory_total() / (1000**3) if device.memory_total() is not NA else -1,

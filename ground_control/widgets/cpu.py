@@ -78,13 +78,13 @@ class CPUWidget(MetricWidget):
             groups = [cpu_percentages[i:i+max_rows] for i in range(0, len(cpu_percentages), max_rows)]
             num_groups = len(groups)
             # Divide available width among the groups (with a minimum width).
-            group_width = max(10, width // num_groups - 1)
+            group_width = max(1, width // num_groups)
             group_charts = []
             for idx, group in enumerate(groups):
                 plt.clear_figure()
                 plt.theme("pro")
                 chart_height = len(group) + 2
-                plt.plot_size(width=group_width+2, height=chart_height)
+                plt.plot_size(width=group_width+1, height=chart_height)
                 plt.xfrequency(0)
                 plt.xlim(6, 100)
                 start_index = idx * max_rows
