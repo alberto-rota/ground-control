@@ -13,10 +13,12 @@ class NetworkIOWidget(MetricWidget):
         self.upload_history = deque(maxlen=history_size)
         self.max_net = 100
         self.first = True
+        self.title = title
+        self.border_title = title
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="current-value", classes="metric-value")
         yield Static("", id="history-plot", classes="metric-plot")
+        yield Static("", id="current-value", classes="metric-value")
 
     def create_center_bar(self, read_speed: float, write_speed: float, total_width: int) -> str:
         read_speed_withunits = align(f"{read_speed:.1f} MB/s", 12, "right")
@@ -32,14 +34,14 @@ class NetworkIOWidget(MetricWidget):
         left_bar = f"{'─' * (half_width - read_blocks)}[green]{''}{'█' * (read_blocks-1)}[/]" if read_blocks >= 1 else f"{'─' * half_width}"
         right_bar = f"[dark_orange]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}" if write_blocks >=1 else f"{'─' * half_width}"
         
-        return f"NET  {read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
+        return f"{read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
 
     def get_dual_plot(self) -> str:
         if not self.download_history:
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width-1)
+        plt.plot_size(height=self.plot_height, width=self.plot_width)
         plt.theme("pro")
         
         # Create negative values for download operations
@@ -56,6 +58,7 @@ class NetworkIOWidget(MetricWidget):
         y_limit = max_value
         if y_limit < 10:
             y_limit=10
+        self.max_net = y_limit
         
         # Set y-axis limits symmetrically around zero
         plt.ylim(-y_limit, y_limit)
@@ -83,7 +86,7 @@ class NetworkIOWidget(MetricWidget):
         self.download_history.append(download_speed)
         self.upload_history.append(upload_speed)
         
-        total_width = self.size.width - len("NET  ") - len(f"{download_speed:6.1f} MB/s ") - len(f"{upload_speed:6.1f} MB/s") - 2
+        total_width = self.size.width - len("") - len(f"{download_speed:6.1f} MB/s ") - len(f"{upload_speed:6.1f} MB/s") - 2
         self.query_one("#current-value").update(
             self.create_center_bar(download_speed, upload_speed, total_width=total_width)
         )

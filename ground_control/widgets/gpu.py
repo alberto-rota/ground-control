@@ -4,54 +4,75 @@ from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
-
+import numpy as np
 class GPUWidget(MetricWidget):
-    """Widget for GPU metrics with dual plots."""
-    
-    def __init__(self, title: str, id:str = None, color: str = "blue", history_size: int = 120):
-        super().__init__(title=title, color="yellow", history_size=history_size,id=id)
-        self.util_history = deque(maxlen=history_size)
-        self.mem_history = deque(maxlen=history_size)
+    """Widget for GPU monitoring with dual plots for GPU RAM and Usage and a bar below."""
+    def __init__(self, title: str, id: str = None, color: str = "green", history_size: int = 120):
+        super().__init__(title=title, color=color, history_size=history_size, id=id)
+        self.gpu_ram_history = deque(maxlen=history_size)
+        self.gpu_usage_history = deque(maxlen=history_size)
+        # self.max_val = 100  # initial max value; will update based on incoming data
+        self.first = True
+        self.title = title
+        self.border_title = title
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="gpu-util-value", classes="metric-value")
-        yield Static("", id="gpu-util-plot", classes="metric-plot")
-        yield Static("", id="gpu-mem-value", classes="metric-value")
-        yield Static("", id="gpu-mem-plot", classes="metric-plot")
+        yield Static("", id="history-plot", classes="metric-plot")
+        yield Static("", id="current-value", classes="metric-value")
 
-    def update_content(self, gpu_util: float, mem_used: float, mem_total: float):
-        self.util_history.append(gpu_util)
-        mem_percent = (mem_used / mem_total) * 100
-        self.mem_history.append(mem_percent)
-        mem_used_str = f"{mem_used:.1f}GB"
-        gpu_util_str = f"{gpu_util:.1f}%"
+    def create_center_bar(self, gpu_ram: float, gpu_usage: float, total_width: int) -> str:
+        gpu_ram_withunits = align(f"{gpu_ram:.1f} GB", 12, "right")
+        gpu_usage_withunits = align(f"{gpu_usage:.1f} %", 14, "left")
+        aval_width = total_width
+        half_width = aval_width // 2
+        # Compute the percentage relative to the current maximum value
+        gpu_ram_percent = min((gpu_ram / self.max_val) * 100, 100)
+        gpu_usage_percent = min((gpu_usage / self.max_val) * 100, 100)
+        
+        ram_blocks = int((half_width * gpu_ram_percent) / 100)
+        usage_blocks = int((half_width * gpu_usage_percent) / 100)
+        
+        left_bar = (f"{'─' * (half_width - ram_blocks)}[green]{''}{'█' * (ram_blocks-1)}[/]") if ram_blocks >= 1 else f"{'─' * half_width}"
+        right_bar = (f"[red]{'█' * (usage_blocks-3)}{''}[/]{'─' * (half_width - usage_blocks)}") if usage_blocks >= 1 else f"{'─' * half_width}"
+        
+        return f"{gpu_ram_withunits} {left_bar}│{right_bar} {gpu_usage_withunits}"
 
-        bar_width = self.size.width - 11
-        bar = self.create_gradient_bar(gpu_util, bar_width, color="green")
-        self.query_one("#gpu-util-value").update(f"{'GUTL':<4}{bar}{align(gpu_util_str, 7, 'right')}")
-        self.query_one("#gpu-util-plot").update(self.get_plot(
-            data=self.util_history, 
-            height=self.plot_height // 2,
-            color="green"
-        ))
-
-        bar = self.create_gradient_bar(mem_percent, bar_width, color="cyan")
-        self.query_one("#gpu-mem-value").update(f"{'GMEM':<4}{bar}{align(mem_used_str, 7, 'right')}")
-        self.query_one("#gpu-mem-plot").update(self.get_plot(
-            data=self.mem_history, 
-            height=self.plot_height // 2,
-            color="cyan"
-        ))
-
-    def get_plot(self, data: deque, height: int, color: str = None, y_min: float = 0, y_max: float = 100) -> str:
-        if not data:
+    def get_dual_plot(self) -> str:
+        if not self.gpu_ram_history:
             return "No data yet..."
-
+        
         plt.clear_figure()
-        plt.plot_size(height=height, width=self.plot_width-1)
+        plt.plot_size(height=self.plot_height, width=self.plot_width)
         plt.theme("pro")
-        plt.plot(list(data), marker="braille")
-        plt.ylim(y_min, y_max)
-        plt.yfrequency(3)
+        
+        # Plot GPU RAM as positive values and GPU Usage as negative
+        positive_series = [x + 0.1 for x in self.gpu_usage_history]
+        negative_series = [-100+(x/self.max_val)*100 for x in self.gpu_ram_history]
+        
+        # Determine symmetric y-axis limits based on incoming data
+        # max_value = 100
+        # y_limit = max_value if max_value >= 10 else 10
+        # # self.max_val = y_limit
+        plt.ylim(-100, 100)
+        
+        plt.plot(positive_series, marker="braille", label="Usage")
+        plt.plot(negative_series, marker="braille", label="RAM")
+        plt.hline(0.0)
+        plt.yfrequency(5)
         plt.xfrequency(0)
-        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]",f"[{color}]")
+        current_yticks = [-100,-50,0,50,100]
+        plt.yticks(current_yticks,[0,50,100,50,100])
+        return ansi2rich(plt.build()).replace("\x1b[0m", "").replace("[blue]", "[red]").replace("[green]", "[green]").replace("-"," ")
+
+    def update_content(self, gpu_name, gpu_usage, mem_used, mem_total):#gpu_ram: float, gpu_usage: float, mem_used: float = None, mem_total: float = None):
+        if self.first:
+            self.first = False
+            return
+        self.gpu_ram_history.append(mem_used)
+        self.gpu_usage_history.append(gpu_usage)
+        self.max_val = mem_total
+        total_width = self.size.width - len(f"{mem_used:6.1f} % ") - len(f"{gpu_usage:6.1f} %") - 2
+        self.query_one("#history-plot").update(self.get_dual_plot())
+        self.query_one("#current-value").update(
+            self.create_center_bar(mem_used, gpu_usage, total_width=total_width)
+        )

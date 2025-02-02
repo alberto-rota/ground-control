@@ -4,6 +4,8 @@ from textual.containers import Grid
 from textual.widgets import Header, Footer, SelectionList
 from textual.widgets.selection_list import Selection
 import math
+import os 
+import json
 from textual import on
 from textual.events import Mount
 from ground_control.widgets.cpu import CPUWidget
@@ -12,11 +14,13 @@ from ground_control.widgets.network import NetworkIOWidget
 from ground_control.widgets.gpu import GPUWidget
 from ground_control.utils.system_metrics import SystemMetrics
 
+CONFIG_FILE = "/home/arota/ground-control/selection_config.json"
+
 class GroundControl(App):
     CSS = """
     Grid {
         grid-size: 3 3;
-    }
+    }   
     """
 
     BINDINGS = [
@@ -36,9 +40,22 @@ class GroundControl(App):
         self.gpu_widgets = []
         self.grid = None
         self.select = None
+        self.selected_widgets = self.load_selection()
+
+    def load_selection(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    def save_selection(self):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(self.select.selected, f)
 
     def get_layout_columns(self, num_gpus: int) -> int:
-        self.notify(f"{self.select.selected}")
         return len(self.select.selected)
 
     def compose(self) -> ComposeResult:
@@ -52,13 +69,14 @@ class GroundControl(App):
 
     async def on_mount(self) -> None:
         await self.setup_widgets()
-        self.update_selection_list()
-        
+        self.set_layout("grid")
+        self.create_selection_list()
         self.set_interval(1.0, self.update_metrics)
 
     async def setup_widgets(self) -> None:
         self.grid.remove_children()
         gpu_metrics = self.system_metrics.get_gpu_metrics()
+        cpu_metrics = self.system_metrics.get_cpu_metrics()
         num_gpus = len(gpu_metrics)
         grid_columns = self.get_layout_columns(num_gpus)
         if self.current_layout == "horizontal":
@@ -75,7 +93,7 @@ class GroundControl(App):
                 self.grid.styles.grid_size_rows = 3
                 self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
 
-        cpu_widget = CPUWidget("CPU Cores")
+        cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
         disk_widget = DiskIOWidget("Disk I/O")
         network_widget = NetworkIOWidget("Network")
         await self.grid.mount(cpu_widget)
@@ -83,35 +101,36 @@ class GroundControl(App):
         await self.grid.mount(network_widget)
 
         self.gpu_widgets = []
-        for idx in range(num_gpus):
-            gpu_widget = GPUWidget(f"GPU {idx}")
+        for gpu in self.system_metrics.get_gpu_metrics():
+            gpu_widget = GPUWidget(gpu["gpu_name"])
             self.gpu_widgets.append(gpu_widget)
             await self.grid.mount(gpu_widget)
         self.toggle_widget_visibility(self.query_one(SelectionList).selected)
-        # self.update_selection_list()
 
-    def update_selection_list(self) -> None:
+    def create_selection_list(self) -> None:
         self.select.clear_options()
         for widget in self.grid.children:
             if hasattr(widget, "title"):
-                self.select.add_option(Selection(widget.title, widget.title, True))
+                selected = widget.title in self.selected_widgets
+                self.select.add_option(Selection(widget.title, widget.title, selected))
+        self.select.styles.display = "none"
+        
         # Select the first widget by default.
-        if self.select.children:
-            self.select.index = 0
-            self.toggle_widget_visibility(self.select.children[0].value)
+        # if self.select.children:
+        #     self.select.index = 0
+        # self.toggle_widget_visibility(self.select.children[0].value)
 
     # @on(Mount)
     @on(SelectionList.SelectedChanged)
     async def on_selection_list_selected(self) -> None:
         # if event.selection:
         self.toggle_widget_visibility(self.query_one(SelectionList).selected)
+        self.save_selection()
 
     def toggle_widget_visibility(self, selected_title: str) -> None:
         
-        # self.notify(f"{selected_title}")
         for widget in self.grid.children:
             if hasattr(widget, "title"):
-                # self.notify(f"Changes {widget.title}")
                 widget.styles.display = "block" if widget.title in selected_title else "none"
 
     def update_metrics(self):
@@ -131,6 +150,7 @@ class GroundControl(App):
 
         try:
             disk_widget = self.query_one(DiskIOWidget)
+            # self.notify(disk_widget.create_usage_bar())
             disk_widget.update_content(
                 disk_metrics['read_speed'],
                 disk_metrics['write_speed'],
@@ -152,14 +172,15 @@ class GroundControl(App):
 
         gpu_metrics = self.system_metrics.get_gpu_metrics()
         for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
-            try:
-                gpu_widget.update_content(
-                    gpu_metric['gpu_util'],
-                    gpu_metric['mem_used'],
-                    gpu_metric['mem_total']
-                )
-            except Exception as e:
-                print(f"Error updating {gpu_widget.title}: {e}")
+            # try:
+            gpu_widget.update_content(
+                gpu_metric["gpu_name"],
+                gpu_metric['gpu_util'],
+                gpu_metric['mem_used'],
+                gpu_metric['mem_total']
+            )
+        # except Exception as e:
+            #     print(f"Error updating {gpu_widget.title}: {e}")
 
     def action_toggle_auto(self) -> None:
         self.auto_layout = not self.auto_layout

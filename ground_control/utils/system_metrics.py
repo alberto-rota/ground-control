@@ -1,4 +1,5 @@
 import psutil
+import platform
 import time
 try:
     import pynvml
@@ -9,6 +10,10 @@ except:
 from nvitop import Device, MigDevice,NA
 from typing import List, Union
 import nvitop  # Ensure nvitop is installed: pip install nvitop
+
+import platform
+import subprocess
+import multiprocessing
 
 class SystemMetrics:
     def __init__(self):
@@ -27,12 +32,41 @@ class SystemMetrics:
         disk_io = psutil.disk_io_counters()
         self.prev_read_bytes = disk_io.read_bytes
         self.prev_write_bytes = disk_io.write_bytes
+        
+    def get_cpu_info(self):
+        system = platform.system()
+        cpu_models = []
+        core_count = multiprocessing.cpu_count()  # Get number of cores
+
+        if system == "Windows":
+            cpu_models = [platform.processor()]
+
+        elif system == "Linux":
+            try:
+                output = subprocess.check_output("cat /proc/cpuinfo | grep 'model name'", shell=True).decode().strip()
+                cpu_models = list(set(line.split(":")[1].strip() for line in output.split("\n")))
+            except:
+                cpu_models = ["CPU"]
+
+        elif system == "Darwin":
+            try:
+                model = subprocess.check_output("sysctl -n machdep.cpu.brand_string", shell=True).decode().strip()
+                cpu_models = [model]
+            except:
+                cpu_models = ["CPU"]
+
+        else:
+            cpu_models = ["CPU"]
+
+        return f"{', '.join(cpu_models)} [{core_count} cores]"
+
 
     def get_cpu_metrics(self):
         return {
             'cpu_percentages': psutil.cpu_percent(percpu=True),
             'cpu_freqs': psutil.cpu_freq(percpu=True),
-            'mem_percent': psutil.virtual_memory().percent
+            'mem_percent': psutil.virtual_memory().percent,
+            'cpu_name': self.get_cpu_info(),
         }
 
     def get_disk_metrics(self):
@@ -79,6 +113,7 @@ class SystemMetrics:
         for device in self.devices:
             with device.oneshot():
                 gpu_metrics.append({
+                    'gpu_name': f"{device.index} {device.name()}",
                     'gpu_util': device.gpu_utilization() if device.gpu_utilization() is not NA else -1,
                     'mem_used': device.memory_used() / (1000**3) if device.memory_used() is not NA else -1,
                     'mem_total': device.memory_total() / (1000**3) if device.memory_total() is not NA else -1,
