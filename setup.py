@@ -2,14 +2,19 @@ from setuptools import setup, find_packages
 
 setup(
     name="ground-control-tui",
-    version="0.1.9",
+    version="0.1.10",
     packages=find_packages(),
     install_requires=[
-        "nvidia_ml_py==12.535.161",
+        "numpy==2.2.2",
+        "nvidia_ml_py==12.570.86",
+        "nvitop==1.4.2",
+        "platformdirs==4.3.6",
         "plotext==5.3.2",
-        "psutil==6.0.0",
+        "psutil==6.1.1",
+        "pynvml==11.5.3",
         "setuptools==75.1.0",
-        "textual==0.89.1",
+        "textual==1.0.0",
+
     ],  
     entry_points={
         "console_scripts": [
