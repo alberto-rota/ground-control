@@ -133,6 +133,9 @@ Modify this file in your default text editor with
 groundcontrol config
 ```
 
+## ⛔ Current Known Limitations/Bugs
+- GPU usage is monitored only for CUDA-enabled hardware. Ground Control detects MiG devices but in some cases it cannot detect their utilization. You'll see *Usage UNAV* in the GPU Widget if this is the case
+- Disk I/O is currently reported from `psutil.disk_io_counters()` and `psutil.disk_usage('/')`. This measurements do not account for partitions / unmounted disks / more-than-disk configuration. See [Issue #4](https://github.com/alberto-rota/ground-control/issues/4)
 
 
 ## 👨‍💻 Contributing
