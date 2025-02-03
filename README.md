@@ -9,6 +9,9 @@
 **Ground Control** is a sleek, real-time terminal-based system monitor built with [Textual](https://textual.textualize.io/), [Plotext](https://github.com/piccolomo/plotext) and the [nvitop API](https://terminaltrove.com/nvitop/). It provides a powerful, aesthetic, customizable interface for tracking CPU, memory, disk, network, and GPU usage — all in a visually appealing and responsive TUI.
 
 **Ground Control** works optimally with [TMUX](https://github.com/tmux/tmux/wiki), install it [here](https://github.com/tmux/tmux/wiki/Installing)!
+
+We tested **Ground Control** with the *Windows Terminal* app, *Tabby* and the *VSCode integrated terminal*. Monospaced fonts are preferred.  
+
 ## 🌟 Features
 
 ### 📊 Real-Time System Monitoring
