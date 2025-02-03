@@ -87,9 +87,10 @@ class DiskIOWidget(MetricWidget):
             min(self.write_history, default=0)
         ))
         max_value = max(max_value, 1)
-        min_value = min(min_value, -1)
+        min_value = abs(min(min_value, -1))
         
-        plt.ylim(min_value, max_value)
+        limit = max(max_value, min_value)
+        plt.ylim(limit, limit)
         plt.plot(positive_downloads, marker="braille", label="Read")
         plt.plot(negative_downloads, marker="braille", label="Write")
         plt.hline(0.0)
