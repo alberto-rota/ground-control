@@ -80,8 +80,8 @@ class CPUWidget(MetricWidget):
             plt.plot_size(width=width+1, height=4)
             plt.xticks([1, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
             plt.xlim(5, 100)
-            plt.bar(["RAM"], [mem_percent], orientation="h", color="orange1")
-            rambars = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", "").replace("blue","orange1")
+            plt.bar(["RAM"], [mem_percent], orientation="h")
+            rambars = ansi2rich(plt.build()).replace("blue","orange1")
             return cpubars+ rambars
         else:
             # Group CPU cores to avoid an overly tall chart.

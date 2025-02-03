@@ -27,6 +27,9 @@ class GroundControl(App):
     Grid {
         grid-size: 3 3;
     }   
+    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget {
+        border: round rgb(19, 161, 14);
+    }
     """
 
     BINDINGS = [
@@ -46,17 +49,18 @@ class GroundControl(App):
         self.gpu_widgets = []
         self.grid = None
         self.select = None
-        
+        self.selectionoptions = []
         self.json_exists = os.path.exists(CONFIG_FILE)
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r") as f:
-                    return json.load(f).get("selected", [])
+                    return json.load(f).get("selected", {})
             except json.JSONDecodeError:
-                return []
-        return []
+                return {}
+        return {}
+
     
     def load_layout(self):  
         if os.path.exists(CONFIG_FILE):
@@ -69,20 +73,17 @@ class GroundControl(App):
 
     def save_selection(self):
         try:
-            # First read the existing data
             with open(CONFIG_FILE, "r") as f:
                 config_data = json.load(f)
-        
-            # Update only the selected key
-            config_data["selected"] = self.select.selected
-        
-            # Write back the entire updated config
+            # selected_dict = {option.value: option.selected for option in self.selected_widgets}
+            config_data["selected"] = self.selected_widgets
             with open(CONFIG_FILE, "w") as f:
-                json.dump(config_data, f)
+                json.dump(config_data, f, indent=4)
         except FileNotFoundError:
-            # If file doesn't exist, create it with just the selected data
+            # selected_dict = {option.value: option.selected for option in self.selected_widgets}
             with open(CONFIG_FILE, "w") as f:
-                json.dump({"selected": self.select.selected}, f)
+                json.dump({"selected": self.selected_widgets}, f, indent=4)
+
     
     def save_layout(self):
         try:
@@ -160,31 +161,35 @@ class GroundControl(App):
         self.toggle_widget_visibility(self.query_one(SelectionList).selected)
 
     def create_json(self) -> None:
-        create_json_selections = []
-            
+        selection_dict = {}
         for widget in self.grid.children:
             if hasattr(widget, "title"):
-                create_json_selections.append(widget.title)
-            default_config = {
-                "selected": create_json_selections,
-                "layout": "grid"
-            }
+                selection_dict[widget.title] = True
+        default_config = {
+            "selected": selection_dict,
+            "layout": "grid"
+        }
         with open(CONFIG_FILE, "w") as f:
-            json.dump(default_config, f, indent=4) 
+            json.dump(default_config, f, indent=4)
+
                 
     def create_selection_list(self) -> None:
         self.select.clear_options()
         for widget in self.grid.children:
             if hasattr(widget, "title"):
-                selected = widget.title in self.selected_widgets
+                # Default to True if the widget is missing in the loaded config.
+                selected = self.selected_widgets.get(widget.title, True)
                 self.select.add_option(Selection(widget.title, widget.title, selected))
+                self.selectionoptions.append(widget.title)
 
 
-    # @on(Mount)
     @on(SelectionList.SelectedChanged)
     async def on_selection_list_selected(self) -> None:
         # if event.selection:
-        self.toggle_widget_visibility(self.query_one(SelectionList).selected)
+        selected = self.query_one(SelectionList).selected
+        self.toggle_widget_visibility(selected)
+        for visible in selected:
+            self.selected_widgets[visible] = not self.selected_widgets[visible]
         self.save_selection()
 
     def toggle_widget_visibility(self, selected_title: str) -> None:
@@ -242,6 +247,10 @@ class GroundControl(App):
         # except Exception as e:
             #     print(f"Error updating {gpu_widget.title}: {e}")
 
+    def action_configure(self) -> None:
+        widgetslist = self.select
+        widgetslist.styles.display = "block" if widgetslist.styles.display == "none" else "none"
+        
     def action_toggle_auto(self) -> None:
         self.auto_layout = not self.auto_layout
         if self.auto_layout:
@@ -258,10 +267,6 @@ class GroundControl(App):
     def action_set_grid(self) -> None:
         self.auto_layout = False
         self.set_layout("grid")
-
-    def action_configure(self) -> None:
-        widgetslist = self.select
-        widgetslist.styles.display = "block" if widgetslist.styles.display == "none" else "none"
 
     def action_quit(self) -> None:
         self.exit()
