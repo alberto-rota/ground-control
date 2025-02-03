@@ -8,6 +8,7 @@
 
 **Ground Control** is a sleek, real-time terminal-based system monitor built with [Textual](https://textual.textualize.io/), [Plotext](https://github.com/piccolomo/plotext) and the [nvitop API](https://terminaltrove.com/nvitop/). It provides a powerful, aesthetic, customizable interface for tracking CPU, memory, disk, network, and GPU usage — all in a visually appealing and responsive TUI.
 
+**Ground Control** works optimally with [TMUX](https://github.com/tmux/tmux/wiki), install it [here](https://github.com/tmux/tmux/wiki/Installing)!
 ## 🌟 Features
 
 ### 📊 Real-Time System Monitoring
@@ -57,56 +58,73 @@ Or run as a Python module:
 ```sh
 python -m ground_control
 ```
-
-### 🔹 Keyboard Shortcuts
-
-| Key  | Action |
-|------|--------|
-| `q`  | Quit application |
-| `h`  | Switch to Horizontal Layout |
-| `v`  | Switch to Vertical Layout |
-| `g`  | Switch to Grid Layout |
-| `c`  | Configure displayed widgets |
-
 ### 🔹 Available Layouts
 
-#### Grid Layout (Default)
-A structured layout displaying all widgets neatly.
+### Grid Layout
+A structured layout displaying all widgets neatly in a grid. When you first launch **Ground Control**, it will show this layout.
 ![Grid Layout](assets/grid.png)
 
-#### Horizontal Layout
-All widgets aligned in a single row.
+### Horizontal Layout
+All widgets aligned in a single row. If you like working with wide shell spaces, split a TMUX session horizontally and use this layout!
 ![Horizontal Layout](assets/horiz.png)
 
 #### Vertical Layout
-A column-based layout, ideal for narrow terminals.
+A column-based layout, ideal for narrow shell spaces. If you like working with tall shell spaces, split a TMUX session verticall and use this layout!
 ![Vertical Layout](assets/tmux.png)
 
----
-
-## 🖥️ Widget Breakdown
+### 🖥️ Widget Breakdown
 Each panel in Ground Control represents a different system metric:
 
 ### 🔹 **CPU & Memory**
 - Shows real-time per-core CPU usage.
 - Displays RAM usage with a visual bar.
 
+![CPU_widget](assets/cpus.png)
+
 ### 🔹 **Disk I/O**
 - Monitors read/write speeds.
 - Displays disk usage in an easy-to-read format.
+
+![CPU_widget](assets/disk.png)
+
 
 ### 🔹 **Network Traffic**
 - Tracks real-time upload/download speeds.
 - Visualizes network activity.
 
+![CPU_widget](assets/network.png)
+
+
 ### 🔹 **GPU Metrics (NVIDIA Only)**
 - Displays GPU utilization and memory usage.
 - Supports multiple GPUs with live tracking.
 
+![CPU_widget](assets/gpu.png)
+
+
+## 🛠️ Configuring Ground Control
+You might not want to see all the widgets all at once. To select which widgets you want Ground Control to show, press `c` or the `Configure` button. You'll see a selection panel that yuu can use to toggle the widgets shown. 
+Press `c` again to hide the configuration panel
+
+You can switch to a grid, horizontal or verical layout with `g`, `h` or `v` or use the `Grid Layout`, `Horizontal Layout` or `Vertical Layout` buttons.
+
+
+![Config_widget](assets/config.png)
+
+This configurations are saved when you quit Ground Control, so when you launch it again you will see the same layout!
+
+All available keyboard shortcuts are listed here:
+| Key  | Action |
+|------|--------|
+| `h`  | Switch to Horizontal Layout |
+| `v`  | Switch to Vertical Layout |
+| `g`  | Switch to Grid Layout |
+| `c`  | Show/Hide the configuration panel |
+| `q`  | Quit Ground Control |
+
 ---
 
-## ⚙️ Configuration
-Ground Control saves user preferences in a configuration file located at:
+**Ground Control** saves user preferences in a configuration file located at:
 `
 ~/.config/ground-control/config.json
 `.
@@ -114,7 +132,6 @@ Modify this file in your default text editor with
 ```sh
 groundcontrol config
 ```
-or press `c` or the `configure` button
 
 ---
 
@@ -124,7 +141,7 @@ Pull requests and contributions are welcome! To contribute:
 2. Create a feature branch.
 3. Submit a PR with your changes.
 
----
+
 
 ## 📜 License
 This project is licensed under the **GNU General Public License v3.0**. See the [LICENSE](LICENSE) file for details.
@@ -138,4 +155,3 @@ This project is licensed under the **GNU General Public License v3.0**. See the 
 
 ### 🚀 Stay Updated
 For the latest features and updates, visit the [GitHub repository](https://github.com/alberto-rota/ground-control).
-
