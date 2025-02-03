@@ -17,7 +17,7 @@ from platformdirs import user_config_dir  # Import for cross-platform config dir
 
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "selection_config.json")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # Ensure the directory exists
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -37,19 +37,19 @@ class GroundControl(App):
         ("h", "set_horizontal", "Horizontal Layout"),
         ("v", "set_vertical", "Vertical Layout"),
         ("g", "set_grid", "Grid Layout"),
-        ("a", "toggle_auto", "Toggle Auto Layout"),
         ("c", "configure", "Configure"),
     ]
 
     def __init__(self):
         super().__init__()
         # self.set_layout(self.current_layout)
-        self.auto_layout = False
+        # self.auto_layout = False
         self.system_metrics = SystemMetrics()
         self.gpu_widgets = []
         self.grid = None
         self.select = None
         self.selectionoptions = []
+        self.need_to_change_layout = False
         self.json_exists = os.path.exists(CONFIG_FILE)
 
     def load_selection(self):
@@ -146,19 +146,24 @@ class GroundControl(App):
                 self.grid.styles.grid_size_rows = 3
                 self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
 
-        cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
-        disk_widget = DiskIOWidget("Disk I/O")
-        network_widget = NetworkIOWidget("Network")
+        if not self.need_to_change_layout:
+            cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
+            disk_widget = DiskIOWidget("Disk I/O")
+            network_widget = NetworkIOWidget("Network")
+        
         await self.grid.mount(cpu_widget)
         await self.grid.mount(disk_widget)
         await self.grid.mount(network_widget)
 
-        self.gpu_widgets = []
+        if not self.need_to_change_layout:
+            self.gpu_widgets = []
         for gpu in self.system_metrics.get_gpu_metrics():
-            gpu_widget = GPUWidget(gpu["gpu_name"])
-            self.gpu_widgets.append(gpu_widget)
+            if not self.need_to_change_layout:
+                gpu_widget = GPUWidget(gpu["gpu_name"])
+                self.gpu_widgets.append(gpu_widget)
             await self.grid.mount(gpu_widget)
         self.toggle_widget_visibility(self.query_one(SelectionList).selected)
+        self.need_to_change_layout = False
 
     def create_json(self) -> None:
         selection_dict = {}
@@ -187,9 +192,13 @@ class GroundControl(App):
     async def on_selection_list_selected(self) -> None:
         # if event.selection:
         selected = self.query_one(SelectionList).selected
+        hidden = [option for option in self.selectionoptions if option not in selected]
         self.toggle_widget_visibility(selected)
         for visible in selected:
-            self.selected_widgets[visible] = not self.selected_widgets[visible]
+            self.selected_widgets[visible] = True
+        for hide in hidden:
+            self.selected_widgets[hide] = False
+        
         self.save_selection()
 
     def toggle_widget_visibility(self, selected_title: str) -> None:
@@ -252,42 +261,45 @@ class GroundControl(App):
         widgetslist.styles.display = "block" if widgetslist.styles.display == "none" else "none"
         
     def action_toggle_auto(self) -> None:
-        self.auto_layout = not self.auto_layout
+        # self.auto_layout = not self.auto_layout
         if self.auto_layout:
             self.update_layout()
 
     def action_set_horizontal(self) -> None:
-        self.auto_layout = False
+        self.need_to_change_layout = False
+        # self.auto_layout = False
         self.set_layout("horizontal")
 
     def action_set_vertical(self) -> None:
-        self.auto_layout = False
+        self.need_to_change_layout = False
+        # self.auto_layout = False
         self.set_layout("vertical")
 
     def action_set_grid(self) -> None:
-        self.auto_layout = False
+        self.need_to_change_layout = False
+        # self.auto_layout = False
         self.set_layout("grid")
 
     def action_quit(self) -> None:
         self.exit()
 
-    def on_resize(self) -> None:
-        if self.auto_layout:
-            self.update_layout()
+    # def on_resize(self) -> None:
+    #     if self.auto_layout:
+    #         self.update_layout()
 
     def update_layout(self) -> None:
         if not self.is_mounted:
             return
-        if self.auto_layout:
-            width = self.size.width
-            height = self.size.height
-            ratio = width / height if height > 0 else 0
-            if ratio >= 3:
-                self.set_layout("horizontal")
-            elif ratio <= 0.33:
-                self.set_layout("vertical")
-            else:
-                self.set_layout("grid")
+        # if self.auto_layout:
+        #     width = self.size.width
+        #     height = self.size.height
+        #     ratio = width / height if height > 0 else 0
+        #     if ratio >= 3:
+        #         self.set_layout("horizontal")
+        #     elif ratio <= 0.33:
+        #         self.set_layout("vertical")
+        #     else:
+        #         self.set_layout("grid")
 
     def set_layout(self, layout: str):
         if layout != self.current_layout:

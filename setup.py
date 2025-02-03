@@ -18,9 +18,10 @@ setup(
     ],  
     entry_points={
         "console_scripts": [
-            "groundcontrol = ground_control.main:main",  # Change main to your entry function
+            "groundcontrol = ground_control.main:entry",
         ],
     },
+
     description="A Python Textual app for monitoring VMs in the terminal",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
