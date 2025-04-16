@@ -25,6 +25,10 @@ class SystemMetrics:
         self.prev_disk_io = {}  # Store previous disk IO counters per disk
         self._initialize_counters()
         self.devices = self._get_all_gpu_devices() if NVML_AVAILABLE else []
+        
+        # Initialize memory I/O counters
+        self.prev_memory_io = self._get_memory_io_counters()
+        self.prev_memory_time = time.time()
 
     def _initialize_counters(self):
         io_counters = psutil.net_io_counters()
@@ -102,6 +106,10 @@ class SystemMetrics:
         # Apply smoothing and prevent negative values
         total_read_speed = max(0, total_read_speed)
         total_write_speed = max(0, total_write_speed)
+        
+        # Debug check - ensure we're not zeroing out valid read values
+        if total_read_speed < 0.01 and total_io.read_bytes > self.prev_read_bytes:
+            total_read_speed = 0.01  # Set a minimum value if there was positive activity
     
         # Update previous values for total IO
         self.prev_read_bytes = total_io.read_bytes
@@ -138,15 +146,15 @@ class SystemMetrics:
                         read_speed = max(0, read_speed)
                         write_speed = max(0, write_speed)
                         
-                        # Apply an additional threshold to eliminate noise
-                        if read_speed < 0.01:
+                        # Don't zero out small but real read activity
+                        if read_speed < 0.01 and disk_io.read_bytes > prev_data['read_bytes']:
+                            read_speed = 0.01  # Set a minimum visible value
+                            
+                        # Apply an additional threshold to eliminate noise only for zero activity
+                        if read_speed < 0.01 and disk_io.read_bytes == prev_data['read_bytes']:
                             read_speed = 0
-                        if write_speed < 0.01:
+                        if write_speed < 0.01 and disk_io.write_bytes == prev_data['write_bytes']:
                             write_speed = 0
-                    else:
-                        # No previous data, estimate based on total
-                        read_speed = 0
-                        write_speed = 0
                     
                     # Update previous values for this disk
                     self.prev_disk_io[disk_name] = {
@@ -220,6 +228,90 @@ class SystemMetrics:
             
         return gpu_metrics
 
+    def get_memory_metrics(self):
+        """
+        Get detailed memory metrics including RAM and swap information.
+        
+        Returns:
+            dict: A dictionary containing comprehensive memory information
+        """
+        # Get virtual memory information (RAM)
+        memory_info = psutil.virtual_memory()
+        
+        # Get swap memory information
+        swap_info = psutil.swap_memory()
+        
+        # Get memory I/O metrics
+        current_time = time.time()
+        memory_io = self._get_memory_io_counters()
+        time_delta = max(current_time - self.prev_memory_time, 1e-6)
+        
+        # Calculate I/O rates (per second)
+        memory_io_rates = {}
+        for key, value in memory_io.items():
+            prev_value = self.prev_memory_io.get(key, 0)
+            rate = (value - prev_value) / time_delta
+            memory_io_rates[f"{key}_rate"] = rate
+        
+        # Update previous counters
+        self.prev_memory_io = memory_io
+        self.prev_memory_time = current_time
+        
+        # Get additional system-wide memory metrics
+        memory_data = {
+            'memory_info': memory_info,
+            'swap_info': swap_info,
+            'memory_io': memory_io,
+            'memory_io_rates': memory_io_rates
+        }
+        
+        # Try to get additional Linux-specific memory metrics
+        try:
+            if platform.system() == 'Linux':
+                with open('/proc/meminfo', 'r') as f:
+                    meminfo = f.read()
+                    meminfo_dict = {}
+                    for line in meminfo.split('\n'):
+                        if ':' in line:
+                            key, value = line.split(':', 1)
+                            meminfo_dict[key.strip()] = value.strip()
+                    
+                    memory_data['meminfo'] = meminfo_dict
+                    
+                    # Calculate memory commit ratio
+                    if 'CommitLimit' in meminfo_dict and 'Committed_AS' in meminfo_dict:
+                        commit_limit = int(meminfo_dict['CommitLimit'].split()[0])
+                        committed_as = int(meminfo_dict['Committed_AS'].split()[0])
+                        memory_data['commit_ratio'] = committed_as / commit_limit if commit_limit > 0 else 0
+        except:
+            pass
+            
+        # Try to get per-process memory usage (top consumers)
+        try:
+            processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'memory_percent']):
+                try:
+                    proc_info = proc.info
+                    if proc_info['memory_percent'] > 0.1:  # Only include significant users
+                        processes.append({
+                            'pid': proc_info['pid'],
+                            'name': proc_info['name'],
+                            'memory_percent': proc_info['memory_percent'],
+                            'memory_rss': proc_info['memory_info'].rss,
+                            'memory_vms': proc_info['memory_info'].vms
+                        })
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+            
+            memory_data['top_processes'] = sorted(
+                processes, 
+                key=lambda x: x['memory_percent'], 
+                reverse=True
+            )[:10]  # Top 10 memory consumers
+        except:
+            memory_data['top_processes'] = []
+        
+        return memory_data
 
     def _get_all_gpu_devices(self) -> List[Union[nvitop.Device, nvitop.MigDevice]]:
         """
@@ -252,3 +344,38 @@ class SystemMetrics:
                 combined_devices.append(phys_dev)
     
         return combined_devices
+
+    def _get_memory_io_counters(self):
+        """Get memory I/O counters from the system."""
+        counters = {
+            'pgpgin': 0,     # KB paged in
+            'pgpgout': 0,    # KB paged out
+            'pswpin': 0,     # pages swapped in
+            'pswpout': 0,    # pages swapped out
+            'pgfault': 0,    # page faults
+            'pgmajfault': 0  # major page faults
+        }
+        
+        try:
+            # Try to get Linux-specific memory I/O stats
+            if platform.system() == 'Linux':
+                with open('/proc/vmstat', 'r') as f:
+                    vmstat = f.read()
+                    for line in vmstat.split('\n'):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            key = parts[0]
+                            value = int(parts[1])
+                            
+                            if key in counters:
+                                counters[key] = value
+            
+            # On non-Linux systems, try to use swap info as a proxy
+            swap = psutil.swap_memory()
+            if hasattr(swap, 'sin') and hasattr(swap, 'sout'):
+                counters['pswpin'] = swap.sin
+                counters['pswpout'] = swap.sout
+        except:
+            pass
+            
+        return counters

@@ -21,7 +21,7 @@ class DiskIOWidget(MetricWidget):
         self.disk_used = 0
         self.first = True
         self.title = title
-        self.border_title = title
+        self.border_title = f"{title} [magenta]MB/s[/]"
 
     def compose(self) -> ComposeResult:
         # Arrange the plot and read/write bar side by side.
@@ -56,8 +56,6 @@ class DiskIOWidget(MetricWidget):
             
             return f"DSK  {read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
         except Exception as e:
-            import logging
-            logging.getLogger("ground-control").error(f"Error in create_readwrite_bar: {e}")
             return "DSK  Error creating read/write bar"
 
     def create_disk_usage_bar(self, disk_used: float, disk_total: float, total_width: int = 40) -> str:
@@ -85,8 +83,6 @@ class DiskIOWidget(MetricWidget):
             free_gb_txt = align(f"FREE: {available_gb:.1f} GB ", total_width // 2 - 2, "right")
             return f' [magenta]{used_gb_txt}[/]    [cyan]{free_gb_txt}[/]\n {usage_bar}'
         except Exception as e:
-            import logging
-            logging.getLogger("ground-control").error(f"Error in create_disk_usage_bar: {e}")
             return "Error displaying disk usage"
 
     def get_dual_plot(self) -> str:
@@ -124,18 +120,14 @@ class DiskIOWidget(MetricWidget):
             
             # Safety conversion of values
             try:
-                positive_downloads = [float(x) + 0.1 for x in self.read_history]
+                positive_downloads = [float(x) for x in self.read_history]
             except (TypeError, ValueError):
-                import logging
-                logging.getLogger("ground-control").error(f"Error converting read_history values: {self.read_history}")
-                positive_downloads = [0.1] * len(self.read_history)
+                positive_downloads = [0.0] * len(self.read_history)
                 
             try:
-                negative_downloads = [-float(x) - 0.1 for x in self.write_history]
+                negative_downloads = [-float(x) for x in self.write_history]
             except (TypeError, ValueError):
-                import logging
-                logging.getLogger("ground-control").error(f"Error converting write_history values: {self.write_history}")
-                negative_downloads = [-0.1] * len(self.write_history)
+                negative_downloads = [-0.0] * len(self.write_history)
             
             # Use safe methods to find max/min with empty list protection
             max_positive = 0.1
@@ -147,29 +139,25 @@ class DiskIOWidget(MetricWidget):
                 if positive_downloads:
                     max_positive = max(positive_downloads)
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error getting max of positive_downloads: {e}")
+                pass
                 
             try:
                 if self.read_history:
                     max_read = max(float(x) for x in self.read_history)
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error getting max of read_history: {e}")
+                pass
                 
             try:
                 if negative_downloads:
                     min_negative = min(negative_downloads)
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error getting min of negative_downloads: {e}")
+                pass
                 
             try:
                 if self.write_history:
                     min_write = -min(float(x) for x in self.write_history)
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error getting min of write_history: {e}")
+                pass
             
             max_value = int(max(max_positive, max_read, 1))  # At least 1
             min_value = abs(int(min(min_negative, min_write, -1)))  # At least -1
@@ -198,9 +186,9 @@ class DiskIOWidget(MetricWidget):
                 if value == 0:
                     y_labels.append("0")
                 elif value > 0:
-                    y_labels.append(f"{value/1024:.1f}↑")  # Up arrow for read
+                    y_labels.append(f"{value:.1f}↑")  # Up arrow for read
                 else:
-                    y_labels.append(f"{abs(value/1024):.1f}↓")  # Down arrow for write
+                    y_labels.append(f"{abs(value):.1f}↓")  # Down arrow for write
             
             plt.yticks(y_ticks, y_labels)
                 
@@ -210,10 +198,6 @@ class DiskIOWidget(MetricWidget):
             plt.xfrequency(0)
             return ansi2rich(plt.build()).replace("\x1b[0m", "").replace("[blue]", "[blue]").replace("[green]", "[magenta]")
         except Exception as e:
-            import logging, traceback
-            logging.getLogger("ground-control").error(f"Error in get_dual_plot: {e}")
-            logging.getLogger("ground-control").error(traceback.format_exc())
-            
             # Return a simple error placeholder plot
             try:
                 plt.clear_figure()
@@ -269,8 +253,7 @@ class DiskIOWidget(MetricWidget):
                 else:
                     history_plot.update(self.get_dual_plot())
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error updating history plot: {e}")
+                pass
                 
             # Update read/write bar safely
             try:
@@ -284,8 +267,7 @@ class DiskIOWidget(MetricWidget):
                 current_value = self.query_one("#current-value")
                 current_value.update(vertical_bar)
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error updating read/write bar: {e}")
+                pass
                 
             # Update disk usage safely
             try:
@@ -293,14 +275,11 @@ class DiskIOWidget(MetricWidget):
                 plot_width = getattr(self, 'plot_width', 40)  # Default if not set
                 disk_usage.update(self.create_disk_usage_bar(disk_used, disk_total, plot_width + 1))
             except Exception as e:
-                import logging
-                logging.getLogger("ground-control").error(f"Error updating disk usage: {e}")
+                pass
                 
             self.first = False
         except Exception as e:
-            import logging, traceback
-            logging.getLogger("ground-control").error(f"Error in update_content: {e}")
-            logging.getLogger("ground-control").error(traceback.format_exc())
+            pass
             
     def get_efi_partition_plot(self) -> str:
         """Create a special plot for EFI partitions indicating I/O stats aren't available"""
@@ -324,6 +303,4 @@ class DiskIOWidget(MetricWidget):
             
             return ansi2rich(plt.build()).replace("\x1b[0m", "").replace("[blue]", "[magenta]")
         except Exception as e:
-            import logging
-            logging.getLogger("ground-control").error(f"Error creating EFI partition plot: {e}")
             return "EFI partition - I/O stats not available"

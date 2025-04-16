@@ -14,7 +14,7 @@ class NetworkIOWidget(MetricWidget):
         self.max_net = 100
         self.first = True
         self.title = title
-        self.border_title = title
+        self.border_title = f"{title} [blue]MB/s[/]"
 
     def compose(self) -> ComposeResult:
         yield Static("", id="history-plot", classes="metric-plot")

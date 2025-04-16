@@ -13,6 +13,7 @@ from ground_control.widgets.cpu import CPUWidget
 from ground_control.widgets.disk import DiskIOWidget
 from ground_control.widgets.network import NetworkIOWidget
 from ground_control.widgets.gpu import GPUWidget
+from ground_control.widgets.memory import MemoryWidget
 from ground_control.utils.system_metrics import SystemMetrics
 from platformdirs import user_config_dir  # Import for cross-platform config directory
 
@@ -37,7 +38,7 @@ class GroundControl(App):
     Grid {
         grid-size: 3 3;
     }   
-    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget {
+    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget {
         border: round rgb(19, 161, 14);
     }
     """
@@ -143,6 +144,7 @@ class GroundControl(App):
         gpu_metrics = self.system_metrics.get_gpu_metrics()
         cpu_metrics = self.system_metrics.get_cpu_metrics()
         disk_metrics = self.system_metrics.get_disk_metrics()
+        memory_metrics = self.system_metrics.get_memory_metrics()
         num_gpus = len(gpu_metrics)
         grid_columns = self.get_layout_columns(num_gpus)
         if self.current_layout == "horizontal":
@@ -161,11 +163,13 @@ class GroundControl(App):
 
         if not self.need_to_change_layout:
             cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
+            memory_widget = MemoryWidget("Memory")
             self.disk_widgets = []
             self.gpu_widgets = []
             network_widget = NetworkIOWidget("Network")
     
         await self.grid.mount(cpu_widget)
+        await self.grid.mount(memory_widget)
     
         # Mount multiple disk widgets
         for disk in disk_metrics['disks']:
@@ -214,23 +218,30 @@ class GroundControl(App):
         selected = self.query_one(SelectionList).selected
         hidden = [option for option in self.selectionoptions if option not in selected]
         self.toggle_widget_visibility(selected)
-        for visible in selected:
-            self.selected_widgets[visible] = True
-        for hide in hidden:
-            self.selected_widgets[hide] = False
-        
+        # Update selected_widgets dictionary
+        self.selected_widgets = {option: (option in selected) for option in self.selectionoptions}
         self.save_selection()
 
-    def toggle_widget_visibility(self, selected_title: str) -> None:
+    def toggle_widget_visibility(self, selected_titles) -> None:
+        """Toggle widget visibility based on selected titles
         
+        Args:
+            selected_titles: List of widget titles that should be visible
+        """
         for widget in self.grid.children:
             if hasattr(widget, "title"):
-                widget.styles.display = "block" if widget.title in selected_title else "none"
+                widget.styles.display = "block" if widget.title in selected_titles else "none"
+                logger.debug(f"Setting {widget.title} display to {'block' if widget.title in selected_titles else 'none'}")
 
     def update_metrics(self):
-        cpu_metrics = self.system_metrics.get_cpu_metrics()
-        disk_metrics = self.system_metrics.get_disk_metrics()
         try:
+            cpu_metrics = self.system_metrics.get_cpu_metrics()
+            disk_metrics = self.system_metrics.get_disk_metrics()
+            network_metrics = self.system_metrics.get_network_metrics()
+            gpu_metrics = self.system_metrics.get_gpu_metrics()
+            memory_metrics = self.system_metrics.get_memory_metrics()
+            
+            # Update CPU widget
             cpu_widget = self.query_one(CPUWidget)
             cpu_widget.update_content(
                 cpu_metrics['cpu_percentages'],
@@ -239,69 +250,83 @@ class GroundControl(App):
                 disk_metrics['total_disk_used'],
                 disk_metrics['total_disk_total']
             )
-        except Exception as e:
-            logger.error(f"Error updating CPUWidget: {e}")
-
-        # Update each disk widget with its specific metrics
-        for disk_widget in self.disk_widgets:
+            
+            # Update Memory widget
             try:
-                logger.debug(f"Disk widget: {disk_widget.title}")
-                for disk in disk_metrics['disks']:
-                    logger.debug(f"Checking disk: {disk['mountpoint']}")
-                    if disk_widget.title == f"Disk @ {disk['mountpoint']}":
-                        logger.debug(f"Match found for {disk['mountpoint']}")
-                        try:
-                            # Log the values we're providing
-                            logger.debug(f"Disk values: read={disk['read_speed']}, write={disk['write_speed']}, used={disk['disk_used']}, total={disk['disk_total']}")
-                            
-                            # Special handling for EFI partition - we'll show disk space but zero I/O
-                            if '/boot/efi' in disk['mountpoint']:
-                                logger.info(f"Special handling for EFI partition at {disk['mountpoint']}")
-                                disk_widget.update_content(
-                                    0.0,  # Read speed
-                                    0.0,  # Write speed
-                                    disk['disk_used'],
-                                    disk['disk_total'],
-                                    is_efi_partition=True  # Flag to indicate special handling
-                                )
-                            else:
-                                disk_widget.update_content(
-                                    disk['read_speed'],
-                                    disk['write_speed'],
-                                    disk['disk_used'],
-                                    disk['disk_total']
-                                )
-                        except Exception as e:
-                            import traceback
-                            logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
-                            logger.error(f"Error details: {traceback.format_exc()}")
-                        break
-            except Exception as e:
-                import traceback
-                logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
-                logger.error(f"Error details: {traceback.format_exc()}")
-
-        network_metrics = self.system_metrics.get_network_metrics()
-        try:
-            network_widget = self.query_one(NetworkIOWidget)
-            network_widget.update_content(
-                network_metrics['download_speed'],
-                network_metrics['upload_speed']
-            )
-        except Exception as e:
-            logger.error(f"Error updating NetworkIOWidget: {e}")
-
-        gpu_metrics = self.system_metrics.get_gpu_metrics()
-        for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
-            try:
-                gpu_widget.update_content(
-                    gpu_metric["gpu_name"],
-                    gpu_metric['gpu_util'],
-                    gpu_metric['mem_used'],
-                    gpu_metric['mem_total']
+                memory_widget = self.query_one(MemoryWidget)
+                memory_widget.update_content(
+                    memory_metrics['memory_info'],
+                    memory_metrics['swap_info'],
+                    meminfo=memory_metrics.get('meminfo'),
+                    commit_ratio=memory_metrics.get('commit_ratio'),
+                    top_processes=memory_metrics.get('top_processes')
                 )
             except Exception as e:
-                logger.error(f"Error updating {gpu_widget.title}: {e}")
+                logger.error(f"Error updating memory widget: {str(e)}")
+            
+            # Update each disk widget with its specific metrics
+            for disk_widget in self.disk_widgets:
+                try:
+                    logger.debug(f"Disk widget: {disk_widget.title}")
+                    for disk in disk_metrics['disks']:
+                        logger.debug(f"Checking disk: {disk['mountpoint']}")
+                        if disk_widget.title == f"Disk @ {disk['mountpoint']}":
+                            logger.debug(f"Match found for {disk['mountpoint']}")
+                            try:
+                                # Log the values we're providing
+                                logger.debug(f"Disk values: read={disk['read_speed']}, write={disk['write_speed']}, used={disk['disk_used']}, total={disk['disk_total']}")
+                                
+                                # Special handling for EFI partition - we'll show disk space but zero I/O
+                                if '/boot/efi' in disk['mountpoint']:
+                                    logger.info(f"Special handling for EFI partition at {disk['mountpoint']}")
+                                    disk_widget.update_content(
+                                        0.0,  # Read speed
+                                        0.0,  # Write speed
+                                        disk['disk_used'],
+                                        disk['disk_total'],
+                                        is_efi_partition=True  # Flag to indicate special handling
+                                    )
+                                else:
+                                    disk_widget.update_content(
+                                        disk['read_speed'],
+                                        disk['write_speed'],
+                                        disk['disk_used'],
+                                        disk['disk_total']
+                                    )
+                            except Exception as e:
+                                import traceback
+                                logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
+                                logger.error(f"Error details: {traceback.format_exc()}")
+                            break
+                except Exception as e:
+                    import traceback
+                    logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
+                    logger.error(f"Error details: {traceback.format_exc()}")
+
+            network_metrics = self.system_metrics.get_network_metrics()
+            try:
+                network_widget = self.query_one(NetworkIOWidget)
+                network_widget.update_content(
+                    network_metrics['download_speed'],
+                    network_metrics['upload_speed']
+                )
+            except Exception as e:
+                logger.error(f"Error updating NetworkIOWidget: {e}")
+
+            gpu_metrics = self.system_metrics.get_gpu_metrics()
+            for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
+                try:
+                    gpu_widget.update_content(
+                        gpu_metric["gpu_name"],
+                        gpu_metric['gpu_util'],
+                        gpu_metric['mem_used'],
+                        gpu_metric['mem_total']
+                    )
+                except Exception as e:
+                    logger.error(f"Error updating {gpu_widget.title}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error updating metrics: {e}")
 
     def action_configure(self) -> None:
         widgetslist = self.select

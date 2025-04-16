@@ -14,7 +14,7 @@ class GPUWidget(MetricWidget):
         # self.max_val = 100  # initial max value; will update based on incoming data
         self.first = True
         self.title = title
-        self.border_title = title
+        self.border_title = f"{title} [green]GB/%[/]"
         self.usage_is_available = True
 
     def compose(self) -> ComposeResult:
