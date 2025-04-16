@@ -6,6 +6,7 @@ from textual.widgets.selection_list import Selection
 import math
 import os
 import json
+import logging
 from textual import on
 from textual.events import Mount
 from ground_control.widgets.cpu import CPUWidget
@@ -18,6 +19,15 @@ from platformdirs import user_config_dir  # Import for cross-platform config dir
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+LOG_FILE = "ground_control.log"
+
+# Set up logging
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("ground-control")
 
 # Ensure the directory exists
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -85,6 +95,7 @@ class GroundControl(App):
                 json.dump({"selected": self.selected_widgets}, f, indent=4)
 
     
+    
     def save_layout(self):
         try:
             # First read the existing data
@@ -117,19 +128,21 @@ class GroundControl(App):
 
     async def on_mount(self) -> None:
         self.current_layout = "grid"
+        self.selected_widgets = self.load_selection()  # Load selection first
         await self.setup_widgets()
         if not self.json_exists:
             self.create_json()
         self.set_layout(self.load_layout())
-        self.selected_widgets = self.load_selection()
         
         self.create_selection_list()
+        self.apply_widget_visibility()  # Apply visibility after creating widgets
         self.set_interval(1.0, self.update_metrics)
 
     async def setup_widgets(self) -> None:
         self.grid.remove_children()
         gpu_metrics = self.system_metrics.get_gpu_metrics()
         cpu_metrics = self.system_metrics.get_cpu_metrics()
+        disk_metrics = self.system_metrics.get_disk_metrics()
         num_gpus = len(gpu_metrics)
         grid_columns = self.get_layout_columns(num_gpus)
         if self.current_layout == "horizontal":
@@ -148,22 +161,29 @@ class GroundControl(App):
 
         if not self.need_to_change_layout:
             cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
-            disk_widget = DiskIOWidget("Disk I/O")
-            network_widget = NetworkIOWidget("Network")
-        
-        await self.grid.mount(cpu_widget)
-        await self.grid.mount(disk_widget)
-        await self.grid.mount(network_widget)
-
-        if not self.need_to_change_layout:
+            self.disk_widgets = []
             self.gpu_widgets = []
-        for gpu in self.system_metrics.get_gpu_metrics():
+            network_widget = NetworkIOWidget("Network")
+    
+        await self.grid.mount(cpu_widget)
+    
+        # Mount multiple disk widgets
+        for disk in disk_metrics['disks']:
             if not self.need_to_change_layout:
-                gpu_widget = GPUWidget(gpu["gpu_name"])
+                disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=f"disk_{disk['mountpoint'].replace('/', '_')}")
+                self.disk_widgets.append(disk_widget)
+            await self.grid.mount(disk_widget)
+        
+        await self.grid.mount(network_widget)
+        
+        # Mount GPU widgets
+        for gpu in gpu_metrics:
+            if not self.need_to_change_layout:
+                gpu_widget = GPUWidget(f"GPU @ {gpu['gpu_name']}", id=f"gpu_{len(self.gpu_widgets)}")
                 self.gpu_widgets.append(gpu_widget)
             await self.grid.mount(gpu_widget)
-        self.toggle_widget_visibility(self.query_one(SelectionList).selected)
-        self.need_to_change_layout = False
+        
+        logger.info(f"Setup complete: {len(self.disk_widgets)} disk widgets, {len(self.gpu_widgets)} GPU widgets")
 
     def create_json(self) -> None:
         selection_dict = {}
@@ -216,23 +236,50 @@ class GroundControl(App):
                 cpu_metrics['cpu_percentages'],
                 cpu_metrics['cpu_freqs'],
                 cpu_metrics['mem_percent'],
-                disk_metrics['disk_used'],
-                disk_metrics['disk_total']
+                disk_metrics['total_disk_used'],
+                disk_metrics['total_disk_total']
             )
         except Exception as e:
-            print(f"Error updating CPUWidget: {e}")
+            logger.error(f"Error updating CPUWidget: {e}")
 
-        try:
-            disk_widget = self.query_one(DiskIOWidget)
-            # self.notify(disk_widget.create_usage_bar())
-            disk_widget.update_content(
-                disk_metrics['read_speed'],
-                disk_metrics['write_speed'],
-                disk_metrics['disk_used'],
-                disk_metrics['disk_total']
-            )
-        except Exception as e:
-            print(f"Error updating DiskIOWidget: {e}")
+        # Update each disk widget with its specific metrics
+        for disk_widget in self.disk_widgets:
+            try:
+                logger.debug(f"Disk widget: {disk_widget.title}")
+                for disk in disk_metrics['disks']:
+                    logger.debug(f"Checking disk: {disk['mountpoint']}")
+                    if disk_widget.title == f"Disk @ {disk['mountpoint']}":
+                        logger.debug(f"Match found for {disk['mountpoint']}")
+                        try:
+                            # Log the values we're providing
+                            logger.debug(f"Disk values: read={disk['read_speed']}, write={disk['write_speed']}, used={disk['disk_used']}, total={disk['disk_total']}")
+                            
+                            # Special handling for EFI partition - we'll show disk space but zero I/O
+                            if '/boot/efi' in disk['mountpoint']:
+                                logger.info(f"Special handling for EFI partition at {disk['mountpoint']}")
+                                disk_widget.update_content(
+                                    0.0,  # Read speed
+                                    0.0,  # Write speed
+                                    disk['disk_used'],
+                                    disk['disk_total'],
+                                    is_efi_partition=True  # Flag to indicate special handling
+                                )
+                            else:
+                                disk_widget.update_content(
+                                    disk['read_speed'],
+                                    disk['write_speed'],
+                                    disk['disk_used'],
+                                    disk['disk_total']
+                                )
+                        except Exception as e:
+                            import traceback
+                            logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
+                            logger.error(f"Error details: {traceback.format_exc()}")
+                        break
+            except Exception as e:
+                import traceback
+                logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
+                logger.error(f"Error details: {traceback.format_exc()}")
 
         network_metrics = self.system_metrics.get_network_metrics()
         try:
@@ -242,19 +289,19 @@ class GroundControl(App):
                 network_metrics['upload_speed']
             )
         except Exception as e:
-            print(f"Error updating NetworkIOWidget: {e}")
+            logger.error(f"Error updating NetworkIOWidget: {e}")
 
         gpu_metrics = self.system_metrics.get_gpu_metrics()
         for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
-            # try:
-            gpu_widget.update_content(
-                gpu_metric["gpu_name"],
-                gpu_metric['gpu_util'],
-                gpu_metric['mem_used'],
-                gpu_metric['mem_total']
-            )
-        # except Exception as e:
-            #     print(f"Error updating {gpu_widget.title}: {e}")
+            try:
+                gpu_widget.update_content(
+                    gpu_metric["gpu_name"],
+                    gpu_metric['gpu_util'],
+                    gpu_metric['mem_used'],
+                    gpu_metric['mem_total']
+                )
+            except Exception as e:
+                logger.error(f"Error updating {gpu_widget.title}: {e}")
 
     def action_configure(self) -> None:
         widgetslist = self.select
@@ -309,4 +356,24 @@ class GroundControl(App):
             grid.add_class(layout)
         asyncio.create_task(self.setup_widgets())
         self.save_layout()
+        # Apply widget visibility after changing layout
+        # We need to wait for setup_widgets to finish
+        asyncio.create_task(self.apply_visibility_after_setup())
+        
+    async def apply_visibility_after_setup(self):
+        """Apply widget visibility after layout change and widget setup"""
+        # Wait a short time for setup_widgets to complete
+        await asyncio.sleep(0.1)
+        # Then apply the visibility settings
+        self.apply_widget_visibility()
+
+    def apply_widget_visibility(self) -> None:
+        """Apply the saved widget visibility settings from config"""
+        logger.info(f"Applying widget visibility from config: {self.selected_widgets}")
+        for widget in self.grid.children:
+            if hasattr(widget, "title"):
+                is_visible = self.selected_widgets.get(widget.title, True)
+                widget.styles.display = "block" if is_visible else "none"
+                logger.debug(f"Widget {widget.title}: visible = {is_visible}")
+
         

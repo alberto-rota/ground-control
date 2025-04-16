@@ -22,6 +22,7 @@ class SystemMetrics:
         self.prev_net_bytes_recv = 0
         self.prev_net_bytes_sent = 0
         self.prev_time = time.time()
+        self.prev_disk_io = {}  # Store previous disk IO counters per disk
         self._initialize_counters()
         self.devices = self._get_all_gpu_devices() if NVML_AVAILABLE else []
 
@@ -33,6 +34,18 @@ class SystemMetrics:
         self.prev_read_bytes = disk_io.read_bytes
         self.prev_write_bytes = disk_io.write_bytes
         
+        # Initialize per-disk counters
+        try:
+            per_disk_io = psutil.disk_io_counters(perdisk=True)
+            for disk_name, io_data in per_disk_io.items():
+                self.prev_disk_io[disk_name] = {
+                    'read_bytes': io_data.read_bytes,
+                    'write_bytes': io_data.write_bytes,
+                    'time': time.time()
+                }
+        except:
+            pass
+
     def get_cpu_info(self):
         system = platform.system()
         cpu_models = []
@@ -71,23 +84,107 @@ class SystemMetrics:
 
     def get_disk_metrics(self):
         current_time = time.time()
-        io_counters = psutil.disk_io_counters()
-        disk_usage = psutil.disk_usage('/')
+        disk_time_delta = max(current_time - self.prev_time, 1e-6)
+    
+        # Get IO counters for all disks if available
+        try:
+            per_disk_io = psutil.disk_io_counters(perdisk=True)
+        except:
+            per_disk_io = {}
+    
+        # Get total IO counters
+        total_io = psutil.disk_io_counters()
+    
+        # Calculate total read/write speeds with a smooth factor
+        total_read_speed = (total_io.read_bytes - self.prev_read_bytes) / (1024**2) / disk_time_delta
+        total_write_speed = (total_io.write_bytes - self.prev_write_bytes) / (1024**2) / disk_time_delta
         
-        time_delta = max(current_time - self.prev_time, 1e-6)
-        
-        read_speed = (io_counters.read_bytes - self.prev_read_bytes) / (1024**2) / time_delta
-        write_speed = (io_counters.write_bytes - self.prev_write_bytes) / (1024**2) / time_delta
-        
-        self.prev_read_bytes = io_counters.read_bytes
-        self.prev_write_bytes = io_counters.write_bytes
+        # Apply smoothing and prevent negative values
+        total_read_speed = max(0, total_read_speed)
+        total_write_speed = max(0, total_write_speed)
+    
+        # Update previous values for total IO
+        self.prev_read_bytes = total_io.read_bytes
+        self.prev_write_bytes = total_io.write_bytes
         self.prev_time = current_time
-        
+    
+        # Get all mounted partitions
+        partitions = psutil.disk_partitions(all=False)
+    
+        # Prepare result structure
+        disks = []
+        total_used = 0
+        total_space = 0
+    
+        # Process each partition
+        for partition in partitions:
+            try:
+                usage = psutil.disk_usage(partition.mountpoint)
+                disk_name = partition.device.split('/')[-1] if '/' in partition.device else partition.device.split('\\')[-1]
+            
+                # Try to get per-disk IO if available
+                if disk_name in per_disk_io:
+                    disk_io = per_disk_io[disk_name]
+                    
+                    # Calculate per-disk IO with proper previous values
+                    if disk_name in self.prev_disk_io:
+                        prev_data = self.prev_disk_io[disk_name]
+                        disk_time_delta = max(current_time - prev_data['time'], 1e-6)
+                        
+                        read_speed = (disk_io.read_bytes - prev_data['read_bytes']) / (1024**2) / disk_time_delta
+                        write_speed = (disk_io.write_bytes - prev_data['write_bytes']) / (1024**2) / disk_time_delta
+                        
+                        # Prevent negative values and apply smoothing
+                        read_speed = max(0, read_speed)
+                        write_speed = max(0, write_speed)
+                        
+                        # Apply an additional threshold to eliminate noise
+                        if read_speed < 0.01:
+                            read_speed = 0
+                        if write_speed < 0.01:
+                            write_speed = 0
+                    else:
+                        # No previous data, estimate based on total
+                        read_speed = 0
+                        write_speed = 0
+                    
+                    # Update previous values for this disk
+                    self.prev_disk_io[disk_name] = {
+                        'read_bytes': disk_io.read_bytes,
+                        'write_bytes': disk_io.write_bytes,
+                        'time': current_time
+                    }
+                else:
+                    # Distribute total IO proportionally based on disk size ratio
+                    total_disk_space = sum(psutil.disk_usage(p.mountpoint).total for p in partitions if p.mountpoint != partition.mountpoint)
+                    if total_disk_space > 0:
+                        size_ratio = usage.total / total_disk_space
+                        read_speed = total_read_speed * size_ratio
+                        write_speed = total_write_speed * size_ratio
+                    else:
+                        read_speed = 0
+                        write_speed = 0
+            
+                disks.append({
+                    'mountpoint': partition.mountpoint,
+                    'disk_used': usage.used,
+                    'disk_total': usage.total,
+                    'read_speed': read_speed,
+                    'write_speed': write_speed
+                })
+            
+                total_used += usage.used
+                total_space += usage.total
+            except (PermissionError, FileNotFoundError):
+                # Skip partitions we can't access
+                pass
+    
         return {
-            'read_speed': read_speed,
-            'write_speed': write_speed,
-            'disk_used': disk_usage.used,
-            'disk_total': disk_usage.total
+            'disks': disks,
+            'total_disk_used': total_used,
+            'total_disk_total': total_space,
+            'read_speed': total_read_speed,
+            'write_speed': total_write_speed
         }
 
     def get_network_metrics(self):

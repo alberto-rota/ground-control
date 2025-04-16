@@ -62,6 +62,25 @@ class NetworkIOWidget(MetricWidget):
         
         # Set y-axis limits symmetrically around zero
         plt.ylim(-y_limit, y_limit)
+        # Create custom y-axis ticks with MB/s labels
+        num_ticks = min(5, self.plot_height - 1)  # Don't use too many ticks in small plots
+        tick_step = 2*y_limit / (num_ticks - 1) if num_ticks > 1 else 1
+            
+        y_ticks = []
+        y_labels = []
+            
+        for i in range(num_ticks):
+            value = -y_limit + i * tick_step
+            y_ticks.append(value)
+            # Add MB/s to positive values (read speed) and negative values (write speed)
+            if value == 0:
+                y_labels.append("0")
+            elif value > 0:
+                y_labels.append(f"{value:.1f}↑")  # Up arrow for read
+            else:
+                y_labels.append(f"{abs(value):.1f}↓")  # Down arrow for write
+            
+        plt.yticks(y_ticks, y_labels)
         
         # Plot upload values above zero (positive)
         plt.plot(positive_downloads, marker="braille", label="Upload")
