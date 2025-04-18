@@ -29,7 +29,7 @@ class MemoryWidget(MetricWidget):
     def __init__(self, title: str = "Memory", id: str = None):
         super().__init__(title=title, id=id, color="orange1")
         self.title = title
-        self.border_title = f"{title} [orange1]GB[/]"
+        self.border_title = title#f"{title} [orange1]GB[/]"
         
     def compose(self) -> ComposeResult:
         yield Static(id="memory-content", classes="memory-metric-value")
@@ -168,7 +168,7 @@ class MemoryWidget(MetricWidget):
         plt.bar(categories, values, orientation="h", color=colors)
         plt.xlim(0, 100)
         plt.xticks([0, 25, 50, 75, 100], ["0%", "25%", "50%", "75%", "100%"])
-        memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "")
+        memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("──────┐","────%─┐")
         return f"{memory_chart}{all_info}"
 
     def update_content(self, memory_info, swap_info, meminfo=None, commit_ratio=None, top_processes=None):

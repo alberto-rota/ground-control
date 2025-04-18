@@ -27,7 +27,7 @@ class CPUWidget(MetricWidget):
     def __init__(self, title: str, id: str = None):
         super().__init__(title=title, id=id)
         self.title = title
-        self.border_title = f"{title} [green]%[/]"
+        self.border_title = title#f"{title} [green]%[/]"
         
     def compose(self) -> ComposeResult:
         yield Static("", id="cpu-content", classes="cpu-metric-value")
@@ -73,7 +73,8 @@ class CPUWidget(MetricWidget):
                 plt.plot_size(width=width+1, height=len(cpu_percentages) + 2)
                 
             plt.bar(labels, list(cpu_percentages), orientation=orientation)
-            cpubars = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", "")
+            cpubars = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", "").replace("──────┐","────%─┐")
+
             
             plt.clear_figure()
             plt.theme("pro")
@@ -81,7 +82,8 @@ class CPUWidget(MetricWidget):
             plt.xticks([1, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
             plt.xlim(5, 100)
             plt.bar(["RAM"], [mem_percent], orientation="h")
-            rambars = ansi2rich(plt.build()).replace("blue","orange1")
+            rambars = ansi2rich(plt.build()).replace("blue","orange1").replace("──────┐","────%─┐")
+
             return cpubars+ rambars
         else:
             # Group CPU cores to avoid an overly tall chart.
