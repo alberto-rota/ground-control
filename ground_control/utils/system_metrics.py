@@ -29,6 +29,17 @@ class SystemMetrics:
         # Initialize memory I/O counters
         self.prev_memory_io = self._get_memory_io_counters()
         self.prev_memory_time = time.time()
+        
+        # Initialize memory history for stacked bar plot
+        self.memory_history = {
+            'timestamps': [],
+            'used': [],
+            'free': [],
+            'cached': [],
+            'buffers': [],
+            'shared': []
+        }
+        self.max_history_points = 10  # Maximum number of history points to keep
 
     def _initialize_counters(self):
         io_counters = psutil.net_io_counters()
@@ -257,12 +268,16 @@ class SystemMetrics:
         self.prev_memory_io = memory_io
         self.prev_memory_time = current_time
         
+        # Update memory history for stacked bar plot
+        self._update_memory_history(memory_info)
+        
         # Get additional system-wide memory metrics
         memory_data = {
             'memory_info': memory_info,
             'swap_info': swap_info,
             'memory_io': memory_io,
-            'memory_io_rates': memory_io_rates
+            'memory_io_rates': memory_io_rates,
+            'memory_history': self.memory_history
         }
         
         # Try to get additional Linux-specific memory metrics
@@ -379,3 +394,26 @@ class SystemMetrics:
             pass
             
         return counters
+
+    def _update_memory_history(self, memory_info):
+        """Update the memory history for stacked bar plot visualization."""
+        current_time = time.time()
+        
+        # Add current memory data to history
+        self.memory_history['timestamps'].append(current_time)
+        self.memory_history['used'].append(memory_info.used / (1024 ** 3))  # Convert to GB
+        self.memory_history['free'].append(memory_info.available / (1024 ** 3))  # Convert to GB
+        
+        # Get cached and buffers if available
+        cached = memory_info.cached / (1024 ** 3) if hasattr(memory_info, 'cached') else 0
+        buffers = memory_info.buffers / (1024 ** 3) if hasattr(memory_info, 'buffers') else 0
+        shared = memory_info.shared / (1024 ** 3) if hasattr(memory_info, 'shared') else 0
+        
+        self.memory_history['cached'].append(cached)
+        self.memory_history['buffers'].append(buffers)
+        self.memory_history['shared'].append(shared)
+        
+        # Trim history if it exceeds the maximum number of points
+        if len(self.memory_history['timestamps']) > self.max_history_points:
+            for key in self.memory_history:
+                self.memory_history[key] = self.memory_history[key][-self.max_history_points:]

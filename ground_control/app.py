@@ -259,7 +259,8 @@ class GroundControl(App):
                     memory_metrics['swap_info'],
                     meminfo=memory_metrics.get('meminfo'),
                     commit_ratio=memory_metrics.get('commit_ratio'),
-                    top_processes=memory_metrics.get('top_processes')
+                    top_processes=memory_metrics.get('top_processes'),
+                    memory_history=memory_metrics.get('memory_history')
                 )
             except Exception as e:
                 logger.error(f"Error updating memory widget: {str(e)}")

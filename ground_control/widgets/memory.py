@@ -72,7 +72,7 @@ class MemoryWidget(MetricWidget):
         top_processes = sorted(processes, key=lambda x: x['memory_percent'], reverse=True)[:count]
         return top_processes
 
-    def create_detailed_view(self, memory_info, swap_info, width, height, meminfo=None, commit_ratio=None, top_processes=None):
+    def create_detailed_view(self, memory_info, swap_info, width, height, meminfo=None, commit_ratio=None, top_processes=None, memory_history=None):
         """Create a detailed view of memory metrics."""
         # Create a visualization of memory usage
         
@@ -152,26 +152,66 @@ class MemoryWidget(MetricWidget):
         
         # Add process count information
         process_count = len(list(psutil.process_iter()))
-        process_info = f"\n\n[bold]System[/]\nProcesses: [blue]{process_count}[/]"
+        process_info = f"\n\n[bold]System[/]\nProcesses: [blue]{process_count}[/]"   
     
         all_info = f"{detailed_info}{buffer_info}{commit_info}{page_fault_info}{watermark_info}{process_info}"
         plt.clear_figure()
         plt.theme("pro")
+        
+        # Calculate available space for the chart
         infolines = min(len(all_info.splitlines()), 10)  # Set height based on number of lines in all_info, limit to 10
-        plt.plot_size(width=width, height=height-infolines)
+        chart_height = height - infolines
         
-        # Create a horizontal bar chart for memory types
-        categories = ["RAM", "SWAP"]
-        values = [memory_info.percent, swap_info.percent]
-        colors = ["orange1", "yellow"]
+        # Create the memory chart
+        memory_chart = ""
         
-        plt.bar(categories, values, orientation="h", color=colors)
-        plt.xlim(0, 100)
-        plt.xticks([0, 25, 50, 75, 100], ["0%", "25%", "50%", "75%", "100%"])
-        memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("──────┐","────%─┐")
+        # If we have memory history data, create a stacked bar plot
+        if memory_history and len(memory_history['timestamps']) > 1:    
+            plt.plot_size(width=width, height=chart_height)
+            
+            # Create time labels (just use indices for simplicity)
+            time_labels = [str(i) for i in range(len(memory_history['timestamps']))]
+            
+            # Create stacked bar data
+            # Order: free, used, cached, buffers, shared
+            stacked_data = [
+                memory_history['free'],
+                memory_history['used'],
+                memory_history['cached'],
+                memory_history['buffers'],
+                memory_history['shared']
+            ]
+            
+            # Define colors for each memory component
+            colors = ["cyan", "orange1", "green", "yellow", "magenta"]
+            
+            # Create stacked bar plot
+            plt.stacked_bar(time_labels, stacked_data, labels=["Free", "Used", "Cached", "Buffers", "Shared"], color=colors)
+            
+            # Add title and axis labels
+            plt.title("Memory Usage Over Time")
+            plt.xlabel("Time")
+            plt.ylabel("GB")
+            
+            # Convert the plot to rich text
+            memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "")
+        else:
+            # Fallback to the original bar chart if no history data
+            plt.plot_size(width=width, height=chart_height)
+            
+            # Create a horizontal bar chart for memory types
+            categories = ["RAM", "SWAP"]
+            values = [memory_info.percent, swap_info.percent]
+            colors = ["orange1", "yellow"]
+            
+            plt.bar(categories, values, orientation="h", color=colors)
+            plt.xlim(0, 100)
+            plt.xticks([0, 25, 50, 75, 100], ["0%", "25%", "50%", "75%", "100%"])
+            memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("──────┐","────%─┐")
+        
         return f"{memory_chart}{all_info}"
 
-    def update_content(self, memory_info, swap_info, meminfo=None, commit_ratio=None, top_processes=None):
+    def update_content(self, memory_info, swap_info, meminfo=None, commit_ratio=None, top_processes=None, memory_history=None):
         # Calculate available width and height inside the widget
         width = self.size.width - 4
         height = self.size.height - 2
@@ -185,7 +225,8 @@ class MemoryWidget(MetricWidget):
                 height, 
                 meminfo=meminfo, 
                 commit_ratio=commit_ratio,
-                top_processes=top_processes
+                top_processes=top_processes,
+                memory_history=memory_history
             )
             
             # Update the widget content
