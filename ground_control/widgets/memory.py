@@ -1,236 +1,189 @@
+from collections import deque
 from textual.app import ComposeResult
-from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
-import psutil
 from ..utils.formatting import ansi2rich, align
 
 class MemoryWidget(MetricWidget):
-    """Memory (RAM) usage display widget."""
-    DEFAULT_CSS = """
-    MemoryWidget {
-        height: 100%;
-        border: solid green;
-        background: $surface;
-        layout: vertical;
-        overflow-y: auto;
-    }
-    
-    .metric-title {
-        text-align: left;
-    }
-    
-    .memory-metric-value {
-        height: 1fr;
-        min-height: 20;
-    }
-    """
+    """Memory (RAM) usage display widget with dual plots for RAM and SWAP over time."""
     def __init__(self, title: str = "Memory", id: str = None):
+        
+        DEFAULT_CSS = """
+        MemoryWidget {
+            height: 100%;
+            border: solid green;
+            background: $surface;
+            layout: vertical;
+            overflow-y: auto;
+        }
+        
+        .metric-title {
+            text-align: left;
+        }
+        
+        .current-value {
+            height: 2fr;
+        }
+        """
         super().__init__(title=title, id=id, color="orange1")
+        self.ram_history = deque(maxlen=120)
+        self.swap_history = deque(maxlen=120)
+        self.first = True
         self.title = title
-        self.border_title = title#f"{title} [orange1]GB[/]"
+        self.border_title = title
         
     def compose(self) -> ComposeResult:
-        yield Static(id="memory-content", classes="memory-metric-value")
-        
-    def create_memory_usage_bar(self, used_bytes: float, total_bytes: float, total_width: int = 40) -> str:
-        if total_bytes == 0:
-            return "No memory data available..."
-        
-        usage_percent = (used_bytes / total_bytes) * 100
-        available = total_bytes - used_bytes
+        yield Static("", id="history-plot", classes="metric-plot")
+        yield Static("", id="current-value", classes="current-value")
 
-        usable_width = total_width - 2
-        used_blocks = int((usable_width * usage_percent) / 100)
-        free_blocks = usable_width - used_blocks
+    def create_center_bar(
+        self, ram_usage: float, swap_usage: float, total_width: int
+    ) -> str:
+        """Create a center bar showing RAM, SWAP, and free space with three different colors."""
+            # Safety checks
+        ram_usage = max(0.0, float(ram_usage))
+        swap_usage = max(0.0, float(swap_usage))
+        total_width = max(0.0, int(total_width))+21
 
-        usage_bar = f"[orange1]{'█' * used_blocks}[/][cyan]{'█' * free_blocks}[/]"
+        # Calculate free space (assuming total memory is 100%)
+        free_usage = max(0.0, self.max_mem - ram_usage - swap_usage)
+        
+        # Calculate percentages for the bar visualization
+        ram_percent = min(ram_usage/self.max_mem, 1)
+        swap_percent = min(swap_usage/self.max_mem, 1)
+        free_percent = min(free_usage/self.max_mem, 1)
 
-        used_gb = used_bytes / (1024 ** 3)
-        available_gb = available / (1024 ** 3)
-        total_gb = total_bytes / (1024 ** 3)
-        used_gb_txt = align(f"{used_gb:.1f} GB USED", total_width // 2 - 2, "left")
-        free_gb_txt = align(f"FREE: {available_gb:.1f} GB ", total_width // 2 - 2, "right")
-        
-        return f' [orange1]{used_gb_txt}[/]RAM[cyan]{free_gb_txt}[/]\n {usage_bar} \n[white]{usage_percent:.1f}% of {total_gb:.1f} GB[/]'
+        # Calculate blocks for each section
+        total_blocks = total_width - 1  # Leave space for borders
+        ram_blocks = int((total_blocks * ram_percent))
+        swap_blocks = int((total_blocks * swap_percent))
+        free_blocks = total_blocks - ram_blocks - swap_blocks
 
-    def get_top_memory_processes(self, count=5):
-        """Get the top memory-consuming processes."""
-        processes = []
-        for proc in psutil.process_iter(['pid', 'name', 'memory_percent']):
-            try:
-                processes.append({
-                    'pid': proc.info['pid'],
-                    'name': proc.info['name'],
-                    'memory_percent': proc.info['memory_percent']
-                })
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
-        
-        # Sort by memory usage (descending) and take top count
-        top_processes = sorted(processes, key=lambda x: x['memory_percent'], reverse=True)[:count]
-        return top_processes
+        # Ensure we don't have negative blocks
+        if free_blocks < 0:
+            free_blocks = 0
+            # Adjust other blocks proportionally
+            total_used = ram_blocks + swap_blocks
+            if total_used > 0:
+                ram_blocks = int((ram_blocks / total_used) * total_blocks)
+                swap_blocks = total_blocks - ram_blocks
 
-    def create_detailed_view(self, memory_info, swap_info, width, height, meminfo=None, commit_ratio=None, top_processes=None, memory_history=None):
-        """Create a detailed view of memory metrics."""
-        # Create a visualization of memory usage
+        # Create the three-section bar
+        ram_bar = f"[orange3]{'█' * ram_blocks}[/]"
+        swap_bar = f"[cyan]{'█' * swap_blocks}[/]"
+        free_bar = f"[green]{'-' * free_blocks}[/]"
+
+        # Create labels with alignment
+        ram_label = f"{ram_usage:.1f}GB RAM"
+        swap_label = align(f"{swap_usage:.1f}GB SWAP", total_width // 2 - 2, "left")
+        free_label = align(f"FREE: {free_usage:.1f}GB", total_width // 2 -8, "right")
+
+        # Combine everything
+        bar = f"{ram_bar}{swap_bar}{free_bar}\n"
         
-        # Calculate memory information
-        total_ram = memory_info.total / (1024 ** 3)
-        used_ram = memory_info.used / (1024 ** 3)
-        available_ram = memory_info.available / (1024 ** 3)
-        
-        total_swap = swap_info.total / (1024 ** 3)
-        used_swap = swap_info.used / (1024 ** 3)
-        free_swap = swap_info.free / (1024 ** 3)
-        
-        # Create text information
-        detailed_info = (
-            f"[bold]RAM Usage[/]\n"
-            f"Used:      [orange1]{used_ram:.2f} GB[/] ({memory_info.percent:.1f}%)\n"
-            f"Available: [cyan]{available_ram:.2f} GB[/]\n"
-            f"Total:     [white]{total_ram:.2f} GB[/]\n\n"
-            f"[bold]SWAP Usage[/]\n"
-            f"Used:      [yellow]{used_swap:.2f} GB[/] ({swap_info.percent:.1f}%)\n"
-            f"Free:      [cyan]{free_swap:.2f} GB[/]\n"
-            f"Total:     [white]{total_swap:.2f} GB[/]"
-        )
-        
-        # Create a text box with buffer statistics
-        buffers = memory_info.buffers / (1024 ** 3)
-        cached = memory_info.cached / (1024 ** 3) if hasattr(memory_info, 'cached') else 0
-        shared = memory_info.shared / (1024 ** 3) if hasattr(memory_info, 'shared') else 0
-        
-        buffer_info = (
-            f"\n\n[bold]Memory Buffers[/]\n"
-            f"Buffers:   [green]{buffers:.2f} GB[/]\n"
-            f"Cached:    [green]{cached:.2f} GB[/]\n"
-            f"Shared:    [green]{shared:.2f} GB[/]"
-        )
-        
-        # Add commit ratio information if available
-        commit_info = ""
-        if commit_ratio is not None:
-            commit_info = f"\n\n[bold]Memory Commit[/]\nRatio: [{'red' if commit_ratio > 0.8 else 'green'}]{commit_ratio:.2f}[/]"
-        elif meminfo and 'CommitLimit' in meminfo and 'Committed_AS' in meminfo:
-            try:
-                commit_limit = int(meminfo['CommitLimit'].split()[0]) / 1024 / 1024  # Convert to GB
-                committed = int(meminfo['Committed_AS'].split()[0]) / 1024 / 1024    # Convert to GB
-                ratio = committed / commit_limit if commit_limit > 0 else 0
-                commit_info = (
-                    f"\n\n[bold]Memory Commit[/]\n"
-                    f"Used:  [{'red' if ratio > 0.8 else 'green'}]{committed:.2f} GB[/]\n"
-                    f"Limit: [white]{commit_limit:.2f} GB[/]\n"
-                    f"Ratio: [{'red' if ratio > 0.8 else 'green'}]{ratio:.2f}[/]"
-                )
-            except:
-                pass
-        
-        # Add page fault statistics if available
-        page_fault_info = ""
-        try:
-            page_stats = psutil.Process().memory_full_info()
-            if hasattr(page_stats, 'num_page_faults'):
-                page_fault_info = f"\n\n[bold]Page Faults[/]\nTotal: [magenta]{page_stats.num_page_faults:,}[/]"
-            elif hasattr(page_stats, 'pfaults'):
-                page_fault_info = f"\n\n[bold]Page Faults[/]\nTotal: [magenta]{page_stats.pfaults:,}[/]"
-        except:
-            pass
-        
-        # Get memory watermark info (high/low memory situations)
-        watermark_info = ""
-        if meminfo:
-            highwater = meminfo.get('HighTotal', meminfo.get('MemHighTotal', ''))
-            lowwater = meminfo.get('LowTotal', meminfo.get('MemLowTotal', ''))
-            if highwater or lowwater:
-                watermark_info = "\n\n[bold]Memory Watermarks[/]"
-                if highwater:
-                    watermark_info += f"\nHigh: {highwater}"
-                if lowwater:
-                    watermark_info += f"\nLow: {lowwater}"
-        
-        # Add process count information
-        process_count = len(list(psutil.process_iter()))
-        process_info = f"\n\n[bold]System[/]\nProcesses: [blue]{process_count}[/]"   
-    
-        all_info = f"{detailed_info}{buffer_info}{commit_info}{page_fault_info}{watermark_info}{process_info}"
+        return f" [orange3]{ram_label}[/]/[cyan]{swap_label}[/][green]{free_label}[/]\n {ram_bar}{swap_bar}{free_bar}"
+
+    def get_dual_plot(self) -> str:
+        """Create a dual plot showing RAM and SWAP usage over time."""
+        if not self.ram_history:
+            return "No data yet..."
+
         plt.clear_figure()
+        plt.plot_size(height=self.plot_height-1, width=self.plot_width)
         plt.theme("pro")
+
+        # Create negative values for SWAP to show it below zero
+        negative_swap = [-x - 0.1 for x in self.swap_history]
+        positive_ram = [x + 0.1 for x in self.ram_history]
+
+        # Find the maximum value to set symmetric y-axis limits
+        max_value = max(
+            max(self.ram_history, default=0),
+            max(negative_swap, key=abs, default=0),
+        )
+
+        # Add some padding to the max value
+        y_limit = max_value
+        if y_limit < 2:
+            y_limit = 2
+        self.max_mem = y_limit
+
+        # Set y-axis limits symmetrically around zero
+        plt.ylim(-y_limit, y_limit)
         
-        # Calculate available space for the chart
-        infolines = min(len(all_info.splitlines()), 10)  # Set height based on number of lines in all_info, limit to 10
-        chart_height = height - infolines
-        
-        # Create the memory chart
-        memory_chart = ""
-        
-        # If we have memory history data, create a stacked bar plot
-        if memory_history and len(memory_history['timestamps']) > 1:    
-            plt.plot_size(width=width, height=chart_height)
+        # Create custom y-axis ticks with % labels
+        num_ticks = min(5, self.plot_height - 1)
+        tick_step = 2 * y_limit / (num_ticks - 1) if num_ticks > 1 else 1
+
+        y_ticks = []
+        y_labels = []
+
+        for i in range(num_ticks):
+            value = -y_limit + i * tick_step
+            y_ticks.append(value)
+            # Add % to positive values (RAM) and negative values (SWAP)
+            if value == 0:
+                y_labels.append("0")
+            elif value > 0:
+                y_labels.append(f"{value:.0f}GB")  # Up arrow for RAM
+            else:
+                y_labels.append(f"{abs(value):.0f}GB")  # Down arrow for SWAP
+
+        plt.yticks(y_ticks, y_labels)
+
+        # Plot RAM values above zero (positive)
+        plt.plot(positive_ram, marker="braille", label="RAM")
+
+        # Plot SWAP values below zero (negative)
+        plt.plot(negative_swap, marker="braille", label="SWAP")
+
+        # Add a zero line
+        plt.hline(0.0)
+
+        plt.yfrequency(5)
+        plt.xfrequency(0)
+
+
+
+
+        # plot = ansi2rich(plt.build())
+        # plot_lines = plot.splitlines()
+        # plot_lines.append(bar)
+
+        return (
+            ansi2rich(plt.build())
+            .replace("\x1b[0m", "")
+            .replace("[blue]", "[orange3]")
+            .replace("[green]", "[cyan]")
+            .replace("──────┐","───MB─┐")
             
-            # Create time labels (just use indices for simplicity)
-            time_labels = [str(i) for i in range(len(memory_history['timestamps']))]
-            
-            # Create stacked bar data
-            # Order: free, used, cached, buffers, shared
-            stacked_data = [
-                memory_history['free'],
-                memory_history['used'],
-                memory_history['cached'],
-                memory_history['buffers'],
-                memory_history['shared']
-            ]
-            
-            # Define colors for each memory component
-            colors = ["cyan", "orange1", "green", "yellow", "magenta"]
-            
-            # Create stacked bar plot
-            plt.stacked_bar(time_labels, stacked_data, labels=["Free", "Used", "Cached", "Buffers", "Shared"], color=colors)
-            
-            # Add title and axis labels
-            plt.title("Memory Usage Over Time")
-            plt.xlabel("Time")
-            plt.ylabel("GB")
-            
-            # Convert the plot to rich text
-            memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "")
-        else:
-            # Fallback to the original bar chart if no history data
-            plt.plot_size(width=width, height=chart_height)
-            
-            # Create a horizontal bar chart for memory types
-            categories = ["RAM", "SWAP"]
-            values = [memory_info.percent, swap_info.percent]
-            colors = ["orange1", "yellow"]
-            
-            plt.bar(categories, values, orientation="h", color=colors)
-            plt.xlim(0, 100)
-            plt.xticks([0, 25, 50, 75, 100], ["0%", "25%", "50%", "75%", "100%"])
-            memory_chart = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("──────┐","────%─┐")
-        
-        return f"{memory_chart}{all_info}"
+        )
 
     def update_content(self, memory_info, swap_info, meminfo=None, commit_ratio=None, top_processes=None, memory_history=None):
-        # Calculate available width and height inside the widget
-        width = self.size.width - 4
-        height = self.size.height - 2
-        
-        try:
-            # Create the content for the widget
-            detailed_view = self.create_detailed_view(
-                memory_info, 
-                swap_info, 
-                width, 
-                height, 
-                meminfo=meminfo, 
-                commit_ratio=commit_ratio,
-                top_processes=top_processes,
-                memory_history=memory_history
-            )
+        if self.first:
+            self.first = False
+            return
             
-            # Update the widget content
-            self.query_one("#memory-content").update(detailed_view)
-        except Exception as e:
-            # Handle any errors during rendering
-            self.query_one("#memory-content").update(f"[red]Error updating memory widget: {str(e)}[/]") 
+        # Add current values to history
+        self.ram_history.append(memory_info.used/1024/1024/1024)
+        self.swap_history.append(swap_info.used/1024/1024/1024)
+        self.max_mem = memory_info.total/1024/1024/1024
+        self.border_title = f"RAM [{self.max_mem:2f}GB]"
+        # Calculate total width for the center bar
+        total_width = (
+            self.size.width
+            - len("MEM ")
+            - len(f"{memory_info.used:.1f}GB ")
+            - len(f"{self.max_mem - memory_info.used - swap_info.used:.2f}GB")
+            +13
+        )
+        
+        self.query_one("#history-plot").update(self.get_dual_plot()) 
+        # Update the center bar
+        self.query_one("#current-value").update(
+            self.create_center_bar(
+                memory_info.used/1024/1024/1024, swap_info.used/1024/1024/1024, total_width=total_width
+            )
+        )
+        

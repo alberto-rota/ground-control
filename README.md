@@ -2,7 +2,7 @@
 
 ![Ground Control Banner](https://github.com/alberto-rota/ground-control/blob/main/assets/horiz.png?raw=true)
 
-[![PyPI version](https://badge.fury.io/py/ground-control-tui.svg)](https://badge.fury.io/py/ground-control-tui)
+[![PyPI version](https://badge.fury.io/py/groundcontrol.svg)](https://badge.fury.io/py/groundcontrol)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
 
@@ -37,7 +37,7 @@ We tested **Ground Control** with the *Windows Terminal* app, *Tabby* and the *V
 
 ### 🔹 Install via PyPI
 ```sh
-pip install ground-control-tui
+pip install groundcontrol
 ```
 
 ### 🔹 Install from Source

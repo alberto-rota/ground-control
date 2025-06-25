@@ -12,7 +12,8 @@ class MetricWidget(Static):
         height: 100%;
         border: solid green;
         background: $surface;
-        layout: vertical;
+        overflow-y: auto;
+        overflow-x: auto;
     }
     
     .metric-title {

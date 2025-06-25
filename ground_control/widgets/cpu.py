@@ -130,7 +130,7 @@ class CPUWidget(MetricWidget):
 
     def update_content(self, cpu_percentages, cpu_freqs, mem_percent, disk_used, disk_total):
         # Calculate available width and height inside the widget.
-        width = self.size.width - 4
+        width = self.size.width - 1
         height = self.size.height - 2
         
         cpuram_chart = self.create_bar_chart(

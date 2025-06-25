@@ -202,11 +202,10 @@ class DiskIOWidget(MetricWidget):
             y_min, y_max = -limit, limit
             plt.ylim(y_min, y_max)
 
-            # Special handling for EFI partitions which might have near-zero activity
+            # For very low activity disks, use fixed scale to make it visible
             if all(x < 0.01 for x in self.read_history) and all(
                 x < 0.01 for x in self.write_history
             ):
-                # For very low activity disks, use fixed scale to make it visible
                 y_min, y_max = -0.5, 0.5
                 plt.ylim(y_min, y_max)
 
@@ -280,7 +279,6 @@ class DiskIOWidget(MetricWidget):
         write_speed: float,
         disk_used: int = None,
         disk_total: int = None,
-        is_efi_partition: bool = False,
     ):
         try:
             # Safety checks and defaults
@@ -291,14 +289,9 @@ class DiskIOWidget(MetricWidget):
                 int(disk_total) if disk_total is not None else 1
             )  # Avoid division by zero
 
-            # Update histories (only if not EFI - we don't track I/O for EFI partitions)
-            if not is_efi_partition:
-                self.read_history.append(read_speed)
-                self.write_history.append(write_speed)
-            elif len(self.read_history) == 0:
-                # Initialize with zeros for EFI
-                self.read_history.extend([0.0] * 10)
-                self.write_history.extend([0.0] * 10)
+            # Update histories
+            self.read_history.append(read_speed)
+            self.write_history.append(write_speed)
 
             self.disk_used = disk_used
             self.disk_total = disk_total
@@ -319,26 +312,16 @@ class DiskIOWidget(MetricWidget):
             # Update plot safely
             try:
                 history_plot = self.query_one("#history-plot")
-                if is_efi_partition:
-                    # Show special message for EFI partition
-                    history_plot.update(self.get_efi_partition_plot())
-                else:
-                    history_plot.update(self.get_dual_plot())
+                history_plot.update(self.get_dual_plot())
             except Exception as e:
                 pass
 
             # Update read/write bar safely
             try:
-                if is_efi_partition:
-                    horizontal_bar = (
-                        "DSK  I/O monitoring not available for EFI partition"
-                    )
-                    vertical_bar = rotate_text(horizontal_bar)
-                else:
-                    horizontal_bar = self.create_readwrite_bar(
-                        read_speed, write_speed, total_width=total_width
-                    )
-                    vertical_bar = rotate_text(horizontal_bar)
+                horizontal_bar = self.create_readwrite_bar(
+                    read_speed, write_speed, total_width=total_width
+                )
+                vertical_bar = rotate_text(horizontal_bar)
 
                 current_value = self.query_one("#current-value")
                 current_value.update(vertical_bar)
@@ -358,31 +341,3 @@ class DiskIOWidget(MetricWidget):
             self.first = False
         except Exception as e:
             pass
-
-    def get_efi_partition_plot(self) -> str:
-        """Create a special plot for EFI partitions indicating I/O stats aren't available"""
-        try:
-            plt.clear_figure()
-            plot_height = max(1, getattr(self, "plot_height", 10) - 1)
-            plot_width = max(10, getattr(self, "plot_width", 40))
-            plt.plot_size(height=plot_height, width=plot_width)
-            plt.theme("pro")
-
-            # Create an empty plot with a message
-            plt.ylim(-1, 1)
-            empty_data = [0] * 10
-            plt.plot(empty_data, marker="sd", label="No I/O data")
-            plt.hline(0.0)
-
-            # Add MB/s labels to y-axis
-            y_ticks = [-1.0, -0.5, 0.0, 0.5, 1.0]
-            y_labels = ["1.0 MB/s ↓", "0.5 MB/s ↓", "0.0", "0.5 MB/s ↑", "1.0 MB/s ↑"]
-            plt.yticks(y_ticks, y_labels)
-
-            return (
-                ansi2rich(plt.build())
-                .replace("\x1b[0m", "")
-                .replace("[blue]", "[magenta]")
-            )
-        except Exception as e:
-            return "EFI partition - I/O stats not available"

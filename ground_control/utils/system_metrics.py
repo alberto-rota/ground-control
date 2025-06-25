@@ -37,7 +37,8 @@ class SystemMetrics:
             'free': [],
             'cached': [],
             'buffers': [],
-            'shared': []
+            'shared': [],
+            'total': 0
         }
         self.max_history_points = 10  # Maximum number of history points to keep
 
@@ -408,11 +409,12 @@ class SystemMetrics:
         cached = memory_info.cached / (1024 ** 3) if hasattr(memory_info, 'cached') else 0
         buffers = memory_info.buffers / (1024 ** 3) if hasattr(memory_info, 'buffers') else 0
         shared = memory_info.shared / (1024 ** 3) if hasattr(memory_info, 'shared') else 0
+        total = memory_info.total / (1024 ** 3) if hasattr(memory_info, 'total') else 0
         
         self.memory_history['cached'].append(cached)
         self.memory_history['buffers'].append(buffers)
         self.memory_history['shared'].append(shared)
-        
+        self.memory_history['total']=total
         # Trim history if it exceeds the maximum number of points
         if len(self.memory_history['timestamps']) > self.max_history_points:
             for key in self.memory_history:

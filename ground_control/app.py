@@ -60,7 +60,6 @@ class GroundControl(App):
         self.grid = None
         self.select = None
         self.selectionoptions = []
-        self.need_to_change_layout = False
         self.json_exists = os.path.exists(CONFIG_FILE)
 
     def load_selection(self):
@@ -135,7 +134,6 @@ class GroundControl(App):
             self.create_json()
         self.set_layout(self.load_layout())
         
-        self.create_selection_list()
         self.apply_widget_visibility()  # Apply visibility after creating widgets
         self.set_interval(1.0, self.update_metrics)
 
@@ -161,33 +159,39 @@ class GroundControl(App):
                 self.grid.styles.grid_size_rows = 3
                 self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
 
-        if not self.need_to_change_layout:
-            cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
-            memory_widget = MemoryWidget("Memory")
-            self.disk_widgets = []
-            self.gpu_widgets = []
-            network_widget = NetworkIOWidget("Network")
+        # Always create new widgets when setup_widgets is called
+        cpu_widget = CPUWidget(f"{cpu_metrics['cpu_name']}")
+        memory_widget = MemoryWidget("Memory")
+        self.disk_widgets = []
+        self.gpu_widgets = []
+        network_widget = NetworkIOWidget("Network")
     
         await self.grid.mount(cpu_widget)
         await self.grid.mount(memory_widget)
     
         # Mount multiple disk widgets
         for disk in disk_metrics['disks']:
-            if not self.need_to_change_layout:
-                disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=f"disk_{disk['mountpoint'].replace('/', '_')}")
-                self.disk_widgets.append(disk_widget)
+            # Skip /boot/efi partitions - they should never be shown as widgets
+            if '/boot/efi' in disk['mountpoint']:
+                logger.info(f"Skipping EFI partition at {disk['mountpoint']} - not creating widget")
+                continue
+                
+            disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=f"disk_{disk['mountpoint'].replace('/', '_')}")
+            self.disk_widgets.append(disk_widget)
             await self.grid.mount(disk_widget)
         
         await self.grid.mount(network_widget)
         
         # Mount GPU widgets
         for gpu in gpu_metrics:
-            if not self.need_to_change_layout:
-                gpu_widget = GPUWidget(f"GPU @ {gpu['gpu_name']}", id=f"gpu_{len(self.gpu_widgets)}")
-                self.gpu_widgets.append(gpu_widget)
+            gpu_widget = GPUWidget(f"GPU @ {gpu['gpu_name']}", id=f"gpu_{len(self.gpu_widgets)}")
+            self.gpu_widgets.append(gpu_widget)
             await self.grid.mount(gpu_widget)
         
         logger.info(f"Setup complete: {len(self.disk_widgets)} disk widgets, {len(self.gpu_widgets)} GPU widgets")
+        
+        # Update selection list after widgets are created
+        self.create_selection_list()
 
     def create_json(self) -> None:
         selection_dict = {}
@@ -204,6 +208,7 @@ class GroundControl(App):
                 
     def create_selection_list(self) -> None:
         self.select.clear_options()
+        self.selectionoptions.clear()  # Clear the list before adding new options
         for widget in self.grid.children:
             if hasattr(widget, "title"):
                 # Default to True if the widget is missing in the loaded config.
@@ -277,23 +282,12 @@ class GroundControl(App):
                                 # Log the values we're providing
                                 logger.debug(f"Disk values: read={disk['read_speed']}, write={disk['write_speed']}, used={disk['disk_used']}, total={disk['disk_total']}")
                                 
-                                # Special handling for EFI partition - we'll show disk space but zero I/O
-                                if '/boot/efi' in disk['mountpoint']:
-                                    logger.info(f"Special handling for EFI partition at {disk['mountpoint']}")
-                                    disk_widget.update_content(
-                                        0.0,  # Read speed
-                                        0.0,  # Write speed
-                                        disk['disk_used'],
-                                        disk['disk_total'],
-                                        is_efi_partition=True  # Flag to indicate special handling
-                                    )
-                                else:
-                                    disk_widget.update_content(
-                                        disk['read_speed'],
-                                        disk['write_speed'],
-                                        disk['disk_used'],
-                                        disk['disk_total']
-                                    )
+                                disk_widget.update_content(
+                                    disk['read_speed'],
+                                    disk['write_speed'],
+                                    disk['disk_used'],
+                                    disk['disk_total']
+                                )
                             except Exception as e:
                                 import traceback
                                 logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
@@ -339,17 +333,14 @@ class GroundControl(App):
             self.update_layout()
 
     def action_set_horizontal(self) -> None:
-        self.need_to_change_layout = False
         # self.auto_layout = False
         self.set_layout("horizontal")
 
     def action_set_vertical(self) -> None:
-        self.need_to_change_layout = False
         # self.auto_layout = False
         self.set_layout("vertical")
 
     def action_set_grid(self) -> None:
-        self.need_to_change_layout = False
         # self.auto_layout = False
         self.set_layout("grid")
 
@@ -389,7 +380,7 @@ class GroundControl(App):
     async def apply_visibility_after_setup(self):
         """Apply widget visibility after layout change and widget setup"""
         # Wait a short time for setup_widgets to complete
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         # Then apply the visibility settings
         self.apply_widget_visibility()
 
