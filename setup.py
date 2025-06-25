@@ -1,8 +1,8 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="groundcontrol",
-    version="v1.0.2",
+    name="ground-control",
+    version="v1.1.0",
     packages=find_packages(),
     install_requires=[
         "numpy==2.2.2",
@@ -22,7 +22,7 @@ setup(
         ],
     },
 
-    description="A Python Textual app for monitoring VMs in the terminal",
+    description="A Python Textual app for monitoring machines in the terminal",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/alberto-rota/ground-control",
