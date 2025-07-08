@@ -414,8 +414,10 @@ class SystemMetrics:
         self.memory_history['cached'].append(cached)
         self.memory_history['buffers'].append(buffers)
         self.memory_history['shared'].append(shared)
-        self.memory_history['total']=total
+        self.memory_history['total'] = total
         # Trim history if it exceeds the maximum number of points
         if len(self.memory_history['timestamps']) > self.max_history_points:
             for key in self.memory_history:
-                self.memory_history[key] = self.memory_history[key][-self.max_history_points:]
+                # Skip 'total' as it's a single value, not a list
+                if key != 'total':
+                    self.memory_history[key] = self.memory_history[key][-self.max_history_points:]
