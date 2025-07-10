@@ -15,6 +15,7 @@ from ground_control.widgets.disk import DiskIOWidget
 from ground_control.widgets.network import NetworkIOWidget
 from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
+from ground_control.widgets.temperature import TemperatureWidget
 from ground_control.utils.system_metrics import SystemMetrics
 from platformdirs import user_config_dir  # Import for cross-platform config directory
 from textual.screen import Screen
@@ -86,7 +87,7 @@ class GroundControl(App):
         width: 100%;
         height: 100%;
     }   
-    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget {
+    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget {
         border: round rgb(19, 161, 14);
     }
     
@@ -168,6 +169,7 @@ class GroundControl(App):
         self.system_metrics = SystemMetrics()
         self.gpu_widgets = []
         self.disk_widgets = []
+        self.temperature_widget = None
         self.grid = None
         self.select = None
         self.refresh_buttons = None
@@ -176,28 +178,8 @@ class GroundControl(App):
         self.selected_widgets = {}  # Initialize selected_widgets
         self.json_exists = os.path.exists(CONFIG_FILE)
         self._update_timer = None
+        self._is_initializing = True  # Flag to prevent toast notifications during startup
 
-    async def action_set_refresh(self) -> None:
-        """Open dialog to set refresh rate"""
-        # Show the refresh rate input dialog
-        refresh_screen = RefreshRateScreen()
-        result = await self.push_screen(refresh_screen)
-        
-        if result is not None:
-            try:
-                new_rate = float(result)
-                if new_rate > 0:  # Ensure positive rate
-                    # Clamp the rate to valid range and apply
-                    clamped_rate = max(self.MIN_REFRESH_RATE, min(self.MAX_REFRESH_RATE, new_rate))
-                    logger.info(f"Setting refresh rate to {clamped_rate}s")
-                    self.refresh_rate = clamped_rate
-                    if self._update_timer:
-                        self._update_timer.stop()
-                    self._update_timer = self.set_interval(clamped_rate, self.update_metrics)
-                    self.save_config()
-                    # self.update_footer()
-            except ValueError:
-                logger.error(f"Invalid refresh rate value: {result}")
 
     def watch_refresh_rate(self, new_rate: float) -> None:
         """React to changes in refresh rate"""
@@ -206,8 +188,9 @@ class GroundControl(App):
         self._update_timer = self.set_interval(new_rate, self.update_metrics)
         self.save_config()
         self._update_refresh_buttons()
-        # Show toast notification
-        self.notify(f"Refresh rate changed to {new_rate}s", title="Settings Updated", severity="information")
+        # Show toast notification only when not initializing
+        if not self._is_initializing:
+            self.notify(f"Refresh rate changed to {new_rate}s", title="Settings Updated", severity="information")
 
     def watch_history_size(self, new_size: int) -> None:
         """React to changes in history size"""
@@ -215,8 +198,9 @@ class GroundControl(App):
         self._update_history_buttons()
         # Instead of recreating all widgets, just update the history size for existing widgets
         self._update_widget_history_sizes(new_size)
-        # Show toast notification
-        self.notify(f"History size changed to {new_size}s", title="Settings Updated", severity="information")
+        # Show toast notification only when not initializing
+        if not self._is_initializing:
+            self.notify(f"History size changed to {new_size}s", title="Settings Updated", severity="information")
         logger.debug(f"History size changed to {new_size}s")
 
     @on(Button.Pressed)
@@ -235,8 +219,9 @@ class GroundControl(App):
                     if rate == 500:
                         rate = 0.5
                     self.refresh_rate = rate
+                    # The watch_refresh_rate method will handle timer management
                 except (ValueError, IndexError):
-                    pass
+                    self.notify(f"Invalid refresh rate value: {event.button.id}", title="Error", severity="error")
             elif event.button.id.startswith("history-"):
                 try:
                     # Remove active class from all history buttons
@@ -259,8 +244,11 @@ class GroundControl(App):
             # Then add it to the matching one
             for rate in self.refresh_buttons.rates:
                 button = self.query_one(f"#refresh-{rate}".replace(".", ""))
-                if button and abs(rate - self.refresh_rate) < 0.01:  # Compare with small epsilon
-                    button.add_class("-active")
+                if button:
+                    # Handle the special case where 500ms button maps to 0.5s refresh rate
+                    expected_rate = 0.5 if rate == 500 else rate
+                    if abs(expected_rate - self.refresh_rate) < 0.01:  # Compare with small epsilon
+                        button.add_class("-active")
 
     def _update_history_buttons(self) -> None:
         """Update the active state of history size buttons"""
@@ -303,19 +291,6 @@ class GroundControl(App):
         
         with open(CONFIG_FILE, "w") as f:
             json.dump(config_data, f, indent=4)
-
-    def action_increase_refresh(self) -> None:
-        """Increase refresh rate"""
-        new_rate = min(self.refresh_rate + self.REFRESH_STEP, self.MAX_REFRESH_RATE)
-        if new_rate != self.refresh_rate:
-            self.refresh_rate = round(new_rate, 1)
-
-    def action_decrease_refresh(self) -> None:
-        """Decrease refresh rate"""
-        new_rate = max(self.refresh_rate - self.REFRESH_STEP, self.MIN_REFRESH_RATE)
-        if new_rate != self.refresh_rate:
-            self.refresh_rate = round(new_rate, 1)
-
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
@@ -404,6 +379,9 @@ class GroundControl(App):
         self._update_timer = self.set_interval(self.refresh_rate, self.update_metrics)
         self._update_refresh_buttons()
         self._update_history_buttons()
+        
+        # Mark initialization as complete - now toast notifications can be shown
+        self._is_initializing = False
 
     async def setup_widgets(self) -> None:
         self.grid.remove_children()
@@ -411,6 +389,7 @@ class GroundControl(App):
         cpu_metrics = self.system_metrics.get_cpu_metrics()
         disk_metrics = self.system_metrics.get_disk_metrics()
         memory_metrics = self.system_metrics.get_memory_metrics()
+        temperature_metrics = self.system_metrics.get_temperature_metrics()
         num_gpus = len(gpu_metrics)
         grid_columns = self.get_layout_columns(num_gpus)
         if self.current_layout == "horizontal":
@@ -432,10 +411,16 @@ class GroundControl(App):
         memory_widget = MemoryWidget("Memory")
         self.disk_widgets = []
         self.gpu_widgets = []
+        self.temperature_widget = None
         network_widget = NetworkIOWidget("Network")
     
         await self.grid.mount(cpu_widget)
         await self.grid.mount(memory_widget)
+        
+        # Create temperature widget only if temperature data is available
+        if temperature_metrics:
+            self.temperature_widget = TemperatureWidget("Temperature")
+            await self.grid.mount(self.temperature_widget)
     
         # Mount multiple disk widgets
         for disk in disk_metrics['disks']:
@@ -515,6 +500,7 @@ class GroundControl(App):
             network_metrics = self.system_metrics.get_network_metrics()
             gpu_metrics = self.system_metrics.get_gpu_metrics()
             memory_metrics = self.system_metrics.get_memory_metrics()
+            temperature_metrics = self.system_metrics.get_temperature_metrics()
             
             # Update CPU widget
             cpu_widget = self.query_one(CPUWidget)
@@ -589,6 +575,13 @@ class GroundControl(App):
                     )
                 except Exception as e:
                     logger.error(f"Error updating {gpu_widget.title}: {e}")
+
+            # Update temperature widget if available
+            if self.temperature_widget and temperature_metrics:
+                try:
+                    self.temperature_widget.update_content(temperature_metrics)
+                except Exception as e:
+                    logger.error(f"Error updating temperature widget: {e}")
 
         except Exception as e:
             logger.error(f"Error updating metrics: {e}")
@@ -695,6 +688,16 @@ class GroundControl(App):
                 network_widget.upload_history = network_widget.upload_history.__class__(maxlen=new_size)
         except:
             pass
+        
+        # Update Temperature widget
+        if self.temperature_widget:
+            try:
+                if hasattr(self.temperature_widget, 'temperature_histories'):
+                    for sensor_name in self.temperature_widget.temperature_histories:
+                        self.temperature_widget.temperature_histories[sensor_name] = \
+                            self.temperature_widget.temperature_histories[sensor_name].__class__(maxlen=new_size)
+            except:
+                pass
         
         # Update Disk widgets
         for disk_widget in self.disk_widgets:

@@ -1,6 +1,9 @@
 import psutil
 import platform
 import time
+import os
+import glob
+import subprocess
 try:
     import pynvml
     pynvml.nvmlInit()
@@ -8,7 +11,7 @@ try:
 except:
     NVML_AVAILABLE = False
 from nvitop import Device, MigDevice,NA
-from typing import List, Union
+from typing import List, Union, Dict, Optional
 import nvitop  # Ensure nvitop is installed: pip install nvitop
 
 import platform
@@ -41,6 +44,147 @@ class SystemMetrics:
             'total': 0
         }
         self.max_history_points = 10  # Maximum number of history points to keep
+        
+        # Initialize temperature sensors
+        self._temperature_sensors = self._discover_temperature_sensors()
+
+    def _discover_temperature_sensors(self) -> Dict[str, str]:
+        """Discover available temperature sensors on the system."""
+        sensors = {}
+        
+        if platform.system() == "Linux":
+            # Check thermal zones
+            thermal_zones = glob.glob('/sys/class/thermal/thermal_zone*/type')
+            for zone_type_file in thermal_zones:
+                zone_dir = os.path.dirname(zone_type_file)
+                temp_file = os.path.join(zone_dir, 'temp')
+                
+                if os.path.exists(temp_file):
+                    try:
+                        with open(zone_type_file, 'r') as f:
+                            sensor_type = f.read().strip()
+                        
+                        # Skip unimportant sensors
+                        if sensor_type.lower() in ['acpi', 'iwlwifi', 'bluetooth', 'pch_']:
+                            continue
+                        
+                        # Test reading temperature
+                        with open(temp_file, 'r') as f:
+                            temp_raw = int(f.read().strip())
+                            if temp_raw > 0:  # Valid temperature reading
+                                sensors[sensor_type] = temp_file
+                    except (IOError, ValueError, OSError):
+                        continue
+            
+            # Check hwmon sensors
+            hwmon_dirs = glob.glob('/sys/class/hwmon/hwmon*/temp*_input')
+            for temp_file in hwmon_dirs:
+                hwmon_dir = os.path.dirname(temp_file)
+                temp_id = os.path.basename(temp_file).replace('_input', '')
+                
+                # Try to get label for this sensor
+                label_file = os.path.join(hwmon_dir, f"{temp_id}_label")
+                name_file = os.path.join(hwmon_dir, "name")
+                
+                sensor_name = "Unknown"
+                try:
+                    if os.path.exists(label_file):
+                        with open(label_file, 'r') as f:
+                            sensor_name = f.read().strip()
+                    elif os.path.exists(name_file):
+                        with open(name_file, 'r') as f:
+                            base_name = f.read().strip()
+                        sensor_name = f"{base_name}_{temp_id}"
+                    else:
+                        sensor_name = f"temp_{temp_id}"
+                    
+                    # Test reading temperature
+                    with open(temp_file, 'r') as f:
+                        temp_raw = int(f.read().strip())
+                        if temp_raw > 0:  # Valid temperature reading
+                            sensors[sensor_name] = temp_file
+                except (IOError, ValueError, OSError):
+                    continue
+        
+        elif platform.system() == "Darwin":  # macOS
+            try:
+                # Try to use sensors command if available
+                result = subprocess.run(['sensors', '-A'], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    # Parse sensors output (basic implementation)
+                    for line in result.stdout.split('\n'):
+                        if '°C' in line and ':' in line:
+                            parts = line.split(':')
+                            if len(parts) >= 2:
+                                sensor_name = parts[0].strip()
+                                sensors[sensor_name] = 'sensors_cmd'
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+                pass
+        
+        elif platform.system() == "Windows":
+            # Windows temperature monitoring would require additional libraries
+            # For now, we'll just check if any are available via WMI
+            try:
+                import wmi
+                c = wmi.WMI()
+                for temp in c.Win32_TemperatureProbe():
+                    if temp.CurrentReading:
+                        sensors[f"Sensor_{temp.Name}"] = f"wmi_{temp.Name}"
+            except ImportError:
+                pass
+        
+        return sensors
+
+    def get_temperature_metrics(self) -> Optional[Dict]:
+        """Get temperature metrics from available sensors."""
+        if not self._temperature_sensors:
+            return None
+        
+        temperatures = {}
+        
+        for sensor_name, sensor_path in self._temperature_sensors.items():
+            try:
+                if platform.system() == "Linux":
+                    with open(sensor_path, 'r') as f:
+                        temp_raw = int(f.read().strip())
+                        # Convert from millidegrees to degrees Celsius
+                        temp_celsius = temp_raw / 1000.0
+                        temperatures[sensor_name] = temp_celsius
+                        
+                elif platform.system() == "Darwin" and sensor_path == 'sensors_cmd':
+                    # For macOS, we'd need to parse sensors command output
+                    # This is a simplified approach
+                    result = subprocess.run(['sensors', '-A'], capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            if sensor_name in line and '°C' in line:
+                                # Extract temperature value
+                                import re
+                                match = re.search(r'(\d+\.?\d*)\s*°C', line)
+                                if match:
+                                    temperatures[sensor_name] = float(match.group(1))
+                                    break
+                
+                elif platform.system() == "Windows":
+                    # Windows WMI approach would go here
+                    pass
+                    
+            except (IOError, ValueError, OSError, subprocess.TimeoutExpired):
+                continue
+        
+        # Add GPU temperatures if available
+        if NVML_AVAILABLE:
+            for device in self.devices:
+                try:
+                    with device.oneshot():
+                        gpu_temp = device.temperature()
+                        if gpu_temp is not NA:
+                            gpu_name = f"GPU_{device.index if not isinstance(device.index, tuple) else device.index[0]}"
+                            temperatures[gpu_name] = float(gpu_temp)
+                except:
+                    continue
+        
+        return temperatures if temperatures else None
 
     def _initialize_counters(self):
         io_counters = psutil.net_io_counters()
