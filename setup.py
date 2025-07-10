@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="groundcontrol",
+    name="ground-control-tui",
     version="v1.2.0",
     packages=find_packages(),
     install_requires=[
