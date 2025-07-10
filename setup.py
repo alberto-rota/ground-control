@@ -2,22 +2,23 @@ from setuptools import setup, find_packages
 
 setup(
     name="groundcontrol",
-    version="v1.0.2",
+    version="v1.2.0",
     packages=find_packages(),
     install_requires=[
-        "click==8.2.1",
-        "numpy==1.24.3", 
-        "nvitop==1.5.1",
-        "platformdirs==4.3.8",
+        "numpy==2.0.0",
+        "nvidia_ml_py==12.570.86", 
+        "nvitop==1.4.2",
+        "platformdirs==4.3.6",
         "plotext==5.3.2",
-        "psutil==7.0.0",
-        "pynvml==12.0.0",
-        "setuptools==65.6.3",
-        "textual==3.7.1",
+        "psutil==6.1.1",
+        "pynvml==11.5.3",
+        "setuptools==75.1.0",
+        "textual==1.0.0",
     ],
     entry_points={
         "console_scripts": [
             "groundcontrol = ground_control.main:entry",
+            "gc = ground_control.main:entry",
         ],
     },
 
