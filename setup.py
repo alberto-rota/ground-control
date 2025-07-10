@@ -22,7 +22,7 @@ setup(
         ],
     },
 
-    description="A Python Textual app for monitoring VMs in the terminal",
+    description="A Python Textual app for monitoring hardware in the terminal",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/alberto-rota/ground-control",
