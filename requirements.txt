@@ -1,4 +1,4 @@
-numpy==2.2.2
+numpy==2.0.0
 nvidia_ml_py==12.570.86
 nvitop==1.4.2
 platformdirs==4.3.6

@@ -1,13 +1,14 @@
 import asyncio
 from textual.app import App, ComposeResult
-from textual.containers import Grid
-from textual.widgets import Header, Footer, SelectionList
+from textual.containers import Grid, Horizontal
+from textual.widgets import Header, Footer, SelectionList, Button, Static,Input
 from textual.widgets.selection_list import Selection
+from textual.reactive import reactive
+from textual import on
 import math
 import os
 import json
 import logging
-from textual import on
 from textual.events import Mount
 from ground_control.widgets.cpu import CPUWidget
 from ground_control.widgets.disk import DiskIOWidget
@@ -16,6 +17,7 @@ from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
 from ground_control.utils.system_metrics import SystemMetrics
 from platformdirs import user_config_dir  # Import for cross-platform config directory
+from textual.screen import Screen
 
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
@@ -33,15 +35,125 @@ logger = logging.getLogger("ground-control")
 # Ensure the directory exists
 os.makedirs(CONFIG_DIR, exist_ok=True)
 
+
+class RefreshRateButtons(Static):
+    """A horizontal array of refresh rate buttons"""
+    DEFAULT_CSS = """
+    .title {
+        text-align: left;
+        height: 1;
+    }
+    """
+    def __init__(self, title="Refresh Rate"):
+        super().__init__(id="refresh-buttons")
+        self.border_title = title
+        # Rates in seconds: 0.5, 1, 2, 5, 10, 15, 30, 60 (1 min)
+        self.rates = [60, 30, 15, 10, 5, 2, 1, 500]
+
+    def compose(self) -> ComposeResult:
+        """Create the refresh rate buttons"""
+        with Horizontal(id="refresh-container"):
+            for rate in self.rates:
+                label = "1m" if rate == 60 else "30s" if rate == 30 else "500ms" if rate == 500 else f"{rate}s"
+                yield Button(label, id=f"refresh-{rate}".replace(".", ""), classes="refresh-button")
+
+class HistorySizeButtons(Static):
+    """A horizontal array of history size buttons"""
+    DEFAULT_CSS = """
+    .title {
+        text-align: left;
+        height: 1;
+    }
+    """
+    def __init__(self, title="History Size"):
+        super().__init__(id="history-buttons")
+        self.border_title = title
+        # History sizes in seconds
+        self.sizes = [600, 300, 180, 120, 60, 30]
+
+    def compose(self) -> ComposeResult:
+        """Create the history size buttons"""
+        with Horizontal(id="history-container"):
+            for size in self.sizes:
+                label = f"{size//60}m" if size >= 60 else f"{size}s"
+                yield Button(label, id=f"history-{size}", classes="history-button")
+
 class GroundControl(App):
     CSS = """
     Grid {
         grid-size: 3 3;
+        align: center middle;
+        width: 100%;
+        height: 100%;
     }   
     GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget {
         border: round rgb(19, 161, 14);
     }
+    
+    SelectionList {
+        background: $surface;
+        border: round rgb(19, 161, 14);
+        width: 100%;
+        height: auto;
+    }
+
+    #config-container {
+        width: 100%;
+        layout: vertical;
+        background: $surface;
+        height: auto;
+    }
+    
+    #controls-container {
+        width: 100%;
+        layout: horizontal;
+        height: auto;
+    }
+    
+    #refresh-buttons, #history-buttons {
+        width: 50%;
+        height: auto;
+        padding: 0;
+        border: round rgb(19, 161, 14);
+        margin: 0 0;
+    }
+    
+    #refresh-container, #history-container {
+        width: 100%;
+        height: 3;
+        align: center middle;
+        background: $surface;
+        padding: 0;
+    }
+    
+    .refresh-button, .history-button {
+        margin: 0 0;
+        height: 3;
+        min-width: 6;
+        background: $boost;
+    }
+    
+    .refresh-button:hover, .history-button:hover {
+        background: $accent;
+    }
+    
+    .refresh-button.-active, .history-button.-active {
+        background: rgb(19, 161, 14);
+        color: $text;
+    }
+    
+    .config-title {
+        text-align: left;
+        height: 1;
+    }
     """
+
+    # Define reactive properties
+    refresh_rate = reactive(1.0)
+    history_size = reactive(120)
+    MIN_REFRESH_RATE = 1
+    MAX_REFRESH_RATE = 100
+    REFRESH_STEP = 0.05
 
     BINDINGS = [
         ("q", "quit", "Quit"),
@@ -53,14 +165,157 @@ class GroundControl(App):
 
     def __init__(self):
         super().__init__()
-        # self.set_layout(self.current_layout)
-        # self.auto_layout = False
         self.system_metrics = SystemMetrics()
         self.gpu_widgets = []
+        self.disk_widgets = []
         self.grid = None
         self.select = None
+        self.refresh_buttons = None
+        self.history_buttons = None
         self.selectionoptions = []
+        self.selected_widgets = {}  # Initialize selected_widgets
         self.json_exists = os.path.exists(CONFIG_FILE)
+        self._update_timer = None
+
+    async def action_set_refresh(self) -> None:
+        """Open dialog to set refresh rate"""
+        # Show the refresh rate input dialog
+        refresh_screen = RefreshRateScreen()
+        result = await self.push_screen(refresh_screen)
+        
+        if result is not None:
+            try:
+                new_rate = float(result)
+                if new_rate > 0:  # Ensure positive rate
+                    # Clamp the rate to valid range and apply
+                    clamped_rate = max(self.MIN_REFRESH_RATE, min(self.MAX_REFRESH_RATE, new_rate))
+                    logger.info(f"Setting refresh rate to {clamped_rate}s")
+                    self.refresh_rate = clamped_rate
+                    if self._update_timer:
+                        self._update_timer.stop()
+                    self._update_timer = self.set_interval(clamped_rate, self.update_metrics)
+                    self.save_config()
+                    # self.update_footer()
+            except ValueError:
+                logger.error(f"Invalid refresh rate value: {result}")
+
+    def watch_refresh_rate(self, new_rate: float) -> None:
+        """React to changes in refresh rate"""
+        if self._update_timer:
+            self._update_timer.stop()
+        self._update_timer = self.set_interval(new_rate, self.update_metrics)
+        self.save_config()
+        self._update_refresh_buttons()
+        # Show toast notification
+        self.notify(f"Refresh rate changed to {new_rate}s", title="Settings Updated", severity="information")
+
+    def watch_history_size(self, new_size: int) -> None:
+        """React to changes in history size"""
+        self.save_config()
+        self._update_history_buttons()
+        # Instead of recreating all widgets, just update the history size for existing widgets
+        self._update_widget_history_sizes(new_size)
+        # Show toast notification
+        self.notify(f"History size changed to {new_size}s", title="Settings Updated", severity="information")
+        logger.debug(f"History size changed to {new_size}s")
+
+    @on(Button.Pressed)
+    def handle_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses"""
+        if event.button.id:
+            if event.button.id.startswith("refresh-"):
+                try:
+                    # Remove active class from all refresh buttons
+                    for button in self.query(f".refresh-button"):
+                        button.remove_class("-active")
+                    # Add active class to clicked button
+                    event.button.add_class("-active")
+                    # Update the refresh rate
+                    rate = float(event.button.id.replace("refresh-", ""))
+                    if rate == 500:
+                        rate = 0.5
+                    self.refresh_rate = rate
+                except (ValueError, IndexError):
+                    pass
+            elif event.button.id.startswith("history-"):
+                try:
+                    # Remove active class from all history buttons
+                    for button in self.query(f".history-button"):
+                        button.remove_class("-active")
+                    # Add active class to clicked button
+                    event.button.add_class("-active")
+                    # Update the history size
+                    size = int(event.button.id.replace("history-", ""))
+                    self.history_size = size
+                except (ValueError, IndexError):
+                    pass
+
+    def _update_refresh_buttons(self) -> None:
+        """Update the active state of refresh rate buttons"""
+        if self.refresh_buttons:
+            # First remove active class from all buttons
+            for button in self.query(f".refresh-button"):
+                button.remove_class("-active")
+            # Then add it to the matching one
+            for rate in self.refresh_buttons.rates:
+                button = self.query_one(f"#refresh-{rate}".replace(".", ""))
+                if button and abs(rate - self.refresh_rate) < 0.01:  # Compare with small epsilon
+                    button.add_class("-active")
+
+    def _update_history_buttons(self) -> None:
+        """Update the active state of history size buttons"""
+        if self.history_buttons:
+            # First remove active class from all buttons
+            for button in self.query(f".history-button"):
+                button.remove_class("-active")
+            # Then add it to the matching one
+            for size in self.history_buttons.sizes:
+                button = self.query_one(f"#history-{size}")
+                if button and size == self.history_size:
+                    button.add_class("-active")
+
+    def load_config(self):
+        """Load configuration from file"""
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    config = json.load(f)
+                    self.refresh_rate = float(config.get("refresh_rate", 1.0))
+                    self.history_size = int(config.get("history_size", 120))
+                    return config.get("selected", {})
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return {}
+
+    def save_config(self):
+        """Save configuration to file"""
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                config_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            config_data = {}
+        
+        config_data.update({
+            "refresh_rate": self.refresh_rate,
+            "history_size": self.history_size,
+            "selected": self.selected_widgets
+        })
+        
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config_data, f, indent=4)
+
+    def action_increase_refresh(self) -> None:
+        """Increase refresh rate"""
+        new_rate = min(self.refresh_rate + self.REFRESH_STEP, self.MAX_REFRESH_RATE)
+        if new_rate != self.refresh_rate:
+            self.refresh_rate = round(new_rate, 1)
+
+    def action_decrease_refresh(self) -> None:
+        """Decrease refresh rate"""
+        new_rate = max(self.refresh_rate - self.REFRESH_STEP, self.MIN_REFRESH_RATE)
+        if new_rate != self.refresh_rate:
+            self.refresh_rate = round(new_rate, 1)
+
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
@@ -117,25 +372,38 @@ class GroundControl(App):
         return len(self.select.selected)
 
     def compose(self) -> ComposeResult:
+        """Create child widgets for the app."""
         yield Header()
-        # Disable multiple selection to ensure only one is selected at a time.
-        self.select = SelectionList[str]()
-        self.select.styles.display = "none"
-        yield self.select
+        
+        # Create a container for configuration elements
+        with Grid(id="config-container") as config:
+            self.select = SelectionList[str]()
+            self.select.border_title = "Visible Widgets"
+            yield self.select
+            # Create horizontal container for refresh rate and history size buttons
+            with Horizontal(id="controls-container"):
+                self.refresh_buttons = RefreshRateButtons()
+                yield self.refresh_buttons
+                self.history_buttons = HistorySizeButtons()
+                yield self.history_buttons
+        config.styles.display = "none"
+        
         self.grid = Grid(classes="grid")
         yield self.grid
         yield Footer()
 
     async def on_mount(self) -> None:
         self.current_layout = "grid"
-        self.selected_widgets = self.load_selection()  # Load selection first
+        self.selected_widgets = self.load_config()  # Load all config
         await self.setup_widgets()
         if not self.json_exists:
             self.create_json()
         self.set_layout(self.load_layout())
         
-        self.apply_widget_visibility()  # Apply visibility after creating widgets
-        self.set_interval(1.0, self.update_metrics)
+        self.apply_widget_visibility()
+        self._update_timer = self.set_interval(self.refresh_rate, self.update_metrics)
+        self._update_refresh_buttons()
+        self._update_history_buttons()
 
     async def setup_widgets(self) -> None:
         self.grid.remove_children()
@@ -200,7 +468,9 @@ class GroundControl(App):
                 selection_dict[widget.title] = True
         default_config = {
             "selected": selection_dict,
-            "layout": "grid"
+            "layout": "grid",
+            "refresh_rate": self.refresh_rate,
+            "history_size": self.history_size
         }
         with open(CONFIG_FILE, "w") as f:
             json.dump(default_config, f, indent=4)
@@ -324,8 +594,11 @@ class GroundControl(App):
             logger.error(f"Error updating metrics: {e}")
 
     def action_configure(self) -> None:
-        widgetslist = self.select
-        widgetslist.styles.display = "block" if widgetslist.styles.display == "none" else "none"
+        """Toggle configuration panel visibility"""
+        config = self.query_one("#config-container")
+        config.styles.display = "none" if config.styles.display == "block" else "block"
+        if config.styles.display == "block":
+            self._update_refresh_buttons()
         
     def action_toggle_auto(self) -> None:
         # self.auto_layout = not self.auto_layout
@@ -393,4 +666,53 @@ class GroundControl(App):
                 widget.styles.display = "block" if is_visible else "none"
                 logger.debug(f"Widget {widget.title}: visible = {is_visible}")
 
+    def _update_widget_history_sizes(self, new_size: int) -> None:
+        """Update history size for all existing widgets without recreating them"""
+        # Update CPU widget
+        try:
+            cpu_widget = self.query_one(CPUWidget)
+            if hasattr(cpu_widget, 'history'):
+                cpu_widget.history = cpu_widget.history.__class__(maxlen=new_size)
+        except:
+            pass
+        
+        # Update Memory widget
+        try:
+            memory_widget = self.query_one(MemoryWidget)
+            if hasattr(memory_widget, 'ram_history'):
+                memory_widget.ram_history = memory_widget.ram_history.__class__(maxlen=new_size)
+            if hasattr(memory_widget, 'swap_history'):
+                memory_widget.swap_history = memory_widget.swap_history.__class__(maxlen=new_size)
+        except:
+            pass
+        
+        # Update Network widget
+        try:
+            network_widget = self.query_one(NetworkIOWidget)
+            if hasattr(network_widget, 'download_history'):
+                network_widget.download_history = network_widget.download_history.__class__(maxlen=new_size)
+            if hasattr(network_widget, 'upload_history'):
+                network_widget.upload_history = network_widget.upload_history.__class__(maxlen=new_size)
+        except:
+            pass
+        
+        # Update Disk widgets
+        for disk_widget in self.disk_widgets:
+            try:
+                if hasattr(disk_widget, 'read_history'):
+                    disk_widget.read_history = disk_widget.read_history.__class__(maxlen=new_size)
+                if hasattr(disk_widget, 'write_history'):
+                    disk_widget.write_history = disk_widget.write_history.__class__(maxlen=new_size)
+            except:
+                pass
+        
+        # Update GPU widgets
+        for gpu_widget in self.gpu_widgets:
+            try:
+                if hasattr(gpu_widget, 'gpu_ram_history'):
+                    gpu_widget.gpu_ram_history = gpu_widget.gpu_ram_history.__class__(maxlen=new_size)
+                if hasattr(gpu_widget, 'gpu_usage_history'):
+                    gpu_widget.gpu_usage_history = gpu_widget.gpu_usage_history.__class__(maxlen=new_size)
+            except:
+                pass
         

@@ -53,6 +53,7 @@ class CPUWidget(MetricWidget):
 
     def create_bar_chart(self, cpu_percentages, cpu_freqs, mem_percent, disk_used, disk_total, width, height):
         # If the full CPU chart fits vertically, use the single chart approach.
+        cpu_percentages = [int(x) for x in cpu_percentages]
         if len(cpu_percentages) + 2 <= height-2:
             plt.clear_figure()
             plt.theme("pro")
@@ -62,7 +63,7 @@ class CPUWidget(MetricWidget):
             if len(cpu_percentages) + 2 <= height-2:
                 orientation = "v" 
                 plt.ylim(6, 100)
-                plt.plot_size(width=width+1, height=height-2)
+                plt.plot_size(width=width+1, height=height+2)
                 
                 # plt.yfrequency(0)
                 
@@ -76,19 +77,19 @@ class CPUWidget(MetricWidget):
             cpubars = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", "").replace("──────┐","────%─┐")
 
             
-            plt.clear_figure()
-            plt.theme("pro")
-            plt.plot_size(width=width+1, height=4)
-            plt.xticks([1, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
-            plt.xlim(5, 100)
-            plt.bar(["RAM"], [mem_percent], orientation="h")
-            rambars = ansi2rich(plt.build()).replace("blue","orange1").replace("──────┐","────%─┐")
+            # plt.clear_figure()
+            # plt.theme("pro")
+            # plt.plot_size(width=width+1, height=4)
+            # plt.xticks([1, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
+            # plt.xlim(5, 100)
+            # plt.bar(["RAM"], [mem_percent], orientation="h")
+            # rambars = ansi2rich(plt.build()).replace("blue","orange1").replace("──────┐","────%─┐")
 
-            return cpubars+ rambars
+            return cpubars#+ rambars
         else:
             # Group CPU cores to avoid an overly tall chart.
             # Maximum rows per group is the available height minus 2 (for borders/margins).
-            max_rows = height -4
+            max_rows = height
             groups = [cpu_percentages[i:i+max_rows] for i in range(0, len(cpu_percentages), max_rows)]
             num_groups = len(groups)
             # Divide available width among the groups (with a minimum width).
@@ -118,15 +119,15 @@ class CPUWidget(MetricWidget):
                 combined_lines.append(combined_line)
             combined_cpu_chart = "\n".join(combined_lines)
             
-            plt.clear_figure()
-            plt.theme("pro")
-            plt.plot_size(width=width+2, height=4)
-            plt.xticks([1, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
-            plt.xlim(5, 100)
-            plt.bar(["RAM"], [mem_percent], orientation="h")
+            # plt.clear_figure()
+            # plt.theme("pro")
+            # plt.plot_size(width=width+2, height=4)
+            # plt.xticks([1, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
+            # plt.xlim(5, 100)
+            # plt.bar(["RAM"], [mem_percent], orientation="h")
             rambars = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", "")
             
-            return combined_cpu_chart+"\n"+ rambars
+            return combined_cpu_chart#+"\n"+ rambars
 
     def update_content(self, cpu_percentages, cpu_freqs, mem_percent, disk_used, disk_total):
         # Calculate available width and height inside the widget.
