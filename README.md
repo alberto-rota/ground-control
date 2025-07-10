@@ -38,7 +38,7 @@ We tested **Ground Control** with the *Windows Terminal* app, *Tabby* and the *V
 
 ### 🔹 Install via PyPI
 ```sh
-pip install groundcontrol
+pip install ground-control-tui
 ```
 
 ### 🔹 Install from Source
@@ -57,11 +57,11 @@ Once installed, simply launch Ground Control with:
 ```sh
 groundcontrol
 ```
-
-Or run as a Python module:
+or 
 ```sh
-python -m ground_control
+gc
 ```
+
 ### 🔹 Available Layouts
 
 ### Grid Layout
@@ -80,59 +80,66 @@ A column-based layout, ideal for narrow shell spaces. If you like working with t
 Each panel in Ground Control represents a different system metric:
 
 ### 🔹 **CPU Usage**
-- Shows real-time per-core CPU usage with detailed performance metrics.
-- Displays CPU frequency information and load averages.
-- Visual representation of CPU utilization across all cores.
+- Shows per-core CPU usage as horizontal bars (0-100%)
+- Displays each core's utilization in a compact bar chart format
+- Updates in real-time with color-coded bars showing load intensity
 
-![CPU_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/cpus.png?raw=true)
+<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/cpus.png?raw=true" alt="CPU_widget" width="600">
 
 ### 🔹 **Memory Utilization**
-- Comprehensive RAM usage monitoring with detailed memory statistics.
-- Visual progress bars showing memory consumption.
-- Available, used, and cached memory information.
+- Dual plot showing RAM (positive axis) and SWAP (negative axis) usage in GB
+- Center bar with color-coded sections showing used/free RAM and SWAP
+- Title displays total RAM and SWAP capacity in GB
 
-![RAM_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/ram.png?raw=true)
+<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/ram.png?raw=true" alt="RAM_widget" width="600">
 
 ### 🔹 **Temperature Monitoring**
-- Real-time system temperature tracking for CPU and other sensors.
-- Temperature trend visualization with thermal status indicators.
-- Helps monitor system thermal performance and potential overheating.
+- Multi-line plot tracking temperature over time in °C for up to 4 key sensors
+- Color-coded warning thresholds at 60°C (orange) and 80°C (red)
+- Right panel shows current temperatures with dynamic color bars based on heat levels
+- Prioritizes CPU, GPU, and motherboard sensors
 
-![Temperature_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/temperature.png?raw=true)
+<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/temperature.png?raw=true" alt="Temperature_widget" width="600">
 
 ### 🔹 **Disk I/O**
-- Monitors read/write speeds with real-time throughput graphs.
-- Displays disk usage and available storage space.
-- Comprehensive storage metrics in an easy-to-read format.
+- Dual plot showing read (positive axis) and write (negative axis) speeds for each mounted disk/partition
+- Shows disk usage with color-coded bar for used/free space in GB
+- Updates in real-time with throughput history
+- Each mounted disk/partition gets its own widget (except boot/EFI partitions)
+- Automatically detects and displays all mounted disks and partitions
 
-![Disk_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/disk.png?raw=true)
+<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/disk.png?raw=true" alt="Disk_widget" width="600">
 
 ### 🔹 **Network Traffic**
-- Tracks real-time upload/download speeds with bandwidth visualization.
-- Network activity graphs showing traffic patterns.
-- Cumulative data transfer statistics.
+- Dual plot showing upload (positive axis) and download (negative axis) speeds
+- Shows current transfer rates with color-coded indicators
+- Tracks cumulative data transfer amounts
 
-![Network_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/network.png?raw=true)
+<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/network.png?raw=true" alt="Network_widget" width="600">
 
 ### 🔹 **GPU Metrics (NVIDIA Only)**
-- Displays GPU utilization and memory usage with detailed performance metrics.
-- Supports multiple GPUs with live tracking and temperature monitoring.
-- Power consumption and clock frequency information.
+- Dual plot showing GPU usage % (positive axis) and memory usage GB (negative axis)
+- Center bar displays current GPU memory usage (GB) and utilization (%)
+- Shows "Usage UNAV" when GPU utilization cannot be detected
 
-![GPU_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/gpu.png?raw=true)
+<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/gpu.png?raw=true" alt="GPU_widget" width="600">
 
 ## 🛠️ Configuring Ground Control
 Ground Control offers extensive customization options to tailor your monitoring experience. You might not want to see all the widgets all at once, or you may want to focus on specific system metrics.
 
 ### 🔹 **Widget Selection Panel**
-To access the configuration panel, press `c` or click the `Configure` button. This will open a comprehensive selection panel where you can:
+The configuration panel can be accessed by pressing `c` or clicking the `Configure` button. This opens a panel that allows you to:
 
-- **Toggle individual widgets** on/off (CPU, Memory, Temperature, Disk, Network, GPU)
-- **Customize widget arrangement** based on your monitoring needs
-- **Preview changes** in real-time before applying them
-- **Reset to default** configuration if needed
+- **Toggle widgets**: Enable/disable individual widgets (CPU, Memory, Temperature, Disk, Network, GPU) by clicking their checkboxes
+- **Refresh rate**: Choose update intervals from 500ms to 1 minute using the refresh rate buttons
+- **History size**: Set the data history length from 30 seconds to 10 minutes using the history buttons
+- **Save preferences**: All settings are automatically saved to `~/.config/ground-control/config.json`
 
-Press `c` again to hide the configuration panel and return to monitoring.
+The config file stores:
+- Widget visibility settings for each widget
+- Current layout (grid/horizontal/vertical) 
+- Refresh rate in seconds
+- History size in seconds
 
 ### 🔹 **Layout Management**
 You can switch between different layouts instantly:
@@ -165,10 +172,15 @@ Modify this file in your default text editor with
 ```sh
 groundcontrol config
 ```
+or 
+
+```sh
+gc config
+```
 
 ## ⛔ Current Known Limitations/Bugs
+- In heavy-duty HPC systems, with multiple disks, cores and GPUs to be monitored, metric collection and plotting might get bottlenecked and groundcontrol might run slow. Consider **directly editing the config file with a text editor** to avoid 
 - GPU usage is monitored only for CUDA-enabled hardware. Ground Control detects MiG devices but in some cases it cannot detect their utilization. You'll see *Usage UNAV* in the GPU Widget if this is the case
-- Disk I/O is currently reported from `psutil.disk_io_counters()` and `psutil.disk_usage('/')`. This measurements do not account for partitions / unmounted disks / more-than-disk configuration. See [Issue #4](https://github.com/alberto-rota/ground-control/issues/4)
 - Temperature monitoring availability depends on system sensors and may not be available on all platforms
 
 ## 👨‍💻 Contributing
@@ -184,8 +196,5 @@ This project is licensed under the **GNU General Public License v3.0**. See the 
 
 ## 📧 Author
 **Alberto Rota**  
-📩 Email: alberto1.rota@polimi.it  
+📩 Email: alberto_rota@outlook.com  
 🐙 GitHub: [@alberto-rota](https://github.com/alberto-rota)
-
-## 🚀 Stay Updated
-For the latest features and updates, visit the [GitHub repository](https://github.com/alberto-rota/ground-control).
