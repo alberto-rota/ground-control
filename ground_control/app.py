@@ -418,9 +418,14 @@ class GroundControl(App):
         await self.grid.mount(memory_widget)
         
         # Create temperature widget only if temperature data is available
+        temperature_metrics = self.system_metrics.get_temperature_metrics()
+        logger.info(f"Temperature metrics: {temperature_metrics}")
         if temperature_metrics:
-            self.temperature_widget = TemperatureWidget("Temperature")
+            self.temperature_widget = TemperatureWidget("Temperature", history_size=int(self.history_size))
             await self.grid.mount(self.temperature_widget)
+        else:
+            logger.info("No temperature sensors found - skipping temperature widget")
+            self.temperature_widget = None
     
         # Mount multiple disk widgets
         for disk in disk_metrics['disks']:
@@ -579,9 +584,14 @@ class GroundControl(App):
             # Update temperature widget if available
             if self.temperature_widget and temperature_metrics:
                 try:
+                    logger.debug(f"Updating temperature widget with: {temperature_metrics}")
                     self.temperature_widget.update_content(temperature_metrics)
                 except Exception as e:
                     logger.error(f"Error updating temperature widget: {e}")
+            elif self.temperature_widget:
+                logger.debug("Temperature widget exists but no temperature metrics available")
+            else:
+                logger.debug("No temperature widget available")
 
         except Exception as e:
             logger.error(f"Error updating metrics: {e}")

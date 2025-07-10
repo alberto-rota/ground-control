@@ -6,6 +6,9 @@ def ansi2rich(text: str) -> str:
     color_map = {
         '12': 'blue',
         '10': 'green',
+        '9': 'magenta',
+        '2': 'brown',
+        '13': 'red',
         '7': 'bold',
         
         # Add more mappings as needed

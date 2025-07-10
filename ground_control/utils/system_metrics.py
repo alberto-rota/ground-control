@@ -54,57 +54,63 @@ class SystemMetrics:
         
         if platform.system() == "Linux":
             # Check thermal zones
-            thermal_zones = glob.glob('/sys/class/thermal/thermal_zone*/type')
-            for zone_type_file in thermal_zones:
-                zone_dir = os.path.dirname(zone_type_file)
-                temp_file = os.path.join(zone_dir, 'temp')
-                
-                if os.path.exists(temp_file):
-                    try:
-                        with open(zone_type_file, 'r') as f:
-                            sensor_type = f.read().strip()
-                        
-                        # Skip unimportant sensors
-                        if sensor_type.lower() in ['acpi', 'iwlwifi', 'bluetooth', 'pch_']:
+            try:
+                thermal_zones = glob.glob('/sys/class/thermal/thermal_zone*/type')
+                for zone_type_file in thermal_zones:
+                    zone_dir = os.path.dirname(zone_type_file)
+                    temp_file = os.path.join(zone_dir, 'temp')
+                    
+                    if os.path.exists(temp_file):
+                        try:
+                            with open(zone_type_file, 'r') as f:
+                                sensor_type = f.read().strip()
+                            
+                            # Don't skip any sensors for now - let's see what we have
+                            # if sensor_type.lower() in ['acpi', 'iwlwifi', 'bluetooth', 'pch_']:
+                            #     continue
+                            
+                            # Test reading temperature
+                            with open(temp_file, 'r') as f:
+                                temp_raw = int(f.read().strip())
+                                if temp_raw > 0:  # Valid temperature reading
+                                    sensors[sensor_type] = temp_file
+                        except (IOError, ValueError, OSError) as e:
                             continue
+            except Exception as e:
+                pass
+            
+            # Check hwmon sensors
+            try:
+                hwmon_dirs = glob.glob('/sys/class/hwmon/hwmon*/temp*_input')
+                for temp_file in hwmon_dirs:
+                    hwmon_dir = os.path.dirname(temp_file)
+                    temp_id = os.path.basename(temp_file).replace('_input', '')
+                    
+                    # Try to get label for this sensor
+                    label_file = os.path.join(hwmon_dir, f"{temp_id}_label")
+                    name_file = os.path.join(hwmon_dir, "name")
+                    
+                    sensor_name = "Unknown"
+                    try:
+                        if os.path.exists(label_file):
+                            with open(label_file, 'r') as f:
+                                sensor_name = f.read().strip()
+                        elif os.path.exists(name_file):
+                            with open(name_file, 'r') as f:
+                                base_name = f.read().strip()
+                            sensor_name = f"{base_name}_{temp_id}"
+                        else:
+                            sensor_name = f"temp_{temp_id}"
                         
                         # Test reading temperature
                         with open(temp_file, 'r') as f:
                             temp_raw = int(f.read().strip())
                             if temp_raw > 0:  # Valid temperature reading
-                                sensors[sensor_type] = temp_file
+                                sensors[sensor_name] = temp_file
                     except (IOError, ValueError, OSError):
                         continue
-            
-            # Check hwmon sensors
-            hwmon_dirs = glob.glob('/sys/class/hwmon/hwmon*/temp*_input')
-            for temp_file in hwmon_dirs:
-                hwmon_dir = os.path.dirname(temp_file)
-                temp_id = os.path.basename(temp_file).replace('_input', '')
-                
-                # Try to get label for this sensor
-                label_file = os.path.join(hwmon_dir, f"{temp_id}_label")
-                name_file = os.path.join(hwmon_dir, "name")
-                
-                sensor_name = "Unknown"
-                try:
-                    if os.path.exists(label_file):
-                        with open(label_file, 'r') as f:
-                            sensor_name = f.read().strip()
-                    elif os.path.exists(name_file):
-                        with open(name_file, 'r') as f:
-                            base_name = f.read().strip()
-                        sensor_name = f"{base_name}_{temp_id}"
-                    else:
-                        sensor_name = f"temp_{temp_id}"
-                    
-                    # Test reading temperature
-                    with open(temp_file, 'r') as f:
-                        temp_raw = int(f.read().strip())
-                        if temp_raw > 0:  # Valid temperature reading
-                            sensors[sensor_name] = temp_file
-                except (IOError, ValueError, OSError):
-                    continue
+            except Exception as e:
+                pass
         
         elif platform.system() == "Darwin":  # macOS
             try:
@@ -149,7 +155,10 @@ class SystemMetrics:
                         temp_raw = int(f.read().strip())
                         # Convert from millidegrees to degrees Celsius
                         temp_celsius = temp_raw / 1000.0
-                        temperatures[sensor_name] = temp_celsius
+                        
+                        # Provide more user-friendly names
+                        friendly_name = self._get_friendly_sensor_name(sensor_name, sensor_path)
+                        temperatures[friendly_name] = temp_celsius
                         
                 elif platform.system() == "Darwin" and sensor_path == 'sensors_cmd':
                     # For macOS, we'd need to parse sensors command output
@@ -179,12 +188,85 @@ class SystemMetrics:
                     with device.oneshot():
                         gpu_temp = device.temperature()
                         if gpu_temp is not NA:
-                            gpu_name = f"GPU_{device.index if not isinstance(device.index, tuple) else device.index[0]}"
+                            gpu_name = f"GPU {device.index if not isinstance(device.index, tuple) else device.index[0]}"
                             temperatures[gpu_name] = float(gpu_temp)
                 except:
                     continue
         
         return temperatures if temperatures else None
+
+    def _get_friendly_sensor_name(self, sensor_name: str, sensor_path: str) -> str:
+        """Convert technical sensor names to user-friendly names."""
+        # Handle thermal zone sensors
+        if 'thermal_zone' in sensor_path:
+            if sensor_name == 'acpitz':
+                return 'System/Motherboard'
+            elif sensor_name == 'x86_pkg_temp':
+                return 'CPU Package'
+            elif 'pch' in sensor_name.lower():
+                return 'Platform Controller Hub'
+            elif 'wifi' in sensor_name.lower() or 'iwl' in sensor_name.lower():
+                return 'WiFi Module'
+            elif 'bluetooth' in sensor_name.lower():
+                return 'Bluetooth Module'
+        
+        # Handle hwmon sensors
+        if 'hwmon' in sensor_path:
+            # Get the hwmon directory to understand the sensor type
+            hwmon_dir = sensor_path.split('/temp')[0]
+            
+            try:
+                # Check if there's a name file to identify the sensor type
+                name_file = f"{hwmon_dir}/name"
+                if os.path.exists(name_file):
+                    with open(name_file, 'r') as f:
+                        hwmon_name = f.read().strip()
+                    
+                    if hwmon_name == 'coretemp':
+                        # For coretemp, try to get the specific core label
+                        label_file = sensor_path.replace('_input', '_label')
+                        if os.path.exists(label_file):
+                            with open(label_file, 'r') as f:
+                                label = f.read().strip()
+                                return f"CPU {label}"
+                        else:
+                            # Fall back to using the temp ID
+                            temp_id = os.path.basename(sensor_path).replace('_input', '')
+                            if temp_id == 'temp1':
+                                return 'CPU Package'
+                            else:
+                                core_num = temp_id.replace('temp', '')
+                                return f"CPU Core {int(core_num) - 1}" if core_num.isdigit() else f"CPU {temp_id}"
+                    
+                    elif hwmon_name == 'nvme':
+                        return 'NVMe SSD'
+                    
+                    elif hwmon_name == 'acpitz':
+                        return 'System/Motherboard'
+                    
+                    elif 'gpu' in hwmon_name.lower() or 'radeon' in hwmon_name.lower() or 'amdgpu' in hwmon_name.lower():
+                        return 'GPU'
+                    
+                    else:
+                        # Use the hwmon name with temp ID
+                        temp_id = os.path.basename(sensor_path).replace('_input', '')
+                        return f"{hwmon_name.title()} {temp_id}"
+                        
+            except (IOError, OSError):
+                pass
+        
+        # Handle special cases for common sensor names
+        if sensor_name.lower() == 'composite':
+            return 'NVMe SSD'
+        elif 'core' in sensor_name.lower() and any(char.isdigit() for char in sensor_name):
+            return sensor_name.replace('Core', 'CPU Core')
+        elif 'package' in sensor_name.lower():
+            return 'CPU Package'
+        elif sensor_name.startswith('temp') and sensor_name[4:].isdigit():
+            return f"Sensor {sensor_name[4:]}"
+        
+        # Default: clean up the sensor name
+        return sensor_name.replace('_', ' ').title()
 
     def _initialize_counters(self):
         io_counters = psutil.net_io_counters()
