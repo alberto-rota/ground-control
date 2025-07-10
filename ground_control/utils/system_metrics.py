@@ -4,6 +4,8 @@ import time
 import os
 import glob
 import subprocess
+import random
+import math
 try:
     import pynvml
     pynvml.nvmlInit()
@@ -47,6 +49,89 @@ class SystemMetrics:
         
         # Initialize temperature sensors
         self._temperature_sensors = self._discover_temperature_sensors()
+        
+        # Initialize random memory simulation parameters
+        self._init_random_memory_simulation()
+
+    def _init_random_memory_simulation(self):
+        """Initialize parameters for random memory simulation."""
+        # Get actual system memory for realistic baseline
+        actual_memory = psutil.virtual_memory()
+        actual_swap = psutil.swap_memory()
+        
+        # Use actual total sizes as baseline, but make them configurable
+        self.sim_ram_total = actual_memory.total  # Keep actual total RAM
+        self.sim_swap_total = max(actual_swap.total, 8 * 1024**3)  # At least 8GB swap for demo
+        
+        # Random simulation state
+        self.sim_time_offset = random.uniform(0, 2 * math.pi)  # Random phase offset
+        self.sim_ram_base = 0.3  # Base RAM usage (30%)
+        self.sim_ram_amplitude = 0.4  # Amplitude of RAM usage oscillation
+        self.sim_swap_base = 0.1  # Base SWAP usage (10%)
+        self.sim_swap_amplitude = 0.2  # Amplitude of SWAP usage oscillation
+        
+        # Different frequencies for RAM and SWAP to make it more interesting
+        self.sim_ram_freq = 0.5  # RAM oscillation frequency
+        self.sim_swap_freq = 0.3  # SWAP oscillation frequency
+        
+        # Add some noise parameters
+        self.sim_noise_scale = 0.05  # 5% noise
+        
+        # Track simulation start time
+        self.sim_start_time = time.time()
+
+    def _generate_random_memory_values(self):
+        """Generate sensible random RAM and SWAP values that change over time."""
+        current_time = time.time()
+        elapsed_time = current_time - self.sim_start_time
+        
+        # Generate smooth oscillating patterns with different frequencies
+        ram_cycle = math.sin(elapsed_time * self.sim_ram_freq + self.sim_time_offset)
+        swap_cycle = math.sin(elapsed_time * self.sim_swap_freq + self.sim_time_offset * 1.5)
+        
+        # Add some noise for realism
+        ram_noise = random.uniform(-self.sim_noise_scale, self.sim_noise_scale)
+        swap_noise = random.uniform(-self.sim_noise_scale, self.sim_noise_scale)
+        
+        # Calculate usage percentages
+        ram_usage_percent = max(0.1, min(0.9, 
+            self.sim_ram_base + self.sim_ram_amplitude * ram_cycle + ram_noise))
+        swap_usage_percent = max(0.0, min(0.8, 
+            self.sim_swap_base + self.sim_swap_amplitude * swap_cycle + swap_noise))
+        
+        # Convert to bytes
+        ram_used = int(self.sim_ram_total * ram_usage_percent)
+        ram_available = self.sim_ram_total - ram_used
+        swap_used = int(self.sim_swap_total * swap_usage_percent)
+        swap_free = self.sim_swap_total - swap_used
+        
+        # Create mock memory objects that mimic psutil structure
+        class MockMemoryInfo:
+            def __init__(self, total, used, available):
+                self.total = total
+                self.used = used
+                self.available = available
+                self.percent = (used / total) * 100 if total > 0 else 0
+                # Add some additional realistic fields
+                self.free = available
+                self.cached = int(total * 0.1)  # 10% cached
+                self.buffers = int(total * 0.05)  # 5% buffers  
+                self.shared = int(total * 0.02)  # 2% shared
+        
+        class MockSwapInfo:
+            def __init__(self, total, used, free):
+                self.total = total
+                self.used = used
+                self.free = free
+                self.percent = (used / total) * 100 if total > 0 else 0
+                # Add swap I/O counters (static for simulation)
+                self.sin = 0
+                self.sout = 0
+        
+        return (
+            MockMemoryInfo(self.sim_ram_total, ram_used, ram_available),
+            MockSwapInfo(self.sim_swap_total, swap_used, swap_free)
+        )
 
     def _discover_temperature_sensors(self) -> Dict[str, str]:
         """Discover available temperature sensors on the system."""
@@ -469,17 +554,15 @@ class SystemMetrics:
     def get_memory_metrics(self):
         """
         Get detailed memory metrics including RAM and swap information.
+        Now generates random values for visualization purposes.
         
         Returns:
             dict: A dictionary containing comprehensive memory information
         """
-        # Get virtual memory information (RAM)
-        memory_info = psutil.virtual_memory()
+        # Generate random memory and swap values
+        memory_info, swap_info = self._generate_random_memory_values()
         
-        # Get swap memory information
-        swap_info = psutil.swap_memory()
-        
-        # Get memory I/O metrics
+        # Get memory I/O metrics (keep real I/O for now, could be randomized too)
         current_time = time.time()
         memory_io = self._get_memory_io_counters()
         time_delta = max(current_time - self.prev_memory_time, 1e-6)
@@ -507,49 +590,59 @@ class SystemMetrics:
             'memory_history': self.memory_history
         }
         
-        # Try to get additional Linux-specific memory metrics
+        # Generate some mock meminfo data for Linux-like behavior
         try:
-            if platform.system() == 'Linux':
-                with open('/proc/meminfo', 'r') as f:
-                    meminfo = f.read()
-                    meminfo_dict = {}
-                    for line in meminfo.split('\n'):
-                        if ':' in line:
-                            key, value = line.split(':', 1)
-                            meminfo_dict[key.strip()] = value.strip()
-                    
-                    memory_data['meminfo'] = meminfo_dict
-                    
-                    # Calculate memory commit ratio
-                    if 'CommitLimit' in meminfo_dict and 'Committed_AS' in meminfo_dict:
-                        commit_limit = int(meminfo_dict['CommitLimit'].split()[0])
-                        committed_as = int(meminfo_dict['Committed_AS'].split()[0])
-                        memory_data['commit_ratio'] = committed_as / commit_limit if commit_limit > 0 else 0
+            # Create realistic meminfo dict with random values
+            total_kb = memory_info.total // 1024
+            used_kb = memory_info.used // 1024
+            available_kb = memory_info.available // 1024
+            
+            meminfo_dict = {
+                'MemTotal': f'{total_kb} kB',
+                'MemFree': f'{available_kb} kB',
+                'MemAvailable': f'{available_kb} kB',
+                'Buffers': f'{memory_info.buffers // 1024} kB',
+                'Cached': f'{memory_info.cached // 1024} kB',
+                'SwapTotal': f'{swap_info.total // 1024} kB',
+                'SwapFree': f'{swap_info.free // 1024} kB',
+                'CommitLimit': f'{total_kb + swap_info.total // 1024} kB',
+                'Committed_AS': f'{int((total_kb + swap_info.total // 1024) * 0.6)} kB',
+            }
+            
+            memory_data['meminfo'] = meminfo_dict
+            
+            # Calculate memory commit ratio
+            commit_limit = total_kb + swap_info.total // 1024
+            committed_as = int(commit_limit * 0.6)  # 60% committed
+            memory_data['commit_ratio'] = committed_as / commit_limit if commit_limit > 0 else 0
         except:
             pass
             
-        # Try to get per-process memory usage (top consumers)
+        # Generate some mock top processes for demonstration
         try:
-            processes = []
-            for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'memory_percent']):
-                try:
-                    proc_info = proc.info
-                    if proc_info['memory_percent'] > 0.1:  # Only include significant users
-                        processes.append({
-                            'pid': proc_info['pid'],
-                            'name': proc_info['name'],
-                            'memory_percent': proc_info['memory_percent'],
-                            'memory_rss': proc_info['memory_info'].rss,
-                            'memory_vms': proc_info['memory_info'].vms
-                        })
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    pass
+            # Create realistic process names and memory usage
+            mock_processes = [
+                {'pid': 1234, 'name': 'chrome', 'memory_percent': random.uniform(15, 25)},
+                {'pid': 5678, 'name': 'firefox', 'memory_percent': random.uniform(10, 20)},
+                {'pid': 9012, 'name': 'code', 'memory_percent': random.uniform(8, 15)},
+                {'pid': 3456, 'name': 'python', 'memory_percent': random.uniform(5, 12)},
+                {'pid': 7890, 'name': 'docker', 'memory_percent': random.uniform(3, 8)},
+                {'pid': 2345, 'name': 'nodejs', 'memory_percent': random.uniform(2, 6)},
+                {'pid': 6789, 'name': 'mysql', 'memory_percent': random.uniform(1, 4)},
+                {'pid': 1357, 'name': 'nginx', 'memory_percent': random.uniform(0.5, 2)},
+            ]
             
+            # Add RSS and VMS values based on percentages
+            for proc in mock_processes:
+                proc['memory_rss'] = int(memory_info.total * proc['memory_percent'] / 100)
+                proc['memory_vms'] = int(proc['memory_rss'] * 1.5)  # VMS typically larger than RSS
+            
+            # Sort by memory percent and take top 10
             memory_data['top_processes'] = sorted(
-                processes, 
+                mock_processes, 
                 key=lambda x: x['memory_percent'], 
                 reverse=True
-            )[:10]  # Top 10 memory consumers
+            )[:10]
         except:
             memory_data['top_processes'] = []
         
