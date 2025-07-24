@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ground-control-tui",
-    version="v1.2.0",
+    version="v1.2.1",
     packages=find_packages(),
     install_requires=[
         "numpy==2.0.0",

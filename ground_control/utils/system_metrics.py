@@ -560,7 +560,8 @@ class SystemMetrics:
             dict: A dictionary containing comprehensive memory information
         """
         # Generate random memory and swap values
-        memory_info, swap_info = self._generate_random_memory_values()
+        memory_info = psutil.virtual_memory()  # Shape: namedtuple with total, used, available, percent, free, cached, buffers, shared
+        swap_info = psutil.swap_memory()  # Shape: namedtuple with total, used, free, percent, sin, sout
         
         # Get memory I/O metrics (keep real I/O for now, could be randomized too)
         current_time = time.time()
