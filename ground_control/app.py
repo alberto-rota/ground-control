@@ -17,24 +17,22 @@ from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
 from ground_control.widgets.temperature import TemperatureWidget
 from ground_control.utils.system_metrics import SystemMetrics
+from ground_control.utils.colors import load_colors, ensure_colors_in_config
 from platformdirs import user_config_dir  # Import for cross-platform config directory
 from textual.screen import Screen
 
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-LOG_FILE = "ground_control.log"
 
-# Set up logging
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+
+def hex_to_rgb(hex_color: str) -> tuple:
+    """Convert hex color to RGB tuple for CSS."""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+# Logger will be set up in main.py before app is created
 logger = logging.getLogger("ground-control")
-
-# Ensure the directory exists
-os.makedirs(CONFIG_DIR, exist_ok=True)
 
 
 class RefreshRateButtons(Static):
@@ -49,14 +47,14 @@ class RefreshRateButtons(Static):
         super().__init__(id="refresh-buttons")
         self.border_title = title
         # Rates in seconds: 0.5, 1, 2, 5, 10, 15, 30, 60 (1 min)
-        self.rates = [60, 30, 15, 10, 5, 2, 1, 500]
+        self.rates = [60, 30, 15, 10, 5, 2, 1, 0.5]
 
     def compose(self) -> ComposeResult:
         """Create the refresh rate buttons"""
         with Horizontal(id="refresh-container"):
             for rate in self.rates:
-                label = "1m" if rate == 60 else "30s" if rate == 30 else "500ms" if rate == 500 else f"{rate}s"
-                yield Button(label, id=f"refresh-{rate}".replace(".", ""), classes="refresh-button")
+                label = "1m" if rate == 60 else "30s" if rate == 30 else "500ms" if rate == 0.5 else f"{rate}s"
+                yield Button(label, id=f"refresh-{rate}".replace(".", "-"), classes="refresh-button")
 
 class HistorySizeButtons(Static):
     """A horizontal array of history size buttons"""
@@ -80,73 +78,100 @@ class HistorySizeButtons(Static):
                 yield Button(label, id=f"history-{size}", classes="history-button")
 
 class GroundControl(App):
-    CSS = """
-    Grid {
+    def __init__(self):
+        super().__init__()
+        # Load colors and generate CSS dynamically
+        self._color_config = load_colors()
+        self._generate_css()
+        
+        self.system_metrics = SystemMetrics()
+        self.gpu_widgets = []
+        self.disk_widgets = []
+        self.temperature_widget = None
+        self.grid = None
+        self.select = None
+        self.refresh_buttons = None
+        self.history_buttons = None
+        self.selectionoptions = []
+        self.selected_widgets = {}  # Initialize selected_widgets
+        self.json_exists = os.path.exists(CONFIG_FILE)
+        self._update_timer = None
+        self._is_initializing = True  # Flag to prevent toast notifications during startup
+        self._config_save_task = None  # For debounced config saves (asyncio.Task)
+        self._update_in_progress = False  # Prevent concurrent updates
+
+    def _generate_css(self):
+        """Generate CSS with colors from config."""
+        border_rgb = hex_to_rgb(self._color_config.get("border", "#13A10E"))
+        active_button_rgb = hex_to_rgb(self._color_config.get("active_button", "#13A10E"))
+        
+        self.CSS = f"""
+    Grid {{
         grid-size: 3 3;
         align: center middle;
         width: 100%;
         height: 100%;
-    }   
-    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget {
-        border: round rgb(19, 161, 14);
-    }
+    }}   
+    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget {{
+        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
+    }}
     
-    SelectionList {
+    SelectionList {{
         background: $surface;
-        border: round rgb(19, 161, 14);
+        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
         width: 100%;
         height: auto;
-    }
+    }}
 
-    #config-container {
+    #config-container {{
         width: 100%;
         layout: vertical;
         background: $surface;
         height: auto;
-    }
+    }}
     
-    #controls-container {
+    #controls-container {{
         width: 100%;
         layout: horizontal;
         height: auto;
-    }
+    }}
     
-    #refresh-buttons, #history-buttons {
+    #refresh-buttons, #history-buttons {{
         width: 50%;
         height: auto;
         padding: 0;
-        border: round rgb(19, 161, 14);
+        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
         margin: 0 0;
-    }
+    }}
     
-    #refresh-container, #history-container {
+    #refresh-container, #history-container {{
         width: 100%;
         height: 3;
         align: center middle;
         background: $surface;
         padding: 0;
-    }
+    }}
     
-    .refresh-button, .history-button {
+    .refresh-button, .history-button {{
         margin: 0 0;
         height: 3;
         min-width: 6;
         background: $boost;
-    }
+    }}
     
-    .refresh-button:hover, .history-button:hover {
+    .refresh-button:hover, .history-button:hover {{
         background: $accent;
-    }
+    }}
     
-    .refresh-button.-active, .history-button.-active {
-        background: rgb(19, 161, 14);
+    .refresh-button.-active, .history-button.-active {{
+        background: rgb({active_button_rgb[0]}, {active_button_rgb[1]}, {active_button_rgb[2]});
         color: $text;
-    }
+    }}
     
-    .config-title {
+    .config-title {{
         text-align: left;
         height: 1;
-    }
+    }}
     """
 
     # Define reactive properties
@@ -164,28 +189,13 @@ class GroundControl(App):
         ("c", "configure", "Configure"),
     ]
 
-    def __init__(self):
-        super().__init__()
-        self.system_metrics = SystemMetrics()
-        self.gpu_widgets = []
-        self.disk_widgets = []
-        self.temperature_widget = None
-        self.grid = None
-        self.select = None
-        self.refresh_buttons = None
-        self.history_buttons = None
-        self.selectionoptions = []
-        self.selected_widgets = {}  # Initialize selected_widgets
-        self.json_exists = os.path.exists(CONFIG_FILE)
-        self._update_timer = None
-        self._is_initializing = True  # Flag to prevent toast notifications during startup
 
 
     def watch_refresh_rate(self, new_rate: float) -> None:
         """React to changes in refresh rate"""
         if self._update_timer:
             self._update_timer.stop()
-        self._update_timer = self.set_interval(new_rate, self.update_metrics)
+        self._update_timer = self.set_interval(new_rate, self._update_metrics_sync)
         self.save_config()
         self._update_refresh_buttons()
         # Show toast notification only when not initializing
@@ -215,9 +225,8 @@ class GroundControl(App):
                     # Add active class to clicked button
                     event.button.add_class("-active")
                     # Update the refresh rate
-                    rate = float(event.button.id.replace("refresh-", ""))
-                    if rate == 500:
-                        rate = 0.5
+                    rate_str = event.button.id.replace("refresh-", "").replace("-", ".")
+                    rate = float(rate_str)
                     self.refresh_rate = rate
                     # The watch_refresh_rate method will handle timer management
                 except (ValueError, IndexError):
@@ -243,11 +252,9 @@ class GroundControl(App):
                 button.remove_class("-active")
             # Then add it to the matching one
             for rate in self.refresh_buttons.rates:
-                button = self.query_one(f"#refresh-{rate}".replace(".", ""))
+                button = self.query_one(f"#refresh-{rate}".replace(".", "-"))
                 if button:
-                    # Handle the special case where 500ms button maps to 0.5s refresh rate
-                    expected_rate = 0.5 if rate == 500 else rate
-                    if abs(expected_rate - self.refresh_rate) < 0.01:  # Compare with small epsilon
+                    if abs(rate - self.refresh_rate) < 0.01:  # Compare with small epsilon
                         button.add_class("-active")
 
     def _update_history_buttons(self) -> None:
@@ -276,21 +283,38 @@ class GroundControl(App):
         return {}
 
     def save_config(self):
-        """Save configuration to file"""
+        """Save configuration to file (debounced)"""
+        # Cancel any pending save task
+        if self._config_save_task and not self._config_save_task.done():
+            self._config_save_task.cancel()
+        
+        # Schedule a new save task after 0.5 seconds
+        self._config_save_task = asyncio.create_task(self._debounced_save_config())
+    
+    async def _debounced_save_config(self):
+        """Debounced config save - waits 0.5 seconds before actually saving"""
+        await asyncio.sleep(0.5)
+        self._do_save_config()
+    
+    def _do_save_config(self):
+        """Actually perform the config file write"""
         try:
-            with open(CONFIG_FILE, "r") as f:
-                config_data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            config_data = {}
-        
-        config_data.update({
-            "refresh_rate": self.refresh_rate,
-            "history_size": self.history_size,
-            "selected": self.selected_widgets
-        })
-        
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config_data, f, indent=4)
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    config_data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                config_data = {}
+            
+            config_data.update({
+                "refresh_rate": self.refresh_rate,
+                "history_size": self.history_size,
+                "selected": self.selected_widgets
+            })
+            
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config_data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
@@ -312,36 +336,14 @@ class GroundControl(App):
         return "grid"
 
     def save_selection(self):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                config_data = json.load(f)
-            # selected_dict = {option.value: option.selected for option in self.selected_widgets}
-            config_data["selected"] = self.selected_widgets
-            with open(CONFIG_FILE, "w") as f:
-                json.dump(config_data, f, indent=4)
-        except FileNotFoundError:
-            # selected_dict = {option.value: option.selected for option in self.selected_widgets}
-            with open(CONFIG_FILE, "w") as f:
-                json.dump({"selected": self.selected_widgets}, f, indent=4)
+        """Save selection (uses debounced save_config)"""
+        self.save_config()  # Use the debounced save method
 
     
     
     def save_layout(self):
-        try:
-            # First read the existing data
-            with open(CONFIG_FILE, "r") as f:
-                config_data = json.load(f)
-        
-            # Update only the selected key
-            config_data["layout"] = self.current_layout
-        
-            # Write back the entire updated config
-            with open(CONFIG_FILE, "w") as f:
-                json.dump(config_data, f)
-        except FileNotFoundError:
-            # If file doesn't exist, create it with just the selected data
-            with open(CONFIG_FILE, "w") as f:
-                json.dump({"layout": self.current_layout}, f)
+        """Save layout (uses debounced save_config)"""
+        self.save_config()  # Use the debounced save method
 
     def get_layout_columns(self, num_gpus: int) -> int:
         return len(self.select.selected)
@@ -376,7 +378,7 @@ class GroundControl(App):
         self.set_layout(self.load_layout())
         
         self.apply_widget_visibility()
-        self._update_timer = self.set_interval(self.refresh_rate, self.update_metrics)
+        self._update_timer = self.set_interval(self.refresh_rate, self._update_metrics_sync)
         self._update_refresh_buttons()
         self._update_history_buttons()
         
@@ -403,7 +405,7 @@ class GroundControl(App):
                 self.grid.styles.grid_size_rows = 2
                 self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
             else:
-                self.grid.styles.grid_size_rows = 3
+                self.grid.styles.grid_size_rows = 3 
                 self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
 
         # Always create new widgets when setup_widgets is called
@@ -456,6 +458,8 @@ class GroundControl(App):
         for widget in self.grid.children:
             if hasattr(widget, "title"):
                 selection_dict[widget.title] = True
+        # Ensure colors section exists in config
+        ensure_colors_in_config()
         default_config = {
             "selected": selection_dict,
             "layout": "grid",
@@ -498,103 +502,154 @@ class GroundControl(App):
                 widget.styles.display = "block" if widget.title in selected_titles else "none"
                 logger.debug(f"Setting {widget.title} display to {'block' if widget.title in selected_titles else 'none'}")
 
-    def update_metrics(self):
+    def _update_metrics_sync(self):
+        """Synchronous wrapper to trigger async update_metrics"""
+        asyncio.create_task(self.update_metrics())
+    
+    async def update_metrics(self):
+        """Update all metrics asynchronously, parallelizing collection and skipping hidden widgets"""
+        # Prevent concurrent updates
+        if self._update_in_progress:
+            return
+        self._update_in_progress = True
+        
         try:
-            cpu_metrics = self.system_metrics.get_cpu_metrics()
-            disk_metrics = self.system_metrics.get_disk_metrics()
-            network_metrics = self.system_metrics.get_network_metrics()
-            gpu_metrics = self.system_metrics.get_gpu_metrics()
-            memory_metrics = self.system_metrics.get_memory_metrics()
-            temperature_metrics = self.system_metrics.get_temperature_metrics()
+            # Parallelize metric collection using asyncio
+            loop = asyncio.get_event_loop()
+            cpu_task = loop.run_in_executor(None, self.system_metrics.get_cpu_metrics)
+            disk_task = loop.run_in_executor(None, self.system_metrics.get_disk_metrics)
+            network_task = loop.run_in_executor(None, self.system_metrics.get_network_metrics)
+            gpu_task = loop.run_in_executor(None, self.system_metrics.get_gpu_metrics)
+            memory_task = loop.run_in_executor(None, self.system_metrics.get_memory_metrics)
+            temperature_task = loop.run_in_executor(None, self.system_metrics.get_temperature_metrics)
             
-            # Update CPU widget
-            cpu_widget = self.query_one(CPUWidget)
-            cpu_widget.update_content(
+            # Wait for all metrics to be collected in parallel
+            cpu_metrics, disk_metrics, network_metrics, gpu_metrics, memory_metrics, temperature_metrics = await asyncio.gather(
+                cpu_task, disk_task, network_task, gpu_task, memory_task, temperature_task
+            )
+            
+            # Update widgets - only update visible ones
+            update_tasks = []
+            
+            # Update CPU widget (only if visible)
+            try:
+                cpu_widget = self.query_one(CPUWidget)
+                if cpu_widget.styles.display != "none":
+                    update_tasks.append(self._update_cpu_widget(cpu_widget, cpu_metrics, disk_metrics))
+            except Exception as e:
+                logger.error(f"Error updating CPU widget: {str(e)}")
+            
+            # Update Memory widget (only if visible)
+            try:
+                memory_widget = self.query_one(MemoryWidget)
+                if memory_widget.styles.display != "none":
+                    update_tasks.append(self._update_memory_widget(memory_widget, memory_metrics))
+            except Exception as e:
+                logger.error(f"Error updating memory widget: {str(e)}")
+            
+            # Update disk widgets (only if visible)
+            for disk_widget in self.disk_widgets:
+                if disk_widget.styles.display != "none":
+                    for disk in disk_metrics['disks']:
+                        if disk_widget.title == f"Disk @ {disk['mountpoint']}":
+                            update_tasks.append(self._update_disk_widget(disk_widget, disk))
+                            break
+            
+            # Update Network widget (only if visible)
+            try:
+                network_widget = self.query_one(NetworkIOWidget)
+                if network_widget.styles.display != "none":
+                    update_tasks.append(self._update_network_widget(network_widget, network_metrics))
+            except Exception as e:
+                logger.error(f"Error updating NetworkIOWidget: {e}")
+            
+            # Update GPU widgets (only if visible)
+            for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
+                if gpu_widget.styles.display != "none":
+                    update_tasks.append(self._update_gpu_widget(gpu_widget, gpu_metric))
+            
+            # Update temperature widget (only if visible)
+            if self.temperature_widget and temperature_metrics:
+                if self.temperature_widget.styles.display != "none":
+                    update_tasks.append(self._update_temperature_widget(self.temperature_widget, temperature_metrics))
+            
+            # Execute all widget updates in parallel
+            if update_tasks:
+                await asyncio.gather(*update_tasks, return_exceptions=True)
+                
+        except Exception as e:
+            logger.error(f"Error updating metrics: {e}")
+        finally:
+            self._update_in_progress = False
+    
+    async def _update_cpu_widget(self, widget, cpu_metrics, disk_metrics):
+        """Update CPU widget (plot operations must be on main thread due to plotext)"""
+        # Plotext is not thread-safe, so we must run on main thread
+        try:
+            widget.update_content(
                 cpu_metrics['cpu_percentages'],
                 cpu_metrics['cpu_freqs'],
                 cpu_metrics['mem_percent'],
                 disk_metrics['total_disk_used'],
                 disk_metrics['total_disk_total']
             )
-            
-            # Update Memory widget
-            try:
-                memory_widget = self.query_one(MemoryWidget)
-                memory_widget.update_content(
-                    memory_metrics['memory_info'],
-                    memory_metrics['swap_info'],
-                    meminfo=memory_metrics.get('meminfo'),
-                    commit_ratio=memory_metrics.get('commit_ratio'),
-                    top_processes=memory_metrics.get('top_processes'),
-                    memory_history=memory_metrics.get('memory_history')
-                )
-            except Exception as e:
-                logger.error(f"Error updating memory widget: {str(e)}")
-            
-            # Update each disk widget with its specific metrics
-            for disk_widget in self.disk_widgets:
-                try:
-                    logger.debug(f"Disk widget: {disk_widget.title}")
-                    for disk in disk_metrics['disks']:
-                        logger.debug(f"Checking disk: {disk['mountpoint']}")
-                        if disk_widget.title == f"Disk @ {disk['mountpoint']}":
-                            logger.debug(f"Match found for {disk['mountpoint']}")
-                            try:
-                                # Log the values we're providing
-                                logger.debug(f"Disk values: read={disk['read_speed']}, write={disk['write_speed']}, used={disk['disk_used']}, total={disk['disk_total']}")
-                                
-                                disk_widget.update_content(
-                                    disk['read_speed'],
-                                    disk['write_speed'],
-                                    disk['disk_used'],
-                                    disk['disk_total']
-                                )
-                            except Exception as e:
-                                import traceback
-                                logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
-                                logger.error(f"Error details: {traceback.format_exc()}")
-                            break
-                except Exception as e:
-                    import traceback
-                    logger.error(f"Error updating disk widget {disk_widget.title}: {e}")
-                    logger.error(f"Error details: {traceback.format_exc()}")
-
-            network_metrics = self.system_metrics.get_network_metrics()
-            try:
-                network_widget = self.query_one(NetworkIOWidget)
-                network_widget.update_content(
-                    network_metrics['download_speed'],
-                    network_metrics['upload_speed']
-                )
-            except Exception as e:
-                logger.error(f"Error updating NetworkIOWidget: {e}")
-
-            gpu_metrics = self.system_metrics.get_gpu_metrics()
-            for gpu_widget, gpu_metric in zip(self.gpu_widgets, gpu_metrics):
-                try:
-                    gpu_widget.update_content(
-                        gpu_metric["gpu_name"],
-                        gpu_metric['gpu_util'],
-                        gpu_metric['mem_used'],
-                        gpu_metric['mem_total']
-                    )
-                except Exception as e:
-                    logger.error(f"Error updating {gpu_widget.title}: {e}")
-
-            # Update temperature widget if available
-            if self.temperature_widget and temperature_metrics:
-                try:
-                    logger.debug(f"Updating temperature widget with: {temperature_metrics}")
-                    self.temperature_widget.update_content(temperature_metrics)
-                except Exception as e:
-                    logger.error(f"Error updating temperature widget: {e}")
-            elif self.temperature_widget:
-                logger.debug("Temperature widget exists but no temperature metrics available")
-            else:
-                logger.debug("No temperature widget available")
-
         except Exception as e:
-            logger.error(f"Error updating metrics: {e}")
+            logger.error(f"Error updating CPU widget: {e}", exc_info=True)
+    
+    async def _update_memory_widget(self, widget, memory_metrics):
+        """Update Memory widget (plot operations must be on main thread due to plotext)"""
+        try:
+            widget.update_content(
+                memory_metrics['memory_info'],
+                memory_metrics['swap_info'],
+                memory_metrics.get('meminfo'),
+                memory_metrics.get('commit_ratio'),
+                memory_metrics.get('top_processes'),
+                memory_metrics.get('memory_history')
+            )
+        except Exception as e:
+            logger.error(f"Error updating memory widget: {e}", exc_info=True)
+    
+    async def _update_disk_widget(self, widget, disk):
+        """Update Disk widget (plot operations must be on main thread due to plotext)"""
+        try:
+            widget.update_content(
+                disk['read_speed'],
+                disk['write_speed'],
+                disk['disk_used'],
+                disk['disk_total']
+            )
+        except Exception as e:
+            logger.error(f"Error updating disk widget {widget.title}: {e}", exc_info=True)
+    
+    async def _update_network_widget(self, widget, network_metrics):
+        """Update Network widget (plot operations must be on main thread due to plotext)"""
+        try:
+            widget.update_content(
+                network_metrics['download_speed'],
+                network_metrics['upload_speed']
+            )
+        except Exception as e:
+            logger.error(f"Error updating Network widget: {e}", exc_info=True)
+    
+    async def _update_gpu_widget(self, widget, gpu_metric):
+        """Update GPU widget (plot operations must be on main thread due to plotext)"""
+        try:
+            widget.update_content(
+                gpu_metric["gpu_name"],
+                gpu_metric['gpu_util'],
+                gpu_metric['mem_used'],
+                gpu_metric['mem_total']
+            )
+        except Exception as e:
+            logger.error(f"Error updating GPU widget {widget.title}: {e}", exc_info=True)
+    
+    async def _update_temperature_widget(self, widget, temperature_metrics):
+        """Update Temperature widget (plot operations must be on main thread due to plotext)"""
+        try:
+            widget.update_content(temperature_metrics)
+        except Exception as e:
+            logger.error(f"Error updating Temperature widget: {e}", exc_info=True)
 
     def action_configure(self) -> None:
         """Toggle configuration panel visibility"""

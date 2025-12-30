@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ground-control-tui"
+version = "1.2.3"
+description = "A Python Textual app for monitoring hardware in the terminal"
+readme = "README.md"
+authors = [{ name = "Alberto Rota", email = "alberto1.rota@polimi.it" }]
+urls = { Homepage = "https://github.com/alberto-rota/ground-control" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "click==8.1.8",
+    "linkify-it-py==2.0.3",
+    "markdown-it-py==3.0.0",
+    "mdit-py-plugins==0.4.2",
+    "mdurl==0.1.2",
+    "numpy>=1.24.4",
+    "nvidia-ml-py==13.580.82",
+    "nvitop==1.6.1",
+    "platformdirs==4.3.6",
+    "plotext==5.3.2",
+    "psutil==7.2.1",
+    "pygments==2.19.2",
+    "rich==14.2.0",
+    "textual==6.2.1",
+    "textualize==0.1",
+    "typing-extensions==4.13.2",
+    "uc-micro-py==1.0.3",
+]
+
+[project.scripts]
+groundcontrol = "ground_control.main:entry"
+gc = "ground_control.main:entry"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ground_control*"]

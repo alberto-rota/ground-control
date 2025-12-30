@@ -5,6 +5,7 @@ from textual.containers import Horizontal
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
+from ..utils.colors import get_rich_color
 
 
 def rotate_text(text: str) -> str:
@@ -16,7 +17,7 @@ class DiskIOWidget(MetricWidget):
     """Widget for disk I/O with dual plots and vertical read/write bar."""
 
     def __init__(self, title: str, id: str = None, history_size: int = 120):
-        super().__init__(title=title, color="magenta", history_size=history_size, id=id)
+        super().__init__(title=title, color=get_rich_color("disk_read", "#FF00FF"), history_size=history_size, id=id)
         self.read_history = deque(maxlen=history_size)
         self.write_history = deque(maxlen=history_size)
         self.max_io = 100
@@ -55,17 +56,19 @@ class DiskIOWidget(MetricWidget):
             read_blocks = int((half_width * read_percent) / 100)
             write_blocks = int((half_width * write_percent) / 100)
 
+            read_color = get_rich_color("disk_read", "#FF00FF")
+            write_color = get_rich_color("disk_write", "#00FFFF")
             left_bar = (
                 (
                     f"{'─' * (half_width - read_blocks)}"
-                    f"[magenta]{''}{'█' * (read_blocks-1)}[/]"
+                    f"[{read_color}]{''}{'█' * (read_blocks-1)}[/]"
                 )
                 if read_blocks >= 1
                 else f"{'─' * half_width}"
             )
             right_bar = (
                 (
-                    f"[cyan]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}"
+                    f"[{write_color}]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}"
                 )
                 if write_blocks >= 1
                 else f"{'─' * half_width}"
@@ -96,7 +99,9 @@ class DiskIOWidget(MetricWidget):
             used_blocks = int((usable_width * usage_percent) / 100)
             free_blocks = usable_width - used_blocks
 
-            usage_bar = f"[magenta]{'█' * used_blocks}[/][cyan]{'█' * free_blocks}[/]"
+            disk_used_color = get_rich_color("disk_used", "#FF00FF")
+            disk_free_color = get_rich_color("disk_free", "#00FFFF")
+            usage_bar = f"[{disk_used_color}]{'█' * used_blocks}[/][{disk_free_color}]{'█' * free_blocks}[/]"
 
             used_gb = disk_used / (1024**3)
             available_gb = available / (1024**3)
@@ -104,12 +109,20 @@ class DiskIOWidget(MetricWidget):
             free_gb_txt = align(
                 f"FREE: {available_gb:.1f} GB ", total_width // 2 - 2, "right"
             )
-            return f" [magenta]{used_gb_txt}[/]    [cyan]{free_gb_txt}[/]\n {usage_bar}"
+            return f" [{disk_used_color}]{used_gb_txt}[/]    [{disk_free_color}]{free_gb_txt}[/]\n {usage_bar}"
         except Exception as e:
             return "Error displaying disk usage"
 
     def get_dual_plot(self) -> str:
         try:
+            # Validate plot dimensions before proceeding
+            plot_height = max(1, getattr(self, "plot_height", 10) - 1)
+            plot_width = max(10, getattr(self, "plot_width", 40))
+            
+            # If dimensions are invalid, return early
+            if plot_height <= 0 or plot_width <= 0:
+                return "Initializing..."
+            
             # Initialize with default values if history is empty
             if (
                 not self.read_history
@@ -123,8 +136,8 @@ class DiskIOWidget(MetricWidget):
 
                 plt.clear_figure()
                 plt.plot_size(
-                    height=max(1, getattr(self, "plot_height", 10) - 1),
-                    width=max(10, getattr(self, "plot_width", 40)),
+                    height=plot_height,
+                    width=plot_width,
                 )
                 plt.theme("pro")
                 plt.ylim(-1, 1)  # Set default range
@@ -138,19 +151,17 @@ class DiskIOWidget(MetricWidget):
                 plt.yticks(y_ticks, y_labels)
                 plt.xfrequency(0)
 
+                read_color = get_rich_color("disk_plot_read", "#FF00FF")
+                write_color = get_rich_color("disk_plot_write", "#00FFFF")
                 return (
                     ansi2rich(plt.build())
                     .replace("\x1b[0m", "")
-                    .replace("[blue]", "[blue]")
-                    .replace("[green]", "[magenta]")
+                    .replace("[blue]", f"[{read_color}]")
+                    .replace("[green]", f"[{write_color}]")
                 )
 
             # Process actual data if we have history
             plt.clear_figure()
-
-            # Ensure plot dimensions are valid
-            plot_height = max(1, getattr(self, "plot_height", 10) - 1)
-            plot_width = max(10, getattr(self, "plot_width", 40))
             plt.plot_size(height=plot_height, width=plot_width)
             plt.theme("pro")
 
@@ -235,23 +246,33 @@ class DiskIOWidget(MetricWidget):
             plt.plot(negative_downloads, marker="braille", label="Write")
             plt.hline(0.0)
             plt.xfrequency(0)
+            read_color = get_rich_color("disk_plot_read", "#FF00FF")
+            write_color = get_rich_color("disk_plot_write", "#00FFFF")
             return (
                 ansi2rich(plt.build())
                 .replace("\x1b[0m", "")
-                .replace("[blue]", "[blue]")
-                .replace("[green]", "[magenta]")
+                .replace("[blue]", f"[{read_color}]")
+                .replace("[green]", f"[{write_color}]")
                 .replace("──────┐","─MB/s─┐")
             )
         except Exception as e:
+            # Log the actual error for debugging
+            import logging
+            logger = logging.getLogger("ground-control")
+            logger.debug(f"Plot error in {self.title}: {e}", exc_info=True)
+            
             # Return a simple error placeholder plot
             try:
+                # Use safe dimensions
+                safe_height = max(1, getattr(self, "plot_height", 10) - 1)
+                safe_width = max(10, getattr(self, "plot_width", 40))
+                
                 plt.clear_figure()
-                plt.plot_size(height=10, width=40)
+                plt.plot_size(height=safe_height, width=safe_width)
                 plt.theme("pro")
                 plt.ylim(-1, 1)
-                dummy_data = [0] * 10
+                dummy_data = [0] * min(10, safe_width)
                 plt.plot(dummy_data, marker="braille", label="Error")
-                plt.text("Plot Error", 5, 0)
                 plt.hline(0.0)
 
                 # Even in error state, add MB/s labels
@@ -265,12 +286,14 @@ class DiskIOWidget(MetricWidget):
                 ]
                 plt.yticks(y_ticks, y_labels)
 
+                error_color = get_rich_color("high_value", "#FF0000")
                 return (
                     ansi2rich(plt.build())
                     .replace("\x1b[0m", "")
-                    .replace("[blue]", "[red]")
+                    .replace("[blue]", f"[{error_color}]")
                 )
-            except:
+            except Exception as inner_e:
+                logger.debug(f"Error creating error plot: {inner_e}")
                 return "Error displaying plot"
 
     def update_content(

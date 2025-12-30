@@ -4,6 +4,7 @@ from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
+from ..utils.colors import get_rich_color
 import numpy as np
 
 
@@ -13,7 +14,7 @@ class GPUWidget(MetricWidget):
     def __init__(
         self, title: str, id: str = None, color: str = "green", history_size: int = 120
     ):
-        super().__init__(title=title, color=color, history_size=history_size, id=id)
+        super().__init__(title=title, color=get_rich_color("gpu_ram", "#00FF00"), history_size=history_size, id=id)
         self.gpu_ram_history = deque(maxlen=history_size)
         self.gpu_usage_history = deque(maxlen=history_size)
         # self.max_val = 100  # initial max value; will update based on incoming data
@@ -40,32 +41,43 @@ class GPUWidget(MetricWidget):
         ram_blocks = int((half_width * gpu_ram_percent) / 100)
         usage_blocks = int((half_width * gpu_usage_percent) / 100)
 
+        gpu_ram_color = get_rich_color("gpu_ram", "#00FF00")
+        gpu_usage_color = get_rich_color("gpu_usage", "#00FFFF")
+        white_color = get_rich_color("white", "#FFFFFF")
         left_bar = (
             (
-                f"[green]{'█' * (ram_blocks-1)}{''}[/][white]{'─' * (half_width - ram_blocks)}[/]"
+                f"[{gpu_ram_color}]{'█' * (ram_blocks-1)}{''}[/][{white_color}]{'─' * (half_width - ram_blocks)}[/]"
             )
             if ram_blocks >= 1
             else f"{'─' * half_width}"
         )
         right_bar = (
             (
-                f"[cyan]{'█' * (usage_blocks-3)}{''}[/]{'─' * (half_width - usage_blocks)}"
+                f"[{gpu_usage_color}]{'█' * (usage_blocks-3)}{''}[/]{'─' * (half_width - usage_blocks)}"
             )
             if usage_blocks >= 1
             else f"{'─' * half_width}"
         )
 
         if gpu_ram_percent >= 90:
-            gpu_ram_withunits = f"[red]{gpu_ram_withunits}[/]"
-            left_bar = left_bar.replace("[green]", "[red]")
+            warning_color = get_rich_color("gpu_ram_warning", "#FF0000")
+            gpu_ram_withunits = f"[{warning_color}]{gpu_ram_withunits}[/]"
+            left_bar = left_bar.replace(f"[{gpu_ram_color}]", f"[{warning_color}]")
         return f"{gpu_ram_withunits} {left_bar}│{right_bar} {gpu_usage_withunits}"
 
     def get_dual_plot(self) -> str:
         if not self.gpu_ram_history:
             return "No data yet..."
 
+        # Validate plot dimensions
+        plot_height = max(1, getattr(self, "plot_height", 10))
+        plot_width = max(10, getattr(self, "plot_width", 40))
+        
+        if plot_height <= 0 or plot_width <= 0:
+            return "Initializing..."
+
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width)
+        plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
 
         # Plot GPU RAM as positive values and GPU Usage as negative
@@ -101,11 +113,13 @@ class GPUWidget(MetricWidget):
         if not self.usage_is_available:
             current_yticks = [-100, -75, -50, -25, 0]
             plt.yticks(current_yticks, [0, 25, 50, 75, 100])
+        gpu_ram_color = get_rich_color("gpu_plot_ram", "#00FF00")
+        gpu_usage_color = get_rich_color("gpu_plot_usage", "#00FFFF")
         return (
             ansi2rich(plt.build())
             .replace("\x1b[0m", "")
-            .replace("[blue]", "[cyan]")
-            .replace("[green]", "[green]")
+            .replace("[blue]", f"[{gpu_usage_color}]")
+            .replace("[green]", f"[{gpu_ram_color}]")
             .replace("-", " ")
             .replace("──────┐","─GB─%─┐")
             

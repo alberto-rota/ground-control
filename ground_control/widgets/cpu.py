@@ -4,6 +4,7 @@ from textual.widgets import Static, Sparkline
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
+from ..utils.colors import get_rich_color
 
 class CPUWidget(MetricWidget):
     """CPU usage display widget."""
@@ -43,13 +44,15 @@ class CPUWidget(MetricWidget):
         used_blocks = int((usable_width * usage_percent) / 100)
         free_blocks = usable_width - used_blocks
 
-        usage_bar = f"[magenta]{'█' * used_blocks}[/][cyan]{'█' * free_blocks}[/]"
+        disk_used_color = get_rich_color("cpu_disk_used", "#FF00FF")
+        disk_free_color = get_rich_color("cpu_disk_free", "#00FFFF")
+        usage_bar = f"[{disk_used_color}]{'█' * used_blocks}[/][{disk_free_color}]{'█' * free_blocks}[/]"
 
         used_gb = disk_used / (1024 ** 3)
         available_gb = available / (1024 ** 3)
         used_gb_txt = align(f"{used_gb:.1f} GB USED", total_width // 2 - 2, "left")
         free_gb_txt = align(f"FREE: {available_gb:.1f} GB ", total_width // 2 - 2, "right")
-        return f' [magenta]{used_gb_txt}[/]DISK[cyan]{free_gb_txt}[/]\n {usage_bar}'
+        return f' [{disk_used_color}]{used_gb_txt}[/]DISK[{disk_free_color}]{free_gb_txt}[/]\n {usage_bar}'
 
     def create_bar_chart(self, cpu_percentages, cpu_freqs, mem_percent, disk_used, disk_total, width, height):
         # If the full CPU chart fits vertically, use the single chart approach.

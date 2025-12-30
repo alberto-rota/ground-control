@@ -5,13 +5,14 @@ from textual.containers import Horizontal
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
+from ..utils.colors import get_rich_color
 
 
 class TemperatureWidget(MetricWidget):
     """Widget for system temperature monitoring."""
 
     def __init__(self, title: str, id: str = None, history_size: int = 120):
-        super().__init__(title=title, color="red", history_size=history_size, id=id)
+        super().__init__(title=title, color=get_rich_color("temp_critical", "#FF0000"), history_size=history_size, id=id)
         self.temperature_histories = {}  # Store history for each sensor
         self.max_temp = 100  # Maximum temperature for scaling
         self.title = title
@@ -26,15 +27,15 @@ class TemperatureWidget(MetricWidget):
     def get_temp_color(self, temp: float) -> str:
         """Get color based on temperature value."""
         if temp < 30:
-            return "cyan"  # Cool - blue
+            return get_rich_color("temp_cool", "#00FFFF")  # Cool - cyan
         elif temp < 50:
-            return "green"  # Normal - green
+            return get_rich_color("temp_normal", "#00FF00")  # Normal - green
         elif temp < 70:
-            return "yellow"  # Warm - yellow
+            return get_rich_color("temp_warm", "#FFFF00")  # Warm - yellow
         elif temp < 85:
-            return "orange3"  # Hot - orange
+            return get_rich_color("temp_hot", "#FF8C00")  # Hot - orange
         else:
-            return "red"  # Critical - red
+            return get_rich_color("temp_critical", "#FF0000")  # Critical - red
 
     def create_temperature_bars(self, temperatures: dict, total_width: int = 40) -> str:
         """Create vertical temperature bars for current readings."""
@@ -87,6 +88,12 @@ class TemperatureWidget(MetricWidget):
 
     def get_temperature_plot(self, temperatures: dict) -> str:
         """Create a multi-line temperature plot."""
+        # Validate plot dimensions
+        plot_height = max(1, getattr(self, "plot_height", 10))
+        plot_width = max(10, getattr(self, "plot_width", 40))
+        
+        if plot_height <= 0 or plot_width <= 0:
+            return "Initializing..."
         # Update histories for each sensor
         for sensor_name, temp in temperatures.items():
             if sensor_name not in self.temperature_histories:
@@ -107,9 +114,9 @@ class TemperatureWidget(MetricWidget):
         if not self.temperature_histories:
             return "No temperature data to plot"
 
-        # Get plot dimensions
-        plot_height = max(6, getattr(self, "plot_height", 10))
-        plot_width = max(20, getattr(self, "plot_width", 40))
+        # Use validated dimensions from earlier
+        plot_height = max(6, plot_height)
+        plot_width = max(20, plot_width)
 
         plt.clear_figure()
         plt.plot_size(height=plot_height, width=plot_width)
@@ -163,18 +170,18 @@ class TemperatureWidget(MetricWidget):
         )
 
         colors = [
-            "orange1",
-            "green",
-            "blue",
-            "orange1",
-            "green",
-            "blue",
-            "orange1",
-            "green",
-            "blue",
-            "orange1",
-            "green",
-            "blue",
+            get_rich_color("temp_plot_1", "#FF8C00"),
+            get_rich_color("temp_plot_2", "#00FF00"),
+            get_rich_color("temp_plot_3", "#0080FF"),
+            get_rich_color("temp_plot_1", "#FF8C00"),
+            get_rich_color("temp_plot_2", "#00FF00"),
+            get_rich_color("temp_plot_3", "#0080FF"),
+            get_rich_color("temp_plot_1", "#FF8C00"),
+            get_rich_color("temp_plot_2", "#00FF00"),
+            get_rich_color("temp_plot_3", "#0080FF"),
+            get_rich_color("temp_plot_1", "#FF8C00"),
+            get_rich_color("temp_plot_2", "#00FF00"),
+            get_rich_color("temp_plot_3", "#0080FF"),
         ]
 
         for i, (sensor_name, history) in enumerate(sorted_sensors[:4]):
@@ -197,12 +204,28 @@ class TemperatureWidget(MetricWidget):
         plt.xfrequency(0)
 
         # Add temperature threshold lines
+        warning_color = get_rich_color("temp_warning_line", "#FF0000")
+        caution_color = get_rich_color("temp_caution_line", "#FF8C00")
         if max_temp > 80:
-            plt.hline(80, color="red")  # Warning line
+            plt.hline(80, color=warning_color)  # Warning line
         if max_temp > 60:
-            plt.hline(60, color="orange1")  # Caution line
+            plt.hline(60, color=caution_color)  # Caution line
 
-        result = ansi2rich(plt.build()).replace("[brown]", "[yellow]").replace("[red]", "[red]").replace("[blue]", "[orange1]").replace("[green]", "[yellow]").replace("[magenta]", "[red]").replace("[yellow]", "[yellow]").replace("\x1b[0m", "").replace("──────┐", "──°C──┐")
+        # Map plotext colors to config colors
+        plot_color_1 = get_rich_color("temp_plot_1", "#FF8C00")
+        plot_color_2 = get_rich_color("temp_plot_2", "#00FF00")
+        plot_color_3 = get_rich_color("temp_plot_3", "#0080FF")
+        yellow_color = get_rich_color("temp_warm", "#FFFF00")
+        red_color = get_rich_color("temp_critical", "#FF0000")
+        result = (ansi2rich(plt.build())
+                 .replace("[brown]", f"[{yellow_color}]")
+                 .replace("[red]", f"[{red_color}]")
+                 .replace("[blue]", f"[{plot_color_1}]")
+                 .replace("[green]", f"[{yellow_color}]")
+                 .replace("[magenta]", f"[{red_color}]")
+                 .replace("[yellow]", f"[{yellow_color}]")
+                 .replace("\x1b[0m", "")
+                 .replace("──────┐", "──°C──┐"))
         return result
 
         # except Exception as e:

@@ -3,6 +3,7 @@ from textual.widgets import Static
 from textual.message import Message
 import plotext as plt
 from ..utils.formatting import ansi2rich
+from ..utils.colors import get_rich_color, load_colors
 from textual.scroll_view import ScrollView
 from textual.geometry import Size
 class MetricWidget(Static):
@@ -37,7 +38,13 @@ class MetricWidget(Static):
     def __init__(self, title: str, id: str, color: str = "blue", history_size: int = 120):
         super().__init__(id=id)
         self.title = title
-        self.color = color
+        # If color is a hex value or color name, use it; otherwise use default
+        # Note: We use _color_config to avoid conflict with Textual's colors attribute
+        if color.startswith("#"):
+            self.color = color
+        else:
+            # Try to get color from config by widget type, fallback to provided color
+            self.color = get_rich_color("default_plot", color)
         self.history = deque(maxlen=history_size)
         self.plot_width = 0
         self.plot_height = 0
@@ -66,16 +73,18 @@ class MetricWidget(Static):
         """Creates a gradient bar with custom base color."""
         filled = int((width * value) / 100)
         if filled > width * 0.8:
-            color = "bright_red"
+            color = get_rich_color("high_value", "#FF0000")
         empty = width - filled
         
         if filled == 0:
             return "─" * width
         
-        if value < 20:
-            return f"[{self.color if color is None else color}]{'█' * filled}[/]{'─' * empty}"
+        bar_color = self.color if color is None else color
         
-        bar = (f"[{self.color if color is None else color}]{'█' * filled}[/]"
+        if value < 20:
+            return f"[{bar_color}]{'█' * filled}[/]{'─' * empty}"
+        
+        bar = (f"[{bar_color}]{'█' * filled}[/]"
                f"{'─' * empty}")
         
         return bar

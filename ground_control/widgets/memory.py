@@ -4,6 +4,7 @@ from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
+from ..utils.colors import get_rich_color
 
 class MemoryWidget(MetricWidget):
     """Memory (RAM) usage display widget with dual plots for RAM and SWAP over time."""
@@ -26,7 +27,7 @@ class MemoryWidget(MetricWidget):
             height: 2fr;
         }
         """
-        super().__init__(title=title, id=id, color="orange1")
+        super().__init__(title=title, id=id, color=get_rich_color("memory_ram", "#FF8C00"))
         self.ram_history = deque(maxlen=120)
         self.swap_history = deque(maxlen=120)
         self.first = True
@@ -46,7 +47,8 @@ class MemoryWidget(MetricWidget):
         # Safety checks
         ram_usage = max(0.0, float(ram_usage))
         swap_usage = max(0.0, float(swap_usage))
-        total_width = max(0.0, int(total_width))+21
+        # Ensure total_width is a valid integer (no need to add magic numbers)
+        total_width = max(10, int(total_width))
 
         # Calculate free spaces using actual total RAM and SWAP
         free_ram = max(0.0, self.total_ram - ram_usage)
@@ -59,23 +61,29 @@ class MemoryWidget(MetricWidget):
         swap_free_percent = min(free_swap/self.total_swap if self.total_swap > 0 else 0, 1)
 
         # Calculate blocks for each section
-        total_blocks = total_width - 1  # Leave space for borders
+        # Use total_width directly to match plot width calculation
+        total_blocks = total_width
         half_blocks = total_blocks // 2  # Split between RAM and SWAP sections
         
         ram_used_blocks = int(half_blocks * ram_used_percent)
         ram_free_blocks = half_blocks - ram_used_blocks
         swap_used_blocks = int(half_blocks * swap_used_percent)
+        # Calculate swap_free_blocks to ensure total matches exactly
         swap_free_blocks = total_blocks - ram_used_blocks - ram_free_blocks - swap_used_blocks
 
         # Ensure no negative blocks
         ram_free_blocks = max(0, ram_free_blocks)
         swap_free_blocks = max(0, swap_free_blocks)
 
+        # Get colors from config
+        ram_color = get_rich_color("memory_ram_used", "#FF8C00")
+        swap_color = get_rich_color("memory_swap", "#00FFFF")
+        
         # Create the four-section bar
-        ram_free_bar = f"[orange3]{'─' * ram_free_blocks}[/]"
-        ram_used_bar = f"[orange3]{'█' * ram_used_blocks}[/]"
-        swap_used_bar = f"[cyan]{'█' * swap_used_blocks}[/]"
-        swap_free_bar = f"[cyan]{'─' * swap_free_blocks}[/]"
+        ram_free_bar = f"[{ram_color}]{'─' * ram_free_blocks}[/]"
+        ram_used_bar = f"[{ram_color}]{'█' * ram_used_blocks}[/]"
+        swap_used_bar = f"[{swap_color}]{'█' * swap_used_blocks}[/]"
+        swap_free_bar = f"[{swap_color}]{'─' * swap_free_blocks}[/]"
 
         # Create labels with alignment
         ram_free_label = align(f"{free_ram:.1f}GB FREE", (total_width-2) // 4, "left")
@@ -86,15 +94,22 @@ class MemoryWidget(MetricWidget):
         # Combine everything
         bar = f"{ram_free_bar}{ram_used_bar}{swap_used_bar}{swap_free_bar}"
         
-        return f" [orange3 italic]{ram_free_label}[/] [orange3]{ram_label}[/] [cyan]{swap_label}[/] [cyan italic]{swap_free_label}[/]\n {bar}"
+        return f" [{ram_color} italic]{ram_free_label}[/] [{ram_color}]{ram_label}[/] [{swap_color}]{swap_label}[/] [{swap_color} italic]{swap_free_label}[/]\n {bar}"
 
     def get_dual_plot(self) -> str:
         """Create a dual plot showing RAM and SWAP usage over time."""
         if not self.ram_history:
-            return Static("No data yet...")
+            return "No data yet..."
+
+        # Validate plot dimensions
+        plot_height = max(1, getattr(self, "plot_height", 10) - 1)
+        plot_width = max(10, getattr(self, "plot_width", 40))
+        
+        if plot_height <= 0 or plot_width <= 0:
+            return "Initializing..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height-1, width=self.plot_width)
+        plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
 
         # Create negative values for SWAP to show it below zero
@@ -143,11 +158,13 @@ class MemoryWidget(MetricWidget):
         plt.yfrequency(5)
         plt.xfrequency(0)
 
+        ram_color = get_rich_color("memory_ram_used", "#FF8C00")
+        swap_color = get_rich_color("memory_swap", "#00FFFF")
         return (
             ansi2rich(plt.build())
             .replace("\x1b[0m", "")
-            .replace("[blue]", "[orange3]")
-            .replace("[green]", "[cyan]")
+            .replace("[blue]", f"[{ram_color}]")
+            .replace("[green]", f"[{swap_color}]")
             .replace("──────┐","───GB─┐")
         )
 
@@ -163,14 +180,9 @@ class MemoryWidget(MetricWidget):
         
         self.border_title = f"RAM [{self.total_ram:.1f}GB] SWAP [{self.total_swap:.1f}GB]"
         
-        # Calculate total width for the center bar
-        total_width = (
-            self.size.width
-            - len("MEM ")
-            - len(f"{memory_info.used:.1f}GB ")
-            - len(f"{self.total_ram - memory_info.used:.2f}GB")
-            +13
-        )
+        # Calculate total width for the center bar (use same calculation as plot)
+        # Use plot_width which is set by on_resize in base class (width - 3)
+        total_width = max(10, getattr(self, "plot_width", self.size.width - 3))
         
         self.query_one("#history-plot").update(self.get_dual_plot()) 
         # Update the center bar

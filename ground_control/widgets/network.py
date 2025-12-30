@@ -4,6 +4,7 @@ from textual.widgets import Static
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
+from ..utils.colors import get_rich_color
 
 
 class NetworkIOWidget(MetricWidget):
@@ -12,7 +13,7 @@ class NetworkIOWidget(MetricWidget):
     def __init__(
         self, title: str, id: str = None, color: str = "blue", history_size: int = 120
     ):
-        super().__init__(title=title, color="blue", history_size=history_size, id=id)
+        super().__init__(title=title, color=get_rich_color("default_plot", "#0080FF"), history_size=history_size, id=id)
         self.download_history = deque(maxlen=history_size)
         self.upload_history = deque(maxlen=history_size)
         self.max_net = 100
@@ -39,13 +40,15 @@ class NetworkIOWidget(MetricWidget):
         read_blocks = int((half_width * read_percent) / 100)
         write_blocks = int((half_width * write_percent) / 100)
 
+        download_color = get_rich_color("network_download", "#FF8C00")
+        upload_color = get_rich_color("network_upload", "#00FF00")
         left_bar = (
-            f"{'─' * (half_width - read_blocks)}[green]{''}{'█' * (read_blocks-1)}[/]"
+            f"{'─' * (half_width - read_blocks)}[{upload_color}]{''}{'█' * (read_blocks-1)}[/]"
             if read_blocks >= 1
             else f"{'─' * half_width}"
         )
         right_bar = (
-            f"[dark_orange]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}"
+            f"[{download_color}]{'█' * (write_blocks-1)}{''}[/]{'─' * (half_width - write_blocks)}"
             if write_blocks >= 1
             else f"{'─' * half_width}"
         )
@@ -56,8 +59,15 @@ class NetworkIOWidget(MetricWidget):
         if not self.download_history:
             return "No data yet..."
 
+        # Validate plot dimensions
+        plot_height = max(1, getattr(self, "plot_height", 10))
+        plot_width = max(10, getattr(self, "plot_width", 40))
+        
+        if plot_height <= 0 or plot_width <= 0:
+            return "Initializing..."
+
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width)
+        plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
 
         # Create negative values for download operations
@@ -114,11 +124,13 @@ class NetworkIOWidget(MetricWidget):
 
         # Customize y-axis labels to show absolute values
         # plt.ylabels([f"{abs(x):.0f}" for x in plt.yticks(return_values=True)])
+        download_color = get_rich_color("network_plot_download", "#FF8C00")
+        upload_color = get_rich_color("network_plot_upload", "#00FF00")
         return (
             ansi2rich(plt.build())
             .replace("\x1b[0m", "")
-            .replace("[blue]", "[dark_orange]")
-            .replace("[green]", "[green]")
+            .replace("[blue]", f"[{download_color}]")
+            .replace("[green]", f"[{upload_color}]")
             .replace("──────┐","─MB/s─┐")
         )
 
