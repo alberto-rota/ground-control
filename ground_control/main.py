@@ -102,13 +102,32 @@ def format_help(ctx, formatter):
 
 @click.group(invoke_without_command=True)
 @click.option('--log', is_flag=True, help='Also save log file in current working directory')
+@click.option('--cpu', '-c', is_flag=True, help='Show CPU widgets')
+@click.option('--gpu', '-g', is_flag=True, help='Show GPU widgets')
+@click.option('--ram', '-r', is_flag=True, help='Show Memory widgets')
+@click.option('--disk', '-d', is_flag=True, help='Show Disk widgets')
+@click.option('--net', '-n', is_flag=True, help='Show Network widgets')
+@click.option('--temp', '-t', is_flag=True, help='Show Temperature widgets')
 @click.pass_context
-def cli(ctx, log):
+def cli(ctx, log, cpu, gpu, ram, disk, net, temp):
     """Ground Control - Terminal System Monitor"""
     if ctx.invoked_subcommand is None:
         # No subcommand specified, run the app
         setup_logging(also_log_to_cwd=log)
-        appl = GroundControl()
+        
+        allowed_types = set()
+        if cpu: allowed_types.add('cpu')
+        if gpu: allowed_types.add('gpu')
+        if ram: allowed_types.add('ram')
+        if disk: allowed_types.add('disk')
+        if net: allowed_types.add('net')
+        if temp: allowed_types.add('temp')
+        
+        # If no specific flags are set, pass None (allow all)
+        if not allowed_types:
+            allowed_types = None
+            
+        appl = GroundControl(allowed_types=allowed_types)
         appl.run()
     else:
         # Store log flag in context for subcommands if needed

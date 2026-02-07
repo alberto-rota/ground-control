@@ -78,7 +78,7 @@ class HistorySizeButtons(Static):
                 yield Button(label, id=f"history-{size}", classes="history-button")
 
 class GroundControl(App):
-    def __init__(self):
+    def __init__(self, allowed_types: set[str] | None = None):
         super().__init__()
         # Load colors and generate CSS dynamically
         self._color_config = load_colors()
@@ -99,6 +99,7 @@ class GroundControl(App):
         self._is_initializing = True  # Flag to prevent toast notifications during startup
         self._config_save_task = None  # For debounced config saves (asyncio.Task)
         self._update_in_progress = False  # Prevent concurrent updates
+        self.allowed_types = allowed_types
 
     def _generate_css(self):
         """Generate CSS with colors from config."""
@@ -372,6 +373,11 @@ class GroundControl(App):
     async def on_mount(self) -> None:
         self.current_layout = "grid"
         self.selected_widgets = self.load_config()  # Load all config
+        
+        # If CLI args are provided, override the selection
+        # But we need widgets to be created first to know their titles
+        # So we'll handle filtering in create_selection_list or separate method
+        
         await self.setup_widgets()
         if not self.json_exists:
             self.create_json()
@@ -430,13 +436,13 @@ class GroundControl(App):
             self.temperature_widget = None
     
         # Mount multiple disk widgets
-        for disk in disk_metrics['disks']:
+        for i, disk in enumerate(disk_metrics['disks']):
             # Skip /boot/efi partitions - they should never be shown as widgets
             if '/boot/efi' in disk['mountpoint']:
                 logger.info(f"Skipping EFI partition at {disk['mountpoint']} - not creating widget")
                 continue
                 
-            disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=f"disk_{disk['mountpoint'].replace('/', '_')}")
+            disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=f"disk_{i}_{disk['mountpoint'].replace('/', '_')}")
             self.disk_widgets.append(disk_widget)
             await self.grid.mount(disk_widget)
         
@@ -473,12 +479,49 @@ class GroundControl(App):
     def create_selection_list(self) -> None:
         self.select.clear_options()
         self.selectionoptions.clear()  # Clear the list before adding new options
+        
+        # If allowed_types is set, we need to enforce it
+        # This overrides saved config for this session
+        
         for widget in self.grid.children:
             if hasattr(widget, "title"):
-                # Default to True if the widget is missing in the loaded config.
-                selected = self.selected_widgets.get(widget.title, True)
+                # Determine if this widget should be selected
+                selected = True
+                
+                # First check if explicit CLI args were provided
+                if self.allowed_types:
+                    # Check if widget matches allowed types
+                    widget_type = self._get_widget_type(widget)
+                    if widget_type not in self.allowed_types:
+                        selected = False
+                    else:
+                        selected = True
+                else:
+                    # Fallback to saved config
+                    selected = self.selected_widgets.get(widget.title, True)
+                
                 self.select.add_option(Selection(widget.title, widget.title, selected))
                 self.selectionoptions.append(widget.title)
+                
+                # Update selected_widgets to match current state (important for toggle_widget_visibility)
+                if self.allowed_types:
+                    self.selected_widgets[widget.title] = selected
+
+    def _get_widget_type(self, widget) -> str:
+        """Helper to map widget instance to type string"""
+        if isinstance(widget, CPUWidget):
+            return "cpu"
+        elif isinstance(widget, GPUWidget):
+            return "gpu"
+        elif isinstance(widget, MemoryWidget):
+            return "ram"
+        elif isinstance(widget, DiskIOWidget):
+            return "disk"
+        elif isinstance(widget, NetworkIOWidget):
+            return "net"
+        elif isinstance(widget, TemperatureWidget):
+            return "temp"
+        return "unknown"
 
 
     @on(SelectionList.SelectedChanged)
