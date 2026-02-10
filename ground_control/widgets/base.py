@@ -50,10 +50,17 @@ class MetricWidget(Static):
         self.plot_height = 0
 
     def on_resize(self, event: Message) -> None:
-        """Handle resize events to update plot dimensions."""
-        self.plot_width = event.size.width - 3
-        self.plot_height = event.size.height - 3
-        self.virtual_size = Size(event.size.height/4,event.size.width)
+        """Handle resize events to update plot dimensions.
+
+        Dimensions are clamped so plotext always receives valid size; otherwise
+        in some layouts (or before first layout pass) plots can render empty.
+        """
+        w = max(0, event.size.width - 3)
+        h = max(0, event.size.height - 3)
+        self.plot_width = max(10, w)
+        self.plot_height = max(1, h)
+        rows = max(1, event.size.height // 4)
+        self.virtual_size = Size(rows, event.size.width)
         self.refresh()
 
     def get_plot(self, y_min=0, y_max=100) -> str:
@@ -61,7 +68,9 @@ class MetricWidget(Static):
             return "No data yet..."
 
         plt.clear_figure()
-        plt.plot_size(height=self.plot_height, width=self.plot_width)
+        h = max(1, getattr(self, "plot_height", 10))
+        w = max(10, getattr(self, "plot_width", 40))
+        plt.plot_size(height=h, width=w)
         plt.theme("pro")
         plt.plot(list(self.history), marker="braille")
         plt.ylim(y_min, y_max)

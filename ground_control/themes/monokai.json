@@ -1,8 +1,15 @@
 {
+    "surface": "#272822",
+    "background": "#1E1E1E",
+    "text": "#F8F8F2",
+    "accent": "#A6E22E",
+    "boost": "#3E3D32",
+    "panel": "#49483E",
     "border": "#A6E22E",
     "active_button": "#A6E22E",
     "widget_border": "#A6E22E",
     "default_plot": "#66D9EF",
+    "cpu_bar": "#66D9EF",
     "cpu_disk_used": "#F92672",
     "cpu_disk_free": "#66D9EF",
     "memory_ram": "#FD971F",
@@ -34,6 +41,14 @@
     "temp_warning_line": "#F92672",
     "temp_caution_line": "#FD971F",
     "high_value": "#F92672",
-    "white": "#F8F8F2"
+    "white": "#F8F8F2",
+    "tab_active_bg": "#A6E22E",
+    "tab_active_fg": "#272822",
+    "tab_inactive_bg": "#3E3D32",
+    "tab_inactive_fg": "#75715E",
+    "header_bg": "#49483E",
+    "footer_bg": "#3E3D32",
+    "footer_key_bg": "#A6E22E",
+    "footer_key_fg": "#272822",
+    "selection_highlight": "#A6E22E"
 }
-

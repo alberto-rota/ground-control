@@ -1,8 +1,15 @@
 {
+    "surface": "#1A1A1A",
+    "background": "#0D0D0D",
+    "text": "#E0E0E0",
+    "accent": "#13A10E",
+    "boost": "#252525",
+    "panel": "#1E1E1E",
     "border": "#13A10E",
     "active_button": "#13A10E",
     "widget_border": "#13A10E",
     "default_plot": "#0080FF",
+    "cpu_bar": "#0080FF",
     "cpu_disk_used": "#FF00FF",
     "cpu_disk_free": "#00FFFF",
     "memory_ram": "#FF8C00",
@@ -34,6 +41,14 @@
     "temp_warning_line": "#FF0000",
     "temp_caution_line": "#FF8C00",
     "high_value": "#FF0000",
-    "white": "#FFFFFF"
+    "white": "#FFFFFF",
+    "tab_active_bg": "#13A10E",
+    "tab_active_fg": "#000000",
+    "tab_inactive_bg": "#1A1A1A",
+    "tab_inactive_fg": "#888888",
+    "header_bg": "#13A10E",
+    "footer_bg": "#1A1A1A",
+    "footer_key_bg": "#13A10E",
+    "footer_key_fg": "#000000",
+    "selection_highlight": "#13A10E"
 }
-

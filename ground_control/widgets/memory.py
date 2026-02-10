@@ -43,58 +43,54 @@ class MemoryWidget(MetricWidget):
     def create_center_bar(
         self, ram_usage: float, swap_usage: float, total_width: int
     ) -> str:
-        """Create a center bar showing used/free RAM and used/free SWAP with four different colors."""
-        # Safety checks
+        """Create a center bar showing used/free RAM and used/free SWAP with four different colors.
+
+        total_width must match the widget content width (same as plot_width) so the bar
+        and label line do not overflow. Label line uses structure " [L1] [L2] [L3] [L4]"
+        (11 chars structure + 4*label_w); bar line is exactly total_width chars.
+        """
         ram_usage = max(0.0, float(ram_usage))
         swap_usage = max(0.0, float(swap_usage))
-        # Ensure total_width is a valid integer (no need to add magic numbers)
         total_width = max(10, int(total_width))
 
-        # Calculate free spaces using actual total RAM and SWAP
         free_ram = max(0.0, self.total_ram - ram_usage)
         free_swap = max(0.0, self.total_swap - swap_usage)
-        
-        # Calculate percentages for the bar visualization using respective totals
+
         ram_used_percent = min(ram_usage/self.total_ram if self.total_ram > 0 else 0, 1)
         ram_free_percent = min(free_ram/self.total_ram if self.total_ram > 0 else 0, 1)
         swap_used_percent = min(swap_usage/self.total_swap if self.total_swap > 0 else 0, 1)
         swap_free_percent = min(free_swap/self.total_swap if self.total_swap > 0 else 0, 1)
 
-        # Calculate blocks for each section
-        # Use total_width directly to match plot width calculation
         total_blocks = total_width
-        half_blocks = total_blocks // 2  # Split between RAM and SWAP sections
-        
+        half_blocks = total_blocks // 2
+
         ram_used_blocks = int(half_blocks * ram_used_percent)
         ram_free_blocks = half_blocks - ram_used_blocks
         swap_used_blocks = int(half_blocks * swap_used_percent)
-        # Calculate swap_free_blocks to ensure total matches exactly
         swap_free_blocks = total_blocks - ram_used_blocks - ram_free_blocks - swap_used_blocks
-
-        # Ensure no negative blocks
         ram_free_blocks = max(0, ram_free_blocks)
         swap_free_blocks = max(0, swap_free_blocks)
 
-        # Get colors from config
         ram_color = get_rich_color("memory_ram_used", "#FF8C00")
         swap_color = get_rich_color("memory_swap", "#00FFFF")
-        
-        # Create the four-section bar
+
         ram_free_bar = f"[{ram_color}]{'─' * ram_free_blocks}[/]"
         ram_used_bar = f"[{ram_color}]{'█' * ram_used_blocks}[/]"
         swap_used_bar = f"[{swap_color}]{'█' * swap_used_blocks}[/]"
         swap_free_bar = f"[{swap_color}]{'─' * swap_free_blocks}[/]"
-
-        # Create labels with alignment
-        ram_free_label = align(f"{free_ram:.1f}GB FREE", (total_width-2) // 4, "left")
-        ram_label = align(f"{ram_usage:.1f}GB RAM", (total_width-2) // 4, "right")
-        swap_label = align(f" SWAP {swap_usage:.1f}GB", (total_width-2) // 4, "left")
-        swap_free_label = align(f"FREE {free_swap:.1f}GB", (total_width-2) // 4, "right")
-
-        # Combine everything
         bar = f"{ram_free_bar}{ram_used_bar}{swap_used_bar}{swap_free_bar}"
-        
-        return f" [{ram_color} italic]{ram_free_label}[/] [{ram_color}]{ram_label}[/] [{swap_color}]{swap_label}[/] [{swap_color} italic]{swap_free_label}[/]\n {bar}"
+
+        # Label line: " [L1] [L2] [L3] [L4]" = 14 fixed chars + 4*label_w; must be <= total_width
+        label_w = max(1, (total_width - 14) // 4)
+        ram_free_label = align(f"{free_ram:.1f}GB FREE", label_w, "left")
+        ram_label = align(f"{ram_usage:.1f}GB RAM", label_w, "right")
+        swap_label = align(f" SWAP {swap_usage:.1f}GB", label_w, "left")
+        swap_free_label = align(f"FREE {free_swap:.1f}GB", label_w, "right")
+
+        return (
+            f" [{ram_color} italic]{ram_free_label}[/] [{ram_color}]{ram_label}[/] "
+            f"[{swap_color}]{swap_label}[/] [{swap_color} italic]{swap_free_label}[/]\n{bar}"
+        )
 
     def get_dual_plot(self) -> str:
         """Create a dual plot showing RAM and SWAP usage over time."""

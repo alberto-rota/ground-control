@@ -26,7 +26,8 @@ class SystemMetrics:
         self.prev_write_bytes = 0
         self.prev_net_bytes_recv = 0
         self.prev_net_bytes_sent = 0
-        self.prev_time = time.time()
+        self.prev_disk_time = time.time()
+        self.prev_net_time = time.time()
         self.prev_disk_io = {}  # Store previous disk IO counters per disk
         self._initialize_counters()
         self.devices = self._get_all_gpu_devices() if NVML_AVAILABLE else []
@@ -354,13 +355,16 @@ class SystemMetrics:
         return sensor_name.replace('_', ' ').title()
 
     def _initialize_counters(self):
+        now = time.time()
+        self.prev_disk_time = now
+        self.prev_net_time = now
         io_counters = psutil.net_io_counters()
         self.prev_net_bytes_recv = io_counters.bytes_recv
         self.prev_net_bytes_sent = io_counters.bytes_sent
         disk_io = psutil.disk_io_counters()
         self.prev_read_bytes = disk_io.read_bytes
         self.prev_write_bytes = disk_io.write_bytes
-        
+
         # Initialize per-disk counters
         try:
             per_disk_io = psutil.disk_io_counters(perdisk=True)
@@ -368,9 +372,9 @@ class SystemMetrics:
                 self.prev_disk_io[disk_name] = {
                     'read_bytes': io_data.read_bytes,
                     'write_bytes': io_data.write_bytes,
-                    'time': time.time()
+                    'time': now
                 }
-        except:
+        except Exception:
             pass
 
     def get_cpu_info(self):
@@ -411,33 +415,33 @@ class SystemMetrics:
 
     def get_disk_metrics(self):
         current_time = time.time()
-        disk_time_delta = max(current_time - self.prev_time, 1e-6)
-    
+        disk_time_delta = max(current_time - self.prev_disk_time, 1e-6)
+
         # Get IO counters for all disks if available
         try:
             per_disk_io = psutil.disk_io_counters(perdisk=True)
-        except:
+        except Exception:
             per_disk_io = {}
-    
+
         # Get total IO counters
         total_io = psutil.disk_io_counters()
-    
+
         # Calculate total read/write speeds with a smooth factor
         total_read_speed = (total_io.read_bytes - self.prev_read_bytes) / (1024**2) / disk_time_delta
         total_write_speed = (total_io.write_bytes - self.prev_write_bytes) / (1024**2) / disk_time_delta
-        
+
         # Apply smoothing and prevent negative values
         total_read_speed = max(0, total_read_speed)
         total_write_speed = max(0, total_write_speed)
-        
+
         # Debug check - ensure we're not zeroing out valid read values
         if total_read_speed < 0.01 and total_io.read_bytes > self.prev_read_bytes:
             total_read_speed = 0.01  # Set a minimum value if there was positive activity
-    
+
         # Update previous values for total IO
         self.prev_read_bytes = total_io.read_bytes
         self.prev_write_bytes = total_io.write_bytes
-        self.prev_time = current_time
+        self.prev_disk_time = current_time
     
         # Get all mounted partitions
         partitions = psutil.disk_partitions(all=False)
@@ -521,34 +525,125 @@ class SystemMetrics:
     def get_network_metrics(self):
         current_time = time.time()
         net_io_counters = psutil.net_io_counters()
-        
-        time_delta = max(current_time - self.prev_time, 1e-6)
-        
+
+        time_delta = max(current_time - self.prev_net_time, 1e-6)
+
         download_speed = (net_io_counters.bytes_recv - self.prev_net_bytes_recv) / (1024 ** 2) / time_delta
         upload_speed = (net_io_counters.bytes_sent - self.prev_net_bytes_sent) / (1024 ** 2) / time_delta
-        
+
         self.prev_net_bytes_recv = net_io_counters.bytes_recv
         self.prev_net_bytes_sent = net_io_counters.bytes_sent
-        self.prev_time = current_time
-        
+        self.prev_net_time = current_time
+
         return {
             'download_speed': download_speed,
             'upload_speed': upload_speed
         }
 
+    def _get_pids_on_device(self, device) -> set:
+        """Return set of PIDs running on this GPU device using pynvml (authoritative per-device list)."""
+        if not NVML_AVAILABLE:
+            return None  # no filter
+        try:
+            # Prefer nvitop's NVML handle so we support both Physical and MIG devices
+            handle = getattr(device, 'handle', None) or getattr(device, '_handle', None)
+            if handle is None and isinstance(getattr(device, 'index', None), int):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device.index)
+            if handle is None:
+                return None
+            procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            return {p.pid for p in procs} if procs else set()
+        except Exception:
+            return None
+
     def get_gpu_metrics(self):
+        """Return per-GPU metrics including running processes on each device."""
         gpu_metrics = []
         for device in self.devices:
             with device.oneshot():
+                processes = []
+                pids_on_this_device = self._get_pids_on_device(device)
+                try:
+                    procs = device.processes()
+                    if procs is not None:
+                        for proc in procs.values():
+                            try:
+                                if pids_on_this_device is not None and proc.pid not in pids_on_this_device:
+                                    continue
+                                name = proc.name() if proc.name() is not NA else str(proc.pid)
+                                gpu_mem = proc.gpu_memory_human() if proc.gpu_memory_human() is not NA else "N/A"
+                                try:
+                                    username = proc.username()
+                                except Exception:
+                                    username = ""
+                                command = ""
+                                script = ""
+                                try:
+                                    cmdline = proc.cmdline()
+                                    if cmdline:
+                                        raw_cmd = proc.command()
+                                        if raw_cmd is not NA and isinstance(raw_cmd, str):
+                                            command = raw_cmd
+                                        else:
+                                            command = " ".join(str(x) for x in cmdline[:20])
+                                        # For Python, show script name (first .py arg or -c "code")
+                                        name_lower = (name or "").lower()
+                                        first_arg = (cmdline[0] or "").lower() if cmdline else ""
+                                        if "python" in name_lower or "python" in first_arg:
+                                            for idx, arg in enumerate(cmdline[1:], start=1):
+                                                s = str(arg) if arg is not None else ""
+                                                if s.endswith(".py"):
+                                                    script = s
+                                                    break
+                                                if s == "-c" and idx + 1 < len(cmdline):
+                                                    code = str(cmdline[idx + 1] or "")
+                                                    script = f'-c "{code[:50]}..."' if len(code) > 50 else f'-c "{code}"'
+                                                    break
+                                            if not script and len(cmdline) > 1:
+                                                script = str(cmdline[1] or "")[:60]
+                                except Exception:
+                                    pass
+                                cpu_pct = None
+                                mem_str = ""
+                                try:
+                                    host = proc.host
+                                    if host is not NA and host is not None:
+                                        cp = host.cpu_percent()
+                                        cpu_pct = f"{cp:.1f}%" if cp is not NA and cp is not None else "N/A"
+                                        try:
+                                            rss = host.memory_info().rss
+                                            mem_mib = rss / (1024 * 1024)
+                                            mem_str = f"{mem_mib:.0f}MiB" if mem_mib >= 0.1 else "<0.1MiB"
+                                        except Exception:
+                                            try:
+                                                mp = host.memory_percent()
+                                                mem_str = f"{mp:.1f}%" if mp is not None else "N/A"
+                                            except Exception:
+                                                mem_str = "N/A"
+                                except Exception:
+                                    cpu_pct = "N/A"
+                                    mem_str = "N/A"
+                                processes.append({
+                                    'pid': proc.pid,
+                                    'name': name,
+                                    'gpu_memory': gpu_mem,
+                                    'username': username,
+                                    'command': command or "",
+                                    'script': script or command[:80] if command else "",
+                                    'cpu_percent': cpu_pct,
+                                    'memory': mem_str,
+                                })
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
                 gpu_metrics.append({
                     'gpu_name': f"{list(device.index) if isinstance(device.index,tuple) else [device.index]} {device.name()}",
                     'gpu_util': device.gpu_utilization() if device.gpu_utilization() is not NA else -1,
                     'mem_used': device.memory_used() / (1000**3) if device.memory_used() is not NA else -1,
                     'mem_total': device.memory_total() / (1000**3) if device.memory_total() is not NA else -1,
-                    # 'temperature': device.temperature() if device.temperature() is not NA else -1,
-                    # 'fan_speed': device.fan_speed() if device.fan_speed() is not NA else -1,
+                    'processes': processes,
                 })
-            
         return gpu_metrics
 
     def get_memory_metrics(self):

@@ -100,34 +100,58 @@ def format_help(ctx, formatter):
                             formatter.write_text(f'    {opt_record[1]}')
                 formatter.write_text('')  # Empty line between commands
 
+def _parse_gpu_indices(value):
+    """Parse --gpu-index string into list of ints. E.g. '0' -> [0], '0,1,2' -> [0,1,2]. Raises BadParameter on error."""
+    if not value or not value.strip():
+        return None
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if not parts:
+        return None
+    indices = []
+    for p in parts:
+        try:
+            indices.append(int(p))
+        except ValueError:
+            from click import BadParameter
+            raise BadParameter(f"Invalid GPU index {p!r}; expected integers like 0 or 0,1,2")
+    return indices
+
+
 @click.group(invoke_without_command=True)
 @click.option('--log', is_flag=True, help='Also save log file in current working directory')
+@click.option('--debug', is_flag=True, help='Run in debug mode (do not catch errors).')
 @click.option('--cpu', '-c', is_flag=True, help='Show CPU widgets')
-@click.option('--gpu', '-g', is_flag=True, help='Show GPU widgets')
+@click.option('--gpu', '-g', is_flag=True, help='Show GPU widgets (all GPUs by default).')
+@click.option('--gpu-index', type=str, default=None, metavar='IDX',
+             help='Filter to specific GPU(s): 0, 0,1, etc. Use with -g (e.g. gc -g --gpu-index 0).')
 @click.option('--ram', '-r', is_flag=True, help='Show Memory widgets')
 @click.option('--disk', '-d', is_flag=True, help='Show Disk widgets')
 @click.option('--net', '-n', is_flag=True, help='Show Network widgets')
 @click.option('--temp', '-t', is_flag=True, help='Show Temperature widgets')
 @click.pass_context
-def cli(ctx, log, cpu, gpu, ram, disk, net, temp):
+def cli(ctx, log, debug, cpu, gpu, gpu_index, ram, disk, net, temp):
     """Ground Control - Terminal System Monitor"""
     if ctx.invoked_subcommand is None:
         # No subcommand specified, run the app
         setup_logging(also_log_to_cwd=log)
-        
+
         allowed_types = set()
         if cpu: allowed_types.add('cpu')
-        if gpu: allowed_types.add('gpu')
+        if gpu or gpu_index is not None:
+            allowed_types.add('gpu')
         if ram: allowed_types.add('ram')
         if disk: allowed_types.add('disk')
         if net: allowed_types.add('net')
         if temp: allowed_types.add('temp')
-        
+
         # If no specific flags are set, pass None (allow all)
         if not allowed_types:
             allowed_types = None
-            
-        appl = GroundControl(allowed_types=allowed_types)
+
+        # GPU filter: -g alone -> all; --gpu-index 0 or 0,1 -> filter to those indices
+        gpu_indices = _parse_gpu_indices(gpu_index) if gpu_index else None
+
+        appl = GroundControl(allowed_types=allowed_types, gpu_indices=gpu_indices, debug=debug)
         appl.run()
     else:
         # Store log flag in context for subcommands if needed
@@ -138,13 +162,20 @@ def cli(ctx, log, cpu, gpu, ram, disk, net, temp):
 cli.format_help = lambda ctx, formatter: format_help(ctx, formatter)
 
 def get_default_config():
-    """Generate default configuration with all default values including colors."""
+    """Generate default configuration with all default values including colors.
+
+    Returns:
+        dict: A complete default configuration dictionary containing every
+        persisted setting (selected widgets, layout, refresh rate, history
+        size, widget tab states, and the full color palette).
+    """
     return {
         "selected": {},
         "layout": "grid",
         "refresh_rate": 1.0,
         "history_size": 120,
-        "colors": DEFAULT_COLORS.copy()
+        "widget_tabs": {},
+        "colors": DEFAULT_COLORS.copy(),
     }
 
 @cli.command()

@@ -1,0 +1,65 @@
+{
+    "surface": "#FFFFD7",
+    "background": "#E4E4E4",
+    "text": "#000000",
+    "accent": "#87AFD7",
+    "boost": "#F5F5DC",
+    "panel": "#F0F0E0",
+    "border": "#87AFD7",
+    "active_button": "#87AFD7",
+    "widget_border": "#87AFD7",
+    "default_plot": "#5FAFD7",
+    "cpu_bar": "#5FAFD7",
+
+    "cpu_disk_used": "#D787AF",
+    "cpu_disk_free": "#87D7AF",
+
+    "memory_ram": "#FFD787",
+    "memory_ram_used": "#FFD787",
+    "memory_swap": "#87D7D7",
+
+    "network_download": "#FFAF87",
+    "network_upload": "#87AF5F",
+    "network_plot_download": "#FFAF87",
+    "network_plot_upload": "#87AF5F",
+
+    "disk_read": "#D787AF",
+    "disk_write": "#87D7D7",
+    "disk_used": "#D787AF",
+    "disk_free": "#87D7D7",
+    "disk_plot_read": "#D787AF",
+    "disk_plot_write": "#87D7D7",
+
+    "gpu_ram": "#87AF5F",
+    "gpu_usage": "#5FAFD7",
+    "gpu_ram_warning": "#D75F5F",
+    "gpu_plot_ram": "#87AF5F",
+    "gpu_plot_usage": "#5FAFD7",
+
+    "temp_cool": "#87D7D7",
+    "temp_normal": "#87AF5F",
+    "temp_warm": "#FFD787",
+    "temp_hot": "#FFAF87",
+    "temp_critical": "#D75F5F",
+    "temp_plot_1": "#FFAF87",
+    "temp_plot_2": "#87AF5F",
+    "temp_plot_3": "#5FAFD7",
+    "temp_warning_line": "#D75F5F",
+    "temp_caution_line": "#FFAF87",
+
+    "high_value": "#D75F5F",
+    "white": "#000000",
+
+    "tab_active_bg": "#FFFFD7",
+    "tab_active_fg": "#000000",
+    "tab_inactive_bg": "#E4E4E4",
+    "tab_inactive_fg": "#626262",
+
+    "header_bg": "#FFFFD7",
+    "footer_bg": "#E4E4E4",
+    "footer_key_bg": "#87AFD7",
+    "footer_key_fg": "#000000",
+
+    "selection_highlight": "#87AFD7"
+}
+
