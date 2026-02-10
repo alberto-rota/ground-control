@@ -1,3 +1,4 @@
+import logging
 from collections import deque
 from textual.app import ComposeResult
 from textual.widgets import Static
@@ -6,6 +7,8 @@ from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
 from ..utils.colors import get_rich_color
+
+logger = logging.getLogger("ground-control.disk")
 
 
 def rotate_text(text: str) -> str:
@@ -113,12 +116,18 @@ class DiskIOWidget(MetricWidget):
         except Exception as e:
             return "Error displaying disk usage"
 
+    # Plotext needs minimum height for plot + legend; smaller values trigger IndexError in build()
+    _PLOT_MIN_HEIGHT = 6
+    _PLOT_MIN_WIDTH = 12
+
     def get_dual_plot(self) -> str:
         try:
-            # Validate plot dimensions before proceeding
-            plot_height = max(1, getattr(self, "plot_height", 10) - 1)
-            plot_width = max(10, getattr(self, "plot_width", 40))
-            
+            # Validate plot dimensions; enforce minima so plotext's legend build doesn't index out of range
+            raw_height = max(1, getattr(self, "plot_height", 10) - 1)
+            raw_width = max(10, getattr(self, "plot_width", 40))
+            plot_height = max(self._PLOT_MIN_HEIGHT, raw_height)
+            plot_width = max(self._PLOT_MIN_WIDTH, raw_width)
+
             # If dimensions are invalid, return early
             if plot_height <= 0 or plot_width <= 0:
                 return "Initializing..."
@@ -256,17 +265,18 @@ class DiskIOWidget(MetricWidget):
                 .replace("──────┐","─MB/s─┐")
             )
         except Exception as e:
-            # Log the actual error for debugging
-            import logging
-            logger = logging.getLogger("ground-control")
-            logger.debug(f"Plot error in {self.title}: {e}", exc_info=True)
+            logger.debug("Plot error in %s: %s", self.title, e, exc_info=True)
             
             # Return a simple error placeholder plot
             try:
-                # Use safe dimensions
-                safe_height = max(1, getattr(self, "plot_height", 10) - 1)
-                safe_width = max(10, getattr(self, "plot_width", 40))
-                
+                safe_height = max(
+                    self._PLOT_MIN_HEIGHT,
+                    max(1, getattr(self, "plot_height", 10) - 1),
+                )
+                safe_width = max(
+                    self._PLOT_MIN_WIDTH,
+                    getattr(self, "plot_width", 40),
+                )
                 plt.clear_figure()
                 plt.plot_size(height=safe_height, width=safe_width)
                 plt.theme("pro")
@@ -293,7 +303,7 @@ class DiskIOWidget(MetricWidget):
                     .replace("[blue]", f"[{error_color}]")
                 )
             except Exception as inner_e:
-                logger.debug(f"Error creating error plot: {inner_e}")
+                logger.debug("Error creating error plot: %s", inner_e)
                 return "Error displaying plot"
 
     def update_content(
@@ -318,6 +328,14 @@ class DiskIOWidget(MetricWidget):
 
             self.disk_used = disk_used
             self.disk_total = disk_total
+
+            mountpoint = self.title.replace("Disk @ ", "").strip()
+            used_gb = disk_used / (1024 ** 3)
+            total_gb = disk_total / (1024 ** 3) if disk_total else 0.0
+            logger.info(
+                "mountpoint: %s, read_speed_mb_s: %.2f, write_speed_mb_s: %.2f, disk_used_gb: %.2f, disk_total_gb: %.2f",
+                mountpoint, read_speed, write_speed, used_gb, total_gb,
+            )
 
             # Check if we have a valid size before calculating
             if self.size and self.size.width > 0:

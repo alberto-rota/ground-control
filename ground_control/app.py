@@ -1,4 +1,5 @@
 import asyncio
+import queue
 from textual.app import App, ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import (
@@ -12,6 +13,7 @@ from textual.widgets import (
     TabPane,
     RadioButton,
     RadioSet,
+    RichLog,
 )
 from textual.widgets.selection_list import Selection
 from textual.reactive import reactive
@@ -52,6 +54,40 @@ def hex_to_rgb(hex_color: str) -> tuple:
 
 # Logger will be set up in main.py before app is created
 logger = logging.getLogger("ground-control")
+
+# Level-to-Rich-markup prefix for log lines in the Logs tab
+_LOG_LEVEL_MARKUP = {
+    logging.DEBUG: "[dim]",
+    logging.INFO: "",
+    logging.WARNING: "[yellow]",
+    logging.ERROR: "[red]",
+    logging.CRITICAL: "[bold red]",
+}
+
+
+# Logging format: second precision, no subsecond
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
+class RichLogHandler(logging.Handler):
+    """Logging handler that enqueues records; the app drains the queue to the RichLog on the main thread."""
+
+    def __init__(self, message_queue: "queue.Queue[str]") -> None:
+        super().__init__()
+        self._queue = message_queue
+        self.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s", datefmt=_LOG_DATEFMT)
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            prefix = _LOG_LEVEL_MARKUP.get(record.levelno, "")
+            suffix = "[/]" if prefix else ""
+            styled = f"{prefix}{msg}{suffix}"
+            self._queue.put_nowait(styled)
+        except Exception:
+            self.handleError(record)
 
 
 def _build_theme_swatch(theme_name: str) -> str:
@@ -133,6 +169,10 @@ class GroundControl(App):
         self._widget_tab_states: dict[str, str] = {}  # Maps widget title -> active tab pane id
         # Internal debug flag (avoid clashing with Textual's App.debug property)
         self._debug_mode = debug
+        self._log_handler: logging.Handler | None = None  # RichLogHandler, set in on_mount
+        self._log_queue: queue.Queue[str] = queue.Queue()
+        # Disk mount paths to hide: any mountpoint that starts with one of these (after normalizing) is skipped
+        self.disk_ignore_prefixes: list[str] = ["/boot/efi"]
 
     def _refresh_stylesheet(self) -> None:
         """Replace the app's CSS in the stylesheet with current self.CSS and re-apply to the DOM."""
@@ -207,6 +247,18 @@ class GroundControl(App):
     #dashboard-pane {{
         background: {bg};
     }}
+    #logs-pane {{
+        background: {bg};
+        height: 1fr;
+        overflow: hidden;
+        padding: 0 1;
+    }}
+    #app-log {{
+        width: 100%;
+        height: 100%;
+        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
+        padding: 1;
+    }}
     #settings-pane {{
         background: {bg};
     }}
@@ -252,7 +304,7 @@ class GroundControl(App):
         color: rgb({footer_key_fg_rgb[0]}, {footer_key_fg_rgb[1]}, {footer_key_fg_rgb[2]});
     }}
 
-    /* ── Selection list theming ── */
+    /* ── Selection list and radio selectors (uniform accent) ── */
     SelectionList {{
         background: transparent;
         border: none;
@@ -261,7 +313,7 @@ class GroundControl(App):
         padding: 0;
     }}
     SelectionList:focus > .selection-list--button-highlighted {{
-        background: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]}) 40%;
+        background: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]}) 25%;
     }}
     SelectionList > .selection-list--button-selected {{
         color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
@@ -271,7 +323,7 @@ class GroundControl(App):
     #settings-pane {{
         height: 1fr;
         overflow-y: auto;
-        padding: 1 2;
+        padding: 2 3;
     }}
     #settings-sections {{
         width: 100%;
@@ -283,27 +335,26 @@ class GroundControl(App):
         width: 100%;
         height: auto;
         grid-size: 2 2;
+        grid-gutter: 1 1;
     }}
     .settings-block {{
         width: 100%;
         height: auto;
-        padding: 0 0 1 0;
-        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
+        min-height: 3;
+        padding: 1 1 1 1;
         margin: 0 0 1 0;
-        padding: 0 1 1 1;
-    }}
-    .settings-block .settings-section-title {{
-        margin: 0 0 0 0;
-        padding: 0 0 0 0;
+        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
+        background: rgb({panel_rgb[0]}, {panel_rgb[1]}, {panel_rgb[2]}) 60%;
     }}
     .settings-section-title {{
         text-style: bold;
         height: 1;
-        margin: 1 0 0 0;
-        color: {a};
+        margin: 0 0 1 0;
+        padding: 0;
+        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
     }}
 
-    /* All RadioSets in settings */
+    /* All RadioSets: same highlight color as SelectionList */
     #refresh-radio-set, #history-radio-set, #theme-radio-set, #layout-radio-set {{
         width: 100%;
         height: auto;
@@ -312,18 +363,19 @@ class GroundControl(App):
         padding: 0;
     }}
     RadioButton {{
-        background: {s};
+        background: transparent;
         color: {t};
+        padding: 0 0 0 0;
     }}
     RadioButton:hover {{
-        background: {b};
+        background: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]}) 15%;
     }}
     RadioSet:focus > RadioButton.-on {{
-        color: {a};
+        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
         text-style: bold;
     }}
     RadioButton.-on {{
-        color: {a};
+        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
         text-style: bold;
     }}
 
@@ -331,6 +383,9 @@ class GroundControl(App):
     #dashboard-pane {{
         height: 1fr;
         overflow: auto;
+    }}
+    #logs-pane {{
+        height: 1fr;
     }}
     #root-tabs {{
         height: 1fr;
@@ -346,19 +401,13 @@ class GroundControl(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
+        ("d", "open_dashboard", "Dashboard"),
+        ("s", "open_settings", "Settings"),
+        ("l", "open_logs", "Logs"),
         ("g", "set_grid", "Grid"),
         ("h", "set_horizontal", "Horiz"),
         ("v", "set_vertical", "Vert"),
-        ("s", "open_settings", "Settings"),
-        ("d", "open_dashboard", "Dashboard"),
         ("r", "force_refresh", "Refresh"),
-        ("plus", "faster_refresh", "Faster"),
-        ("minus", "slower_refresh", "Slower"),
-        # Global focus/navigation helpers
-        ("[", "focus_prev_widget", "Prev widget"),
-        ("]", "focus_next_widget", "Next widget"),
-        ("c", "focus_cpu", "Focus CPU"),
-        ("m", "focus_memory", "Focus Memory"),
     ]
 
 
@@ -428,6 +477,17 @@ class GroundControl(App):
             layout = btn.id.replace("layout-", "")
             if layout in {"grid", "horizontal", "vertical"}:
                 self.set_layout(layout)
+
+    @on(Input.Submitted, "#disk-ignore-prefixes")
+    async def _on_disk_ignore_prefixes_submitted(self, event: Input.Submitted) -> None:
+        """Apply disk ignore prefixes and rebuild disk widgets."""
+        raw = (event.value or "").strip()
+        self.disk_ignore_prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+        if not self.disk_ignore_prefixes:
+            self.disk_ignore_prefixes = ["/boot/efi"]
+        self._do_save_config()
+        await self.setup_widgets()
+        self.apply_widget_visibility()
 
     def _select_layout_radio(self, layout: str) -> None:
         """Pre-select the correct layout RadioButton on mount.
@@ -530,8 +590,14 @@ class GroundControl(App):
                     self.refresh_rate = float(config.get("refresh_rate", 1.0))
                     self.history_size = int(config.get("history_size", 120))
                     self._widget_tab_states = config.get("widget_tabs", {})
-                    # Layout will be applied later via load_layout() but we
-                    # pre-populate current_layout so the value is available.
+                    # Disk ignore prefixes: comma-separated in config, e.g. "/boot/efi, /boot, /snap"
+                    raw = config.get("disk_ignore_prefixes", "/boot/efi")
+                    if isinstance(raw, list):
+                        self.disk_ignore_prefixes = [str(p).strip() for p in raw if str(p).strip()]
+                    else:
+                        self.disk_ignore_prefixes = [p.strip() for p in str(raw).split(",") if p.strip()]
+                    if not self.disk_ignore_prefixes:
+                        self.disk_ignore_prefixes = ["/boot/efi"]
                     return config.get("selected", {})
             except (json.JSONDecodeError, ValueError):
                 pass
@@ -571,13 +637,14 @@ class GroundControl(App):
                 "selected": self.selected_widgets,
                 "layout": getattr(self, "current_layout", "grid"),
                 "widget_tabs": self._widget_tab_states,
+                "disk_ignore_prefixes": ", ".join(self.disk_ignore_prefixes),
             })
 
             os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config_data, f, indent=4)
         except Exception as e:
-            logger.error(f"Error saving config: {e}")
+            logger.error("Config save failed: %s", e)
             if self._debug_mode:
                 raise
 
@@ -590,7 +657,7 @@ class GroundControl(App):
         """
         available = get_available_themes()
         if theme_name not in available:
-            logger.error(f"Unknown theme: {theme_name}")
+            logger.error("Unknown theme: %s", theme_name)
             return
 
         if not apply_theme(theme_name):
@@ -632,15 +699,25 @@ class GroundControl(App):
         """Save layout (uses debounced save_config)"""
         self.save_config()  # Use the debounced save method
 
+    def _disk_mount_ignored(self, mountpoint: str) -> bool:
+        """True if mountpoint should be hidden (matches any configured ignore prefix)."""
+        mp = mountpoint.rstrip("/") or "/"
+        for prefix in self.disk_ignore_prefixes:
+            p = prefix.rstrip("/") or "/"
+            if mp == p or mp.startswith(p + "/"):
+                return True
+        return False
+
     def get_layout_columns(self, num_gpus: int) -> int:
         return len(self.select.selected)
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app.
 
-        Two top-level tabs:
+        Three top-level tabs:
 
         - ``Dashboard``: live metric widgets in a configurable grid layout.
+        - ``Logs``: streaming app logs in a scrollable RichLog.
         - ``Settings``: all configuration controls (widget visibility,
           refresh rate, history size, theme selector with colour swatches,
           and layout selector).
@@ -664,6 +741,13 @@ class GroundControl(App):
                             self.select = SelectionList[str]()
                             self.select.border_title = "Visible Widgets"
                             yield self.select
+
+                        with Vertical(classes="settings-block"):
+                            yield Static(" Disk ignore prefixes", classes="settings-section-title")
+                            yield Input(
+                                id="disk-ignore-prefixes",
+                                placeholder="e.g. /boot/efi, /boot, /snap",
+                            )
 
                         # ── Other settings organised in a 2x2 grid ──
                         with Grid(id="settings-grid"):
@@ -699,7 +783,18 @@ class GroundControl(App):
                                     yield RadioButton("Grid", id="layout-grid")
                                     yield RadioButton("Horizontal", id="layout-horizontal")
                                     yield RadioButton("Vertical", id="layout-vertical")
-
+            
+            # Logs tab: streaming app logs in a scrollable RichLog.
+            with TabPane("Logs", id="logs"):
+                with Vertical(id="logs-pane"):
+                    yield RichLog(
+                        id="app-log",
+                        markup=True,
+                        highlight=False,
+                        max_lines=10_000,
+                        auto_scroll=True,
+                        wrap=True,
+                    )
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -717,9 +812,36 @@ class GroundControl(App):
         self._select_history_radio(self.history_size)
         self._select_layout_radio(self.current_layout)
         self._select_current_theme_radio()
+        try:
+            self.query_one("#disk-ignore-prefixes", Input).value = ", ".join(self.disk_ignore_prefixes)
+        except Exception:
+            pass
 
         # Mark initialization as complete - now toast notifications can be shown
         self._is_initializing = False
+
+        # Stream logs to the Logs tab (handler enqueues; timer drains to RichLog on main thread)
+        rich_handler = RichLogHandler(self._log_queue)
+        rich_handler.setLevel(logging.DEBUG)
+        logging.getLogger().addHandler(rich_handler)
+        self._log_handler = rich_handler
+        self._log_drain_timer = self.set_interval(0.15, self._drain_log_queue)
+
+    def _drain_log_queue(self) -> None:
+        """Drain pending log lines from the queue into the RichLog (called on main thread)."""
+        try:
+            log_widget = self.query_one("#app-log", RichLog)
+        except Exception:
+            return
+        while True:
+            try:
+                styled = self._log_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                log_widget.write(styled, scroll_end=None)
+            except Exception:
+                break
 
     async def setup_widgets(self) -> None:
         self.grid.remove_children()
@@ -768,7 +890,7 @@ class GroundControl(App):
         
         # Create temperature widget only if temperature data is available
         temperature_metrics = self.system_metrics.get_temperature_metrics()
-        logger.info(f"Temperature metrics: {temperature_metrics}")
+        logger.info("Setup: temperature metrics: %s", temperature_metrics)
         if temperature_metrics:
             self.temperature_widget = TemperatureWidget("Temperature", history_size=int(self.history_size))
             await self.grid.mount(self.temperature_widget)
@@ -776,16 +898,24 @@ class GroundControl(App):
             logger.info("No temperature sensors found - skipping temperature widget")
             self.temperature_widget = None
     
-        # Mount multiple disk widgets
-        for i, disk in enumerate(disk_metrics['disks']):
-            # Skip /boot/efi partitions - they should never be shown as widgets
-            if '/boot/efi' in disk['mountpoint']:
-                logger.info(f"Skipping EFI partition at {disk['mountpoint']} - not creating widget")
+        # Mount multiple disk widgets (skip mountpoints matching user-configured prefixes)
+        # Use a running index for IDs so each mounted widget has a unique id (avoids DuplicateIds
+        # when mountpoint "/" becomes "_" and would yield "disk_0__", or when setup_widgets runs again).
+        def _disk_id_suffix(mountpoint: str) -> str:
+            if mountpoint == "/" or not mountpoint:
+                return "root"
+            return mountpoint.replace("/", "_").strip("_") or "root"
+
+        disk_index = 0
+        for disk in disk_metrics["disks"]:
+            if self._disk_mount_ignored(disk["mountpoint"]):
+                logger.info("Setup: skipping disk mountpoint %s (matches ignore prefix)", disk["mountpoint"])
                 continue
-                
-            disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=f"disk_{i}_{disk['mountpoint'].replace('/', '_')}")
+            disk_id = f"disk_{disk_index}_{_disk_id_suffix(disk['mountpoint'])}"
+            disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=disk_id)
             self.disk_widgets.append(disk_widget)
             await self.grid.mount(disk_widget)
+            disk_index += 1
         
         await self.grid.mount(network_widget)
 
@@ -845,20 +975,24 @@ class GroundControl(App):
         self.selectionoptions.clear()
 
         for widget in self.grid.children:
-            if hasattr(widget, "title"):
-                widget_type = self._get_widget_type(widget)
-                # Prefer saved/config and user choices; use CLI filter only as default when missing
-                if self.allowed_types:
-                    default = widget_type in self.allowed_types
-                else:
-                    default = True
-                had_key = widget.title in self.selected_widgets
-                selected = self.selected_widgets.get(widget.title, default)
-                if not had_key:
-                    self.selected_widgets[widget.title] = selected
+            if not hasattr(widget, "title"):
+                continue
+            widget_type = self._get_widget_type(widget)
+            # CPU and Memory are always visible; do not add them to the selector list
+            if widget_type in ("cpu", "ram"):
+                continue
+            # Prefer saved/config and user choices; use CLI filter only as default when missing
+            if self.allowed_types:
+                default = widget_type in self.allowed_types
+            else:
+                default = True
+            had_key = widget.title in self.selected_widgets
+            selected = self.selected_widgets.get(widget.title, default)
+            if not had_key:
+                self.selected_widgets[widget.title] = selected
 
-                self.select.add_option(Selection(widget.title, widget.title, selected))
-                self.selectionoptions.append(widget.title)
+            self.select.add_option(Selection(widget.title, widget.title, selected))
+            self.selectionoptions.append(widget.title)
 
     def _get_widget_type(self, widget) -> str:
         """Helper to map widget instance to type string."""
@@ -927,19 +1061,20 @@ class GroundControl(App):
     def toggle_widget_visibility(self, selected_titles) -> None:
         """Toggle widget visibility based on selected titles.
 
-        In normal mode, failed widgets are fully hidden. In debug mode, failed
-        widgets remain visible so their error text stays on screen.
+        CPU and Memory are always shown (not in selector). In normal mode, failed
+        widgets are fully hidden. In debug mode, failed widgets remain visible.
         """
         for widget in self.grid.children:
-            if hasattr(widget, "title"):
-                if widget.title in self._failed_widget_titles:
-                    # Failed widget: keep visible in debug mode, hide otherwise.
-                    widget.styles.display = "block" if self._debug_mode else "none"
-                else:
-                    widget.styles.display = "block" if widget.title in selected_titles else "none"
-                logger.debug(
-                    f"Setting {widget.title} display to {widget.styles.display}"
-                )
+            if not hasattr(widget, "title"):
+                continue
+            wt = self._get_widget_type(widget)
+            if widget.title in self._failed_widget_titles:
+                widget.styles.display = "block" if self._debug_mode else "none"
+            elif wt in ("cpu", "ram"):
+                widget.styles.display = "block"
+            else:
+                widget.styles.display = "block" if widget.title in selected_titles else "none"
+            logger.debug("Widget %s display: %s", widget.title, widget.styles.display)
 
     def _update_metrics_sync(self):
         """Synchronous wrapper to trigger async update_metrics"""
@@ -983,11 +1118,16 @@ class GroundControl(App):
             collector_errors = {}  # type -> exception, for debug display
             for t, r in zip(required_types, results):
                 if isinstance(r, BaseException):
-                    logger.error(f"Collector {t} failed: {r}", exc_info=True)
+                    logger.error("Collector %s failed: %s", t, r, exc_info=True)
                     metrics_by_type[t] = None
                     collector_errors[t] = r
                 else:
                     metrics_by_type[t] = r
+
+            # In debug mode, any collector exception should kill the app
+            if self._debug_mode and collector_errors:
+                first_err = next(iter(collector_errors.values()))
+                raise first_err
 
             # Update each active widget; on exception disable that widget (or show error in debug mode)
             for widget in active_widgets:
@@ -1016,7 +1156,7 @@ class GroundControl(App):
                 try:
                     await self._dispatch_widget_update(widget, metrics_by_type)
                 except Exception as e:
-                    logger.error(f"Widget {widget.title} failed: {e}", exc_info=True)
+                    logger.error("Widget %s failed: %s", widget.title, e, exc_info=True)
                     # Mark widget as failed so it is skipped on future updates
                     self._failed_widget_titles.add(widget.title)
                     if self._debug_mode:
@@ -1040,7 +1180,7 @@ class GroundControl(App):
                         # Normal mode: hide failed widgets to avoid a broken dashboard view
                         widget.styles.display = "none"
         except Exception as e:
-            logger.error(f"Error in update_metrics: {e}", exc_info=True)
+            logger.error("Error in update_metrics: %s", e, exc_info=True)
             if self._debug_mode:
                 # Let the exception propagate in debug mode so it is visible
                 raise
@@ -1065,8 +1205,19 @@ class GroundControl(App):
             gpu_metrics = metrics_by_type["gpu"]
             if self.gpu_indices is not None:
                 gpu_metrics = [gpu_metrics[i] for i in self.gpu_indices if 0 <= i < len(gpu_metrics)]
-            idx = self.gpu_widgets.index(widget)
-            if idx < len(gpu_metrics):
+            # Resolve index from widget id (e.g. gpu_0 -> 0); grid children may be new instances after layout/setup
+            idx = None
+            if widget.id and str(widget.id).startswith("gpu_"):
+                try:
+                    idx = int(str(widget.id).split("_", 1)[1])
+                except (ValueError, IndexError):
+                    pass
+            if idx is None:
+                try:
+                    idx = self.gpu_widgets.index(widget)
+                except ValueError:
+                    return
+            if 0 <= idx < len(gpu_metrics):
                 await self._update_gpu_widget(widget, gpu_metrics[idx])
         elif isinstance(widget, TemperatureWidget):
             temp = metrics_by_type.get("temperature")
@@ -1160,6 +1311,15 @@ class GroundControl(App):
             if self._debug_mode:
                 raise
 
+    def action_open_logs(self) -> None:
+        """Switch to the Logs tab."""
+        try:
+            root_tabs = self.query_one("#root-tabs", TabbedContent)
+            root_tabs.active = "logs"
+        except Exception:
+            if self._debug_mode:
+                raise
+
     def _iter_visible_metric_widgets(self):
         """Return a list of visible metric widgets in the grid, in DOM order."""
         if self.grid is None:
@@ -1191,32 +1351,6 @@ class GroundControl(App):
         """Cycle focus to the next visible metric widget in the dashboard grid."""
         self._focus_widget_by_offset(1)
 
-    def action_focus_prev_widget(self) -> None:
-        """Cycle focus to the previous visible metric widget in the dashboard grid."""
-        self._focus_widget_by_offset(-1)
-
-    def action_focus_cpu(self) -> None:
-        """Focus the primary CPU widget (if present)."""
-        from ground_control.widgets.cpu import CPUWidget
-
-        try:
-            cpu = self.query_one(CPUWidget)
-            self.set_focus(cpu)
-        except Exception:
-            if self._debug_mode:
-                raise
-
-    def action_focus_memory(self) -> None:
-        """Focus the Memory widget (if present)."""
-        from ground_control.widgets.memory import MemoryWidget
-
-        try:
-            mem = self.query_one(MemoryWidget)
-            self.set_focus(mem)
-        except Exception:
-            if self._debug_mode:
-                raise
-
     def action_force_refresh(self) -> None:
         """Force an immediate metrics refresh."""
         self._update_metrics_sync()
@@ -1235,7 +1369,7 @@ class GroundControl(App):
                 self.refresh_rate = r
                 return
         # Already at fastest
-        logger.info("Already at fastest refresh rate")
+        logger.info("Refresh: already at fastest rate")
 
     def action_slower_refresh(self) -> None:
         """Increase the refresh interval (slower updates).
@@ -1251,7 +1385,7 @@ class GroundControl(App):
                 self.refresh_rate = r
                 return
         # Already at slowest
-        logger.info("Already at slowest refresh rate")
+        logger.info("Refresh: already at slowest rate")
 
     # def on_resize(self) -> None:
     #     if self.auto_layout:
@@ -1301,18 +1435,19 @@ class GroundControl(App):
         In normal mode, failed widgets are hidden. In debug mode, failed widgets
         remain visible so any error text they render is visible in the layout.
         """
-        logger.info(f"Applying widget visibility from config: {self.selected_widgets}")
+        logger.info("Applying widget visibility: %s", self.selected_widgets)
         for widget in self.grid.children:
-            if hasattr(widget, "title"):
-                if widget.title in self._failed_widget_titles:
-                    # Failed widget: keep visible in debug mode, hide otherwise.
-                    widget.styles.display = "block" if self._debug_mode else "none"
-                else:
-                    is_visible = self.selected_widgets.get(widget.title, True)
-                    widget.styles.display = "block" if is_visible else "none"
-                logger.debug(
-                    f"Widget {widget.title}: visible = {widget.styles.display != 'none'}"
-                )
+            if not hasattr(widget, "title"):
+                continue
+            wt = self._get_widget_type(widget)
+            if widget.title in self._failed_widget_titles:
+                widget.styles.display = "block" if self._debug_mode else "none"
+            elif wt in ("cpu", "ram"):
+                widget.styles.display = "block"
+            else:
+                is_visible = self.selected_widgets.get(widget.title, True)
+                widget.styles.display = "block" if is_visible else "none"
+            logger.debug("Widget %s visible: %s", widget.title, widget.styles.display != "none")
 
     def _update_widget_history_sizes(self, new_size: int) -> None:
         """Update history size for all existing widgets without recreating them"""

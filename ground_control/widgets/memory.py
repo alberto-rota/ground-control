@@ -1,10 +1,14 @@
+import logging
 from collections import deque
 from textual.app import ComposeResult
 from textual.widgets import Static
+from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
 from ..utils.colors import get_rich_color
+
+logger = logging.getLogger("ground-control.memory")
 
 class MemoryWidget(MetricWidget):
     """Memory (RAM) usage display widget with dual plots for RAM and SWAP over time."""
@@ -166,27 +170,35 @@ class MemoryWidget(MetricWidget):
 
     def update_content(self, memory_info, swap_info, meminfo=None, commit_ratio=None, top_processes=None, memory_history=None):
         # Add current values to history
-        self.ram_history.append(memory_info.used/1024/1024/1024)
-        self.swap_history.append(swap_info.used/1024/1024/1024)
-        
+        ram_used_gb = memory_info.used / 1024 / 1024 / 1024
+        swap_used_gb = swap_info.used / 1024 / 1024 / 1024
+        self.ram_history.append(ram_used_gb)
+        self.swap_history.append(swap_used_gb)
+
         # Update total RAM and SWAP sizes
-        self.total_ram = memory_info.total/1024/1024/1024
-        self.total_swap = swap_info.total/1024/1024/1024
+        self.total_ram = memory_info.total / 1024 / 1024 / 1024
+        self.total_swap = swap_info.total / 1024 / 1024 / 1024
         self.max_mem = max(self.total_ram, self.total_swap)  # For plot scaling
-        
+
+        logger.info(
+            "ram_used_gb: %.2f, ram_total_gb: %.2f, swap_used_gb: %.2f, swap_total_gb: %.2f",
+            ram_used_gb, self.total_ram, swap_used_gb, self.total_swap,
+        )
+
         self.border_title = f"RAM [{self.total_ram:.1f}GB] SWAP [{self.total_swap:.1f}GB]"
         
         # Calculate total width for the center bar (use same calculation as plot)
         # Use plot_width which is set by on_resize in base class (width - 3)
         total_width = max(10, getattr(self, "plot_width", self.size.width - 3))
-        
-        self.query_one("#history-plot").update(self.get_dual_plot()) 
-        # Update the center bar
-        self.query_one("#current-value").update(
-            self.create_center_bar(
-                memory_info.used/1024/1024/1024,
-                swap_info.used/1024/1024/1024,
-                total_width=total_width
+        try:
+            self.query_one("#history-plot").update(self.get_dual_plot())
+            self.query_one("#current-value").update(
+                self.create_center_bar(
+                    ram_used_gb,
+                    swap_used_gb,
+                    total_width=total_width
+                )
             )
-        )
+        except NoMatches:
+            pass  # DOM not ready yet (e.g. after layout change)
         

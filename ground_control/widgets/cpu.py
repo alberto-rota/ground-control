@@ -1,12 +1,16 @@
 import os
+import logging
 from textual.app import ComposeResult
 from textual.widgets import Static, TabbedContent, TabPane
 from textual import on
+from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
 import psutil
 from ..utils.formatting import ansi2rich
 from ..utils.colors import get_rich_color
+
+logger = logging.getLogger("ground-control.cpu")
 
 # View modes: "all" | "affinity" | "user" (cores with current user's processes)
 VIEW_MODES = ("all", "affinity", "user")
@@ -261,6 +265,12 @@ class CPUWidget(MetricWidget):
         self._last_mem_percent = mem_percent
 
         n = len(cpu_percentages)
+        avg = sum(cpu_percentages) / n if n else 0.0
+        max_cpu = max(cpu_percentages) if cpu_percentages else 0.0
+        logger.info(
+            "cpu_percent_avg: %.1f, cpu_percent_max: %.1f, n_cores: %d, mem_percent: %.1f",
+            avg, max_cpu, n, mem_percent,
+        )
         # Clamp so plotext gets valid size when layout has not run yet (e.g. after layout change)
         width = max(10, (self.size.width or 0) - 1)
         height = max(4, (self.size.height or 0) - 4)  # border + tab bar
@@ -275,4 +285,7 @@ class CPUWidget(MetricWidget):
                 height,
                 labels_override=labels_override,
             )
-            self.query_one(f"#cpu-content-{mode}").update(chart)
+            try:
+                self.query_one(f"#cpu-content-{mode}").update(chart)
+            except NoMatches:
+                pass  # DOM not ready yet (e.g. after layout change)

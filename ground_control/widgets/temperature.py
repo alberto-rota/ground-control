@@ -1,3 +1,4 @@
+import logging
 from collections import deque
 from textual.app import ComposeResult
 from textual.widgets import Static
@@ -6,6 +7,8 @@ from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
 from ..utils.colors import get_rich_color
+
+logger = logging.getLogger("ground-control.temperature")
 
 
 class TemperatureWidget(MetricWidget):
@@ -233,6 +236,10 @@ class TemperatureWidget(MetricWidget):
 
     def update_content(self, temperatures: dict):
         """Update the widget with new temperature data."""
+        if temperatures:
+            parts = [f"{k}: {v:.1f}" for k, v in sorted(temperatures.items()) if 0 <= v <= 150]
+            if parts:
+                logger.info(", ".join(parts))
         if not temperatures:
             # Show a message when no temperature data is available
             try:

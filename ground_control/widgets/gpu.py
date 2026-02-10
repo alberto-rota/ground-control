@@ -5,6 +5,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static, TabbedContent, TabPane, Button
 from textual import on
+from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
@@ -125,13 +126,13 @@ class ProcessRow(Static):
             os.kill(pid, sig_num)
             name = (self._process.get("name") or "?")[:20]
             # Toast notifications disabled; log instead.
-            logger.info(f"Sent {sig_name} to pid {pid} ({name})")
+            logger.info("Signal sent: %s to pid %s (%s)", sig_name, pid, name)
         except ProcessLookupError:
-            logger.error(f"Process {pid} no longer exists")
+            logger.error("Signal error: process %s no longer exists", pid)
         except PermissionError:
-            logger.error(f"Permission denied sending {sig_name} to pid {pid}")
+            logger.error("Signal error: permission denied sending %s to pid %s", sig_name, pid)
         except Exception as e:
-            logger.error(f"Failed sending {sig_name} to pid {pid}: {e}")
+            logger.error("Signal error: failed sending %s to pid %s: %s", sig_name, pid, e)
 
 
 def _process_list_signature(processes: list) -> tuple:
@@ -369,15 +370,23 @@ class GPUWidget(MetricWidget):
         self.gpu_usage_history.append(gpu_usage)
         self.max_val = mem_total
         self.usage_is_available = gpu_usage >= -0.5
+        n_proc = len(processes) if processes else 0
+        logger.info(
+            "gpu_name: %s, gpu_usage: %.1f, mem_used_gb: %.2f, mem_total_gb: %.2f, processes_count: %d",
+            gpu_name, gpu_usage, mem_used, mem_total, n_proc,
+        )
         total_width = (
             self.size.width
             - len(f"{mem_used:6.1f} % ")
             - len(f"{gpu_usage:6.1f} %")
             - 2
         )
-        self.query_one("#history-plot").update(self.get_dual_plot())
-        self.query_one("#current-value").update(
-            self.create_center_bar(mem_used, gpu_usage, total_width=total_width)
-        )
-        if processes is not None:
-            self.query_one("#gpu-processes").update_processes(processes)
+        try:
+            self.query_one("#history-plot").update(self.get_dual_plot())
+            self.query_one("#current-value").update(
+                self.create_center_bar(mem_used, gpu_usage, total_width=total_width)
+            )
+            if processes is not None:
+                self.query_one("#gpu-processes").update_processes(processes)
+        except NoMatches:
+            pass  # DOM not ready yet (e.g. after layout switch)

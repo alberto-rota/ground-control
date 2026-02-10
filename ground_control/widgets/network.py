@@ -1,10 +1,14 @@
+import logging
 from collections import deque
 from textual.app import ComposeResult
 from textual.widgets import Static
+from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align
 from ..utils.colors import get_rich_color
+
+logger = logging.getLogger("ground-control.network")
 
 
 class NetworkIOWidget(MetricWidget):
@@ -55,84 +59,89 @@ class NetworkIOWidget(MetricWidget):
 
         return f"{read_speed_withunits} {left_bar}│{right_bar} {write_speed_withunits}"
 
+    # Plotext needs minimum height for plot + legend; smaller values trigger IndexError in build()
+    _PLOT_MIN_HEIGHT = 6
+    _PLOT_MIN_WIDTH = 12
+
     def get_dual_plot(self) -> str:
         if not self.download_history:
             return "No data yet..."
 
-        # Validate plot dimensions
-        plot_height = max(1, getattr(self, "plot_height", 10))
-        plot_width = max(10, getattr(self, "plot_width", 40))
-        
+        # Enforce minima so plotext's legend build doesn't index out of range
+        raw_height = max(1, getattr(self, "plot_height", 10))
+        raw_width = max(10, getattr(self, "plot_width", 40))
+        plot_height = max(self._PLOT_MIN_HEIGHT, raw_height)
+        plot_width = max(self._PLOT_MIN_WIDTH, raw_width)
+
         if plot_height <= 0 or plot_width <= 0:
             return "Initializing..."
 
-        plt.clear_figure()
-        plt.plot_size(height=plot_height, width=plot_width)
-        plt.theme("pro")
+        try:
+            plt.clear_figure()
+            plt.plot_size(height=plot_height, width=plot_width)
+            plt.theme("pro")
 
-        # Create negative values for download operations
-        negative_downloads = [-x - 0.1 for x in self.download_history]
-        positive_downloads = [x + 0.1 for x in self.upload_history]
+            # Create negative values for download operations
+            negative_downloads = [-x - 0.1 for x in self.download_history]
+            positive_downloads = [x + 0.1 for x in self.upload_history]
 
-        # Find the maximum value between uploads and downloads to set symmetric y-axis limits
-        max_value = max(
-            max(self.upload_history, default=0),
-            max(negative_downloads, key=abs, default=0),
-        )
+            # Find the maximum value between uploads and downloads to set symmetric y-axis limits
+            max_value = max(
+                max(self.upload_history, default=0),
+                max(negative_downloads, key=abs, default=0),
+            )
 
-        # Add some padding to the max value
-        y_limit = max_value
-        if y_limit < 10:
-            y_limit = 10
-        self.max_net = y_limit
+            # Add some padding to the max value
+            y_limit = max_value
+            if y_limit < 10:
+                y_limit = 10
+            self.max_net = y_limit
 
-        # Set y-axis limits symmetrically around zero
-        plt.ylim(-y_limit, y_limit)
-        # Create custom y-axis ticks with MB/s labels
-        num_ticks = min(
-            5, self.plot_height - 1
-        )  # Don't use too many ticks in small plots
-        tick_step = 2 * y_limit / (num_ticks - 1) if num_ticks > 1 else 1
+            # Set y-axis limits symmetrically around zero
+            plt.ylim(-y_limit, y_limit)
+            # Create custom y-axis ticks with MB/s labels
+            num_ticks = min(5, plot_height - 1)
+            tick_step = 2 * y_limit / (num_ticks - 1) if num_ticks > 1 else 1
 
-        y_ticks = []
-        y_labels = []
+            y_ticks = []
+            y_labels = []
 
-        for i in range(num_ticks):
-            value = -y_limit + i * tick_step
-            y_ticks.append(value)
-            # Add MB/s to positive values (read speed) and negative values (write speed)
-            if value == 0:
-                y_labels.append("0")
-            elif value > 0:
-                y_labels.append(f"{value:.1f}↑")  # Up arrow for read
-            else:
-                y_labels.append(f"{abs(value):.1f}↓")  # Down arrow for write
+            for i in range(num_ticks):
+                value = -y_limit + i * tick_step
+                y_ticks.append(value)
+                if value == 0:
+                    y_labels.append("0")
+                elif value > 0:
+                    y_labels.append(f"{value:.1f}↑")
+                else:
+                    y_labels.append(f"{abs(value):.1f}↓")
 
-        plt.yticks(y_ticks, y_labels)
+            plt.yticks(y_ticks, y_labels)
 
-        # Plot upload values above zero (positive)
-        plt.plot(positive_downloads, marker="braille", label="Upload")
+            plt.plot(positive_downloads, marker="braille", label="Upload")
+            plt.plot(negative_downloads, marker="braille", label="Download")
+            plt.hline(0.0)
+            plt.yfrequency(5)
+            plt.xfrequency(0)
 
-        # Plot download values below zero (negative)
-        plt.plot(negative_downloads, marker="braille", label="Download")
-
-        # Add a zero line
-        plt.hline(0.0)
-
-        plt.yfrequency(5)  # Increased to show more y-axis labels
-        plt.xfrequency(0)
-
-        # Customize y-axis labels to show absolute values
-        # plt.ylabels([f"{abs(x):.0f}" for x in plt.yticks(return_values=True)])
-        download_color = get_rich_color("network_plot_download", "#FF8C00")
-        upload_color = get_rich_color("network_plot_upload", "#00FF00")
-        return (
-            ansi2rich(plt.build())
-            .replace("\x1b[0m", "")
-            .replace("[blue]", f"[{download_color}]")
-            .replace("[green]", f"[{upload_color}]")
-            .replace("──────┐","─MB/s─┐")
-        )
+            download_color = get_rich_color("network_plot_download", "#FF8C00")
+            upload_color = get_rich_color("network_plot_upload", "#00FF00")
+            return (
+                ansi2rich(plt.build())
+                .replace("\x1b[0m", "")
+                .replace("[blue]", f"[{download_color}]")
+                .replace("[green]", f"[{upload_color}]")
+                .replace("──────┐", "─MB/s─┐")
+            )
+        except Exception:
+            # Plotext can IndexError on small dimensions; return a safe placeholder
+            plt.clear_figure()
+            plt.plot_size(height=self._PLOT_MIN_HEIGHT, width=self._PLOT_MIN_WIDTH)
+            plt.theme("pro")
+            plt.ylim(-1, 1)
+            plt.plot([0] * min(10, plot_width), marker="braille", label="Network")
+            plt.hline(0.0)
+            return ansi2rich(plt.build()).replace("\x1b[0m", "")
 
     def update_content(self, download_speed: float, upload_speed: float):
         if self.first:
@@ -140,6 +149,10 @@ class NetworkIOWidget(MetricWidget):
             return
         self.download_history.append(download_speed)
         self.upload_history.append(upload_speed)
+        logger.info(
+            "download_speed_mb_s: %.2f, upload_speed_mb_s: %.2f",
+            download_speed, upload_speed,
+        )
 
         total_width = (
             self.size.width
@@ -148,9 +161,12 @@ class NetworkIOWidget(MetricWidget):
             - len(f"{upload_speed:6.1f} MB/s")
             - 2
         )
-        self.query_one("#current-value").update(
-            self.create_center_bar(
-                download_speed, upload_speed, total_width=total_width
+        try:
+            self.query_one("#current-value").update(
+                self.create_center_bar(
+                    download_speed, upload_speed, total_width=total_width
+                )
             )
-        )
-        self.query_one("#history-plot").update(self.get_dual_plot())
+            self.query_one("#history-plot").update(self.get_dual_plot())
+        except NoMatches:
+            pass  # DOM not ready yet (e.g. after layout change)
