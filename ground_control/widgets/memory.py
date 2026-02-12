@@ -5,7 +5,7 @@ from textual.widgets import Static
 from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align, format_size, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.memory")
@@ -84,16 +84,18 @@ class MemoryWidget(MetricWidget):
         swap_free_bar = f"[{swap_color}]{'─' * swap_free_blocks}[/]"
         bar = f"{ram_free_bar}{ram_used_bar}{swap_used_bar}{swap_free_bar}"
 
-        # Label line: " [L1] [L2] [L3] [L4]" = 14 fixed chars + 4*label_w; must be <= total_width
-        label_w = max(1, (total_width - 14) // 4)
-        ram_free_label = align(f"{free_ram:.1f}GB FREE", label_w, "left")
-        ram_label = align(f"{ram_usage:.1f}GB RAM", label_w, "right")
-        swap_label = align(f" SWAP {swap_usage:.1f}GB", label_w, "left")
-        swap_free_label = align(f"FREE {free_swap:.1f}GB", label_w, "right")
+        # Label line: " " + L1 + " " + L2 + " " + L3 + " " + L4 = 4 spaces + 4*label_w = total_width
+        # So each of the 4 segments has width label_w and aligns with bar quarters (RAM half, SWAP half).
+        label_w = max(1, (total_width - 4) // 4)
+        # RAM half: Free outside (left), Used inside (right). SWAP half: Used inside (left), Free outside (right).
+        ram_free_label = align(f"FREE {format_size(free_ram, in_gb=True)}", label_w, "left")
+        ram_used_label = align(f"{format_size(ram_usage, in_gb=True)} RAM", label_w, "right")
+        swap_used_label = align(f"{format_size(swap_usage, in_gb=True)} SWAP", label_w, "left")
+        swap_free_label = align(f"FREE {format_size(free_swap, in_gb=True)}", label_w, "right")
 
         return (
-            f" [{ram_color} italic]{ram_free_label}[/] [{ram_color}]{ram_label}[/] "
-            f"[{swap_color}]{swap_label}[/] [{swap_color} italic]{swap_free_label}[/]\n{bar}"
+            f" [{ram_color} italic]{ram_free_label}[/] [{ram_color}]{ram_used_label}[/] "
+            f"[{swap_color}]{swap_used_label}[/] [{swap_color} italic]{swap_free_label}[/]\n{bar}"
         )
 
     def get_dual_plot(self) -> str:
@@ -116,12 +118,10 @@ class MemoryWidget(MetricWidget):
         negative_swap = [-x - 0.1 for x in self.swap_history]
         positive_ram = [x + 0.1 for x in self.ram_history]
 
-        # Use the actual total RAM and SWAP sizes for y-axis limits
-        ram_limit = self.total_ram
-        swap_limit = self.total_swap
-
-        # Add some padding and ensure minimum scale
-        y_limit = max(ram_limit, swap_limit, 2)  # At least 2GB scale
+        # Y-axis max from current data in the window (not fixed to total RAM/SWAP)
+        max_ram_in_window = max(self.ram_history) if self.ram_history else 0
+        max_swap_in_window = max(self.swap_history) if self.swap_history else 0
+        y_limit = max(max_ram_in_window, max_swap_in_window, 2)  # At least 2 GB scale
         
         # Set y-axis limits symmetrically around zero
         plt.ylim(-y_limit, y_limit)
@@ -136,13 +136,8 @@ class MemoryWidget(MetricWidget):
         for i in range(num_ticks):
             value = -y_limit + i * tick_step
             y_ticks.append(value)
-            # Add GB labels for both RAM (positive) and SWAP (negative)
-            if value == 0:
-                y_labels.append("0GB")
-            elif value > 0:
-                y_labels.append(f"{value:.1f}GB")  # RAM
-            else:
-                y_labels.append(f"{abs(value):.1f}GB")  # SWAP
+            # Tick labels: numbers only; unit is on top of plot (──GB──┐)
+            y_labels.append(str(round(abs(value))) if value != 0 else "0")
 
         plt.yticks(y_ticks, y_labels)
 
@@ -160,13 +155,14 @@ class MemoryWidget(MetricWidget):
 
         ram_color = get_rich_color("memory_ram_used", "#FF8C00")
         swap_color = get_rich_color("memory_swap", "#00FFFF")
-        return (
-            ansi2rich(plt.build())
-            .replace("\x1b[0m", "")
-            .replace("[blue]", f"[{ram_color}]")
-            .replace("[green]", f"[{swap_color}]")
-            .replace("──────┐","───GB─┐")
-        )
+        build = ansi2rich(plt.build())
+        build = build.replace("\x1b[0m", "")
+        build = build.replace("[blue]", f"[{ram_color}]")
+        build = build.replace("[green]", f"[{swap_color}]")
+        build = build.replace("──────┐", "──GB──┐")
+        if len(self.ram_history) >= self.ram_history.maxlen:
+            build = substitute_plot_timeframe(build, self.ram_history.maxlen)
+        return build
 
     def update_content(self, memory_info, swap_info, meminfo=None, commit_ratio=None, top_processes=None, memory_history=None):
         # Add current values to history
@@ -185,7 +181,7 @@ class MemoryWidget(MetricWidget):
             ram_used_gb, self.total_ram, swap_used_gb, self.total_swap,
         )
 
-        self.border_title = f"RAM [{self.total_ram:.1f}GB] SWAP [{self.total_swap:.1f}GB]"
+        self.border_title = f"RAM [{format_size(self.total_ram, in_gb=True)}] SWAP [{format_size(self.total_swap, in_gb=True)}]"
         
         # Calculate total width for the center bar (use same calculation as plot)
         # Use plot_width which is set by on_resize in base class (width - 3)

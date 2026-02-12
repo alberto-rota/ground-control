@@ -5,7 +5,7 @@ from textual.widgets import Static
 from textual.containers import Horizontal
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align, format_size, format_throughput, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.disk")
@@ -46,8 +46,8 @@ class DiskIOWidget(MetricWidget):
             write_speed = max(0.0, float(write_speed))
             total_width = max(10, int(total_width))
 
-            read_speed_withunits = align(f"{read_speed:.1f} MB/s", 12, "right")
-            write_speed_withunits = align(f"{write_speed:.1f} MB/s", 12, "left")
+            read_speed_withunits = align(format_throughput(read_speed), 12, "right")
+            write_speed_withunits = align(format_throughput(write_speed), 12, "left")
             aval_width = total_width
             half_width = aval_width // 2
 
@@ -106,11 +106,9 @@ class DiskIOWidget(MetricWidget):
             disk_free_color = get_rich_color("disk_free", "#00FFFF")
             usage_bar = f"[{disk_used_color}]{'█' * used_blocks}[/][{disk_free_color}]{'█' * free_blocks}[/]"
 
-            used_gb = disk_used / (1024**3)
-            available_gb = available / (1024**3)
-            used_gb_txt = align(f"{used_gb:.1f} GB USED", total_width // 2 - 2, "left")
+            used_gb_txt = align(f"{format_size(disk_used)} USED", total_width // 2 - 2, "left")
             free_gb_txt = align(
-                f"FREE: {available_gb:.1f} GB ", total_width // 2 - 2, "right"
+                f"FREE: {format_size(available)} ", total_width // 2 - 2, "right"
             )
             return f" [{disk_used_color}]{used_gb_txt}[/]    [{disk_free_color}]{free_gb_txt}[/]\n {usage_bar}"
         except Exception as e:
@@ -154,20 +152,18 @@ class DiskIOWidget(MetricWidget):
                 plt.plot(negative_downloads, marker="braille", label="Write")
                 plt.hline(0.0)
 
-                # Custom y-ticks with MB/s labels
+                # Custom y-ticks: numbers only; unit on top of plot (─MB/s─┐)
                 y_ticks = [-1.0, -0.5, 0.0, 0.5, 1.0]
-                y_labels = ["-1.0 MB/s", "-0.5 MB/s", "0.0", "0.5 MB/s", "1.0 MB/s"]
+                y_labels = ["1↓", "0↓", "0", "0↑", "1↑"]
                 plt.yticks(y_ticks, y_labels)
                 plt.xfrequency(0)
 
                 read_color = get_rich_color("disk_plot_read", "#FF00FF")
                 write_color = get_rich_color("disk_plot_write", "#00FFFF")
-                return (
-                    ansi2rich(plt.build())
-                    .replace("\x1b[0m", "")
-                    .replace("[blue]", f"[{read_color}]")
-                    .replace("[green]", f"[{write_color}]")
-                )
+                build = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("[blue]", f"[{read_color}]").replace("[green]", f"[{write_color}]")
+                if len(self.read_history) >= self.read_history.maxlen:
+                    build = substitute_plot_timeframe(build, self.read_history.maxlen)
+                return build
 
             # Process actual data if we have history
             plt.clear_figure()
@@ -241,13 +237,13 @@ class DiskIOWidget(MetricWidget):
             for i in range(num_ticks):
                 value = y_min + i * tick_step
                 y_ticks.append(value)
-                # Add MB/s to positive values (read speed) and negative values (write speed)
+                # Tick labels: numbers only; unit on top of plot (─MB/s─┐)
                 if value == 0:
                     y_labels.append("0")
                 elif value > 0:
-                    y_labels.append(f"{value:.1f}↑")  # Up arrow for read
+                    y_labels.append(str(round(value)) + "↑")
                 else:
-                    y_labels.append(f"{abs(value):.1f}↓")  # Down arrow for write
+                    y_labels.append(str(round(abs(value))) + "↓")
 
             plt.yticks(y_ticks, y_labels)
 
@@ -257,13 +253,10 @@ class DiskIOWidget(MetricWidget):
             plt.xfrequency(0)
             read_color = get_rich_color("disk_plot_read", "#FF00FF")
             write_color = get_rich_color("disk_plot_write", "#00FFFF")
-            return (
-                ansi2rich(plt.build())
-                .replace("\x1b[0m", "")
-                .replace("[blue]", f"[{read_color}]")
-                .replace("[green]", f"[{write_color}]")
-                .replace("──────┐","─MB/s─┐")
-            )
+            build = ansi2rich(plt.build())
+            build = build.replace("\x1b[0m", "").replace("[blue]", f"[{read_color}]").replace("[green]", f"[{write_color}]").replace("──────┐", "─MB/s─┐")
+            build = substitute_plot_timeframe(build, self.read_history.maxlen)
+            return build
         except Exception as e:
             logger.debug("Plot error in %s: %s", self.title, e, exc_info=True)
             
@@ -285,23 +278,16 @@ class DiskIOWidget(MetricWidget):
                 plt.plot(dummy_data, marker="braille", label="Error")
                 plt.hline(0.0)
 
-                # Even in error state, add MB/s labels
+                # Even in error state: numbers only; unit on top
                 y_ticks = [-1.0, -0.5, 0.0, 0.5, 1.0]
-                y_labels = [
-                    "1.0 MB/s ↓",
-                    "0.5 MB/s ↓",
-                    "0.0",
-                    "0.5 MB/s ↑",
-                    "1.0 MB/s ↑",
-                ]
+                y_labels = ["1↓", "0↓", "0", "0↑", "1↑"]
                 plt.yticks(y_ticks, y_labels)
 
                 error_color = get_rich_color("high_value", "#FF0000")
-                return (
-                    ansi2rich(plt.build())
-                    .replace("\x1b[0m", "")
-                    .replace("[blue]", f"[{error_color}]")
-                )
+                build = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("[blue]", f"[{error_color}]")
+                if len(self.read_history) >= self.read_history.maxlen:
+                    build = substitute_plot_timeframe(build, self.read_history.maxlen)
+                return build
             except Exception as inner_e:
                 logger.debug("Error creating error plot: %s", inner_e)
                 return "Error displaying plot"
@@ -343,8 +329,8 @@ class DiskIOWidget(MetricWidget):
                     10,
                     self.size.width
                     - len("DISK ")
-                    - len(f"{read_speed:6.1f} MB/s ")
-                    - len(f"{write_speed:6.1f} MB/s")
+                    - len(format_throughput(read_speed) + " ")
+                    - len(format_throughput(write_speed))
                     - 2,
                 )
             else:

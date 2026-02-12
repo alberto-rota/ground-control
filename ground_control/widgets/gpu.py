@@ -8,7 +8,7 @@ from textual import on
 from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align, format_size, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 import logging
 
@@ -264,7 +264,7 @@ class GPUWidget(MetricWidget):
     def create_center_bar(
         self, gpu_ram: float, gpu_usage: float, total_width: int
     ) -> str:
-        gpu_ram_withunits = align(f"{gpu_ram:.1f} GB", 12, "right")
+        gpu_ram_withunits = align(format_size(gpu_ram, in_gb=True), 12, "right")
         gpu_usage_withunits = align(f"{gpu_usage:.1f} %", 14, "left")
         aval_width = total_width
         half_width = aval_width // 2
@@ -349,15 +349,15 @@ class GPUWidget(MetricWidget):
             plt.yticks(current_yticks, [0, 25, 50, 75, 100])
         gpu_ram_color = get_rich_color("gpu_plot_ram", "#00FF00")
         gpu_usage_color = get_rich_color("gpu_plot_usage", "#00FFFF")
-        return (
-            ansi2rich(plt.build())
-            .replace("\x1b[0m", "")
-            .replace("[blue]", f"[{gpu_usage_color}]")
-            .replace("[green]", f"[{gpu_ram_color}]")
-            .replace("-", " ")
-            .replace("──────┐","─GB─%─┐")
-            
-        )
+        build = ansi2rich(plt.build())
+        build = build.replace("\x1b[0m", "")
+        build = build.replace("[blue]", f"[{gpu_usage_color}]")
+        build = build.replace("[green]", f"[{gpu_ram_color}]")
+        build = build.replace("-", " ")
+        build = build.replace("──────┐", "─GB─%─┐")
+        if len(self.gpu_ram_history) >= self.gpu_ram_history.maxlen:
+            build = substitute_plot_timeframe(build, self.gpu_ram_history.maxlen)
+        return build
 
     def update_content(
         self, gpu_name, gpu_usage, mem_used, mem_total, processes=None
@@ -377,8 +377,8 @@ class GPUWidget(MetricWidget):
         )
         total_width = (
             self.size.width
-            - len(f"{mem_used:6.1f} % ")
-            - len(f"{gpu_usage:6.1f} %")
+            - len(format_size(mem_used, in_gb=True) + " ")
+            - len(f"{gpu_usage:.1f} %")
             - 2
         )
         try:

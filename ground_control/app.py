@@ -37,6 +37,7 @@ from ground_control.utils.colors import (
     ensure_colors_in_config,
     apply_theme,
     get_available_themes,
+    get_theme_tokens,
 )
 from platformdirs import user_config_dir  # Import for cross-platform config directory
 from textual.css.stylesheet import CssSource
@@ -46,11 +47,6 @@ from textual.screen import Screen
 CONFIG_DIR = user_config_dir("ground-control")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
-
-def hex_to_rgb(hex_color: str) -> tuple:
-    """Convert hex color to RGB tuple for CSS."""
-    hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
 # Logger will be set up in main.py before app is created
 logger = logging.getLogger("ground-control")
@@ -93,21 +89,22 @@ class RichLogHandler(logging.Handler):
 def _build_theme_swatch(theme_name: str) -> str:
     """Build a Rich-markup label for a theme showing its name and a color swatch.
 
-    Picks representative keys from the theme JSON (background, accent, border,
-    cpu_bar, memory_ram, gpu_ram, network_download, text) and renders a row
-    of colored block characters next to the theme name.
+    Picks representative keys from the theme JSON and renders a row of colored
+    block characters next to the theme name (19 colors: UI + widget palette).
 
     Args:
         theme_name: Name of the theme (without .json extension).
 
     Returns:
-        A Rich markup string like ``monokai  ██████████``
+        A Rich markup string like ``monokai  ███████████████████``
     """
     colors = load_theme(theme_name) or {}
     swatch_keys = [
         "background", "surface", "accent", "border",
-        "cpu_bar", "memory_ram", "gpu_ram", "network_download",
-        "text",
+        "cpu_bar", "memory_ram", "memory_swap", "gpu_ram", "gpu_usage",
+        "network_download", "network_upload", "disk_read", "disk_write",
+        "temp_cool", "temp_normal", "temp_hot", "temp_critical",
+        "text", "selection_highlight",
     ]
     blocks = ""
     for key in swatch_keys:
@@ -171,6 +168,8 @@ class GroundControl(App):
         self._debug_mode = debug
         self._log_handler: logging.Handler | None = None  # RichLogHandler, set in on_mount
         self._log_queue: queue.Queue[str] = queue.Queue()
+        # Prevent concurrent layout/widget rebuilds that can create duplicate widgets
+        self._setup_lock: asyncio.Lock = asyncio.Lock()
         # Disk mount paths to hide: any mountpoint that starts with one of these (after normalizing) is skipped
         self.disk_ignore_prefixes: list[str] = ["/boot/efi"]
 
@@ -200,67 +199,44 @@ class GroundControl(App):
         _ = self.stylesheet.rules
         self.stylesheet.update(self)
 
-    def _generate_css(self):
-        """Generate CSS with colors from config.
-
-        Applies the full color theme to all UI elements: widget borders, tabs,
-        header, footer, buttons, and selection list.
-        """
-        c = self._color_config
-        # Design tokens from theme (single source for Textual + app)
-        surface_rgb = hex_to_rgb(c.get("surface", "#1A1A1A"))
-        background_rgb = hex_to_rgb(c.get("background", "#000000"))
-        text_rgb = hex_to_rgb(c.get("text", "#E0E0E0"))
-        accent_rgb = hex_to_rgb(c.get("accent", "#13A10E"))
-        boost_rgb = hex_to_rgb(c.get("boost", "#262626"))
-        panel_rgb = hex_to_rgb(c.get("panel", "#1E1E1E"))
-        border_rgb = hex_to_rgb(c.get("border", "#13A10E"))
-        active_button_rgb = hex_to_rgb(c.get("active_button", "#13A10E"))
-        tab_active_bg_rgb = hex_to_rgb(c.get("tab_active_bg", "#13A10E"))
-        tab_active_fg_rgb = hex_to_rgb(c.get("tab_active_fg", "#000000"))
-        tab_inactive_bg_rgb = hex_to_rgb(c.get("tab_inactive_bg", "#1A1A1A"))
-        tab_inactive_fg_rgb = hex_to_rgb(c.get("tab_inactive_fg", "#888888"))
-        header_bg_rgb = hex_to_rgb(c.get("header_bg", "#13A10E"))
-        footer_bg_rgb = hex_to_rgb(c.get("footer_bg", "#1A1A1A"))
-        footer_key_bg_rgb = hex_to_rgb(c.get("footer_key_bg", "#13A10E"))
-        footer_key_fg_rgb = hex_to_rgb(c.get("footer_key_fg", "#000000"))
-        selection_rgb = hex_to_rgb(c.get("selection_highlight", "#13A10E"))
-
-        s = f"rgb({surface_rgb[0]}, {surface_rgb[1]}, {surface_rgb[2]})"
-        b = f"rgb({boost_rgb[0]}, {boost_rgb[1]}, {boost_rgb[2]})"
-        a = f"rgb({accent_rgb[0]}, {accent_rgb[1]}, {accent_rgb[2]})"
-        t = f"rgb({text_rgb[0]}, {text_rgb[1]}, {text_rgb[2]})"
-
-        bg = f"rgb({background_rgb[0]}, {background_rgb[1]}, {background_rgb[2]})"
+    def _generate_css(self) -> None:
+        """Generate CSS from theme tokens only. All colors come from theme (no hardcoded values)."""
+        tok = get_theme_tokens(self._color_config)
         self.CSS = f"""
-    /* Single theme: all UI and widgets use theme tokens */
+    /* Theme-driven: all colors from get_theme_tokens (colors.py) */
     GroundControl {{
-        background: {bg};
+        background: {tok["bg"]};
+        color: {tok["text"]};
     }}
-    /* App screen and tab content use theme background */
     Screen {{
-        background: {bg};
+        background: {tok["bg"]};
+        color: {tok["text"]};
     }}
     #root-tabs {{
-        background: {bg};
+        background: {tok["bg"]};
+        color: {tok["text"]};
     }}
     #dashboard-pane {{
-        background: {bg};
+        background: {tok["bg"]};
+        color: {tok["text"]};
     }}
     #logs-pane {{
-        background: {bg};
+        background: {tok["bg"]};
         height: 1fr;
         overflow: hidden;
         padding: 0 1;
+        color: {tok["text"]};
     }}
     #app-log {{
         width: 100%;
         height: 100%;
-        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
+        border: round {tok["border"]};
         padding: 1;
+        color: {tok["text"]};
     }}
     #settings-pane {{
-        background: {bg};
+        background: {tok["bg"]};
+        color: {tok["text"]};
     }}
     Grid {{
         grid-size: 3 3;
@@ -269,61 +245,57 @@ class GroundControl(App):
         height: 100%;
     }}
     GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget {{
-        background: {s};
-        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
+        background: {tok["bg"]};
+        border: round {tok["border"]};
         min-height: 10;
+        color: {tok["text"]};
     }}
 
-    /* ── Tab theming ── */
     Tab {{
-        background: rgb({tab_inactive_bg_rgb[0]}, {tab_inactive_bg_rgb[1]}, {tab_inactive_bg_rgb[2]});
-        color: rgb({tab_inactive_fg_rgb[0]}, {tab_inactive_fg_rgb[1]}, {tab_inactive_fg_rgb[2]});
+        background: {tok["tab_inactive_bg"]};
+        color: {tok["tab_inactive_fg"]};
     }}
     Tab:hover {{
-        background: rgb({tab_active_bg_rgb[0]}, {tab_active_bg_rgb[1]}, {tab_active_bg_rgb[2]});
-        color: rgb({tab_active_fg_rgb[0]}, {tab_active_fg_rgb[1]}, {tab_active_fg_rgb[2]});
+        background: {tok["tab_active_bg"]};
+        color: {tok["tab_active_fg"]};
     }}
     Tab.-active {{
-        background: rgb({tab_active_bg_rgb[0]}, {tab_active_bg_rgb[1]}, {tab_active_bg_rgb[2]});
-        color: rgb({tab_active_fg_rgb[0]}, {tab_active_fg_rgb[1]}, {tab_active_fg_rgb[2]});
+        background: {tok["tab_active_bg"]};
+        color: {tok["tab_active_fg"]};
     }}
     Underline > .underline--bar {{
-        background: rgb({tab_active_bg_rgb[0]}, {tab_active_bg_rgb[1]}, {tab_active_bg_rgb[2]});
-        color: rgb({tab_active_bg_rgb[0]}, {tab_active_bg_rgb[1]}, {tab_active_bg_rgb[2]});
+        background: {tok["tab_active_bg"]};
+        color: {tok["tab_active_bg"]};
     }}
 
-    /* ── Header / Footer theming ── */
-    Header {{
-        background: rgb({header_bg_rgb[0]}, {header_bg_rgb[1]}, {header_bg_rgb[2]});
+    /* Scoped under GroundControl so we override Textual's default theme for header/footer */
+    GroundControl > Header {{
+        background: {tok["header_bg"]};
+        color: {tok["header_fg"]};
     }}
-    Footer {{
-        background: rgb({footer_bg_rgb[0]}, {footer_bg_rgb[1]}, {footer_bg_rgb[2]});
+    GroundControl > Footer {{
+        background: {tok["footer_bg"]};
+        color: {tok["footer_fg"]};
     }}
-    Footer > FooterKey > .footer-key--key {{
-        background: rgb({footer_key_bg_rgb[0]}, {footer_key_bg_rgb[1]}, {footer_key_bg_rgb[2]});
-        color: rgb({footer_key_fg_rgb[0]}, {footer_key_fg_rgb[1]}, {footer_key_fg_rgb[2]});
+    GroundControl > Footer FooterKey {{
+        color: {tok["footer_fg"]};
+    }}
+    GroundControl > Footer > FooterKey > .footer-key--key {{
+        background: {tok["footer_key_bg"]};
+        color: {tok["footer_key_fg"]};
     }}
 
-    /* ── Selection list and radio selectors (uniform accent) ── */
     SelectionList {{
-        background: transparent;
-        border: none;
+        background: {tok["bg"]};
         width: 100%;
         height: auto;
         padding: 0;
     }}
-    SelectionList:focus > .selection-list--button-highlighted {{
-        background: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]}) 25%;
-    }}
-    SelectionList > .selection-list--button-selected {{
-        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
-    }}
 
-    /* ── Settings tab ── */
     #settings-pane {{
         height: 1fr;
         overflow-y: auto;
-        padding: 2 3;
+        padding: 0;
     }}
     #settings-sections {{
         width: 100%;
@@ -331,30 +303,30 @@ class GroundControl(App):
         layout: vertical;
         padding: 0;
     }}
-    #settings-grid {{
+    #settings-row-1, #settings-row-2 {{
         width: 100%;
         height: auto;
-        grid-size: 2 2;
-        grid-gutter: 1 1;
+    }}
+    #settings-row-1 > Vertical, #settings-row-2 > Vertical {{
+        width: 1fr;
     }}
     .settings-block {{
         width: 100%;
         height: auto;
         min-height: 3;
-        padding: 1 1 1 1;
-        margin: 0 0 1 0;
-        border: round rgb({border_rgb[0]}, {border_rgb[1]}, {border_rgb[2]});
-        background: rgb({panel_rgb[0]}, {panel_rgb[1]}, {panel_rgb[2]}) 60%;
+        padding: 0;
+        margin: 0;
+        border: round {tok["border"]};
+        background: {tok["bg"]};
     }}
     .settings-section-title {{
         text-style: bold;
         height: 1;
         margin: 0 0 1 0;
         padding: 0;
-        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
+        color: {tok["text"]};
     }}
 
-    /* All RadioSets: same highlight color as SelectionList */
     #refresh-radio-set, #history-radio-set, #theme-radio-set, #layout-radio-set {{
         width: 100%;
         height: auto;
@@ -364,22 +336,17 @@ class GroundControl(App):
     }}
     RadioButton {{
         background: transparent;
-        color: {t};
-        padding: 0 0 0 0;
+        color: {tok["text"]};
+        padding: 0;
     }}
     RadioButton:hover {{
-        background: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]}) 15%;
+        background: {tok["selection"]} 15%;
     }}
-    RadioSet:focus > RadioButton.-on {{
-        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
-        text-style: bold;
-    }}
-    RadioButton.-on {{
-        color: rgb({selection_rgb[0]}, {selection_rgb[1]}, {selection_rgb[2]});
+    RadioSet:focus > RadioButton.-on, RadioButton.-on {{
+        color: {tok["selection"]};
         text-style: bold;
     }}
 
-    /* Tab content panes fill the area below the tab bar */
     #dashboard-pane {{
         height: 1fr;
         overflow: auto;
@@ -731,42 +698,16 @@ class GroundControl(App):
                     self.grid = Grid(classes="grid")
                     yield self.grid
 
-            # Settings tab: all configuration controls in grouped sections.
+            # Settings tab: row 1 = Visible Widgets & Theme; row 2 = Refresh, History, Layout; row 3 = Disk ignore.
             with TabPane("Settings", id="settings"):
                 with Vertical(id="settings-pane"):
                     with Vertical(id="settings-sections"):
-                        # ── Visible widgets ──
-                        with Vertical(classes="settings-block"):
-                            yield Static(" Visible Widgets", classes="settings-section-title")
-                            self.select = SelectionList[str]()
-                            self.select.border_title = "Visible Widgets"
-                            yield self.select
-
-                        with Vertical(classes="settings-block"):
-                            yield Static(" Disk ignore prefixes", classes="settings-section-title")
-                            yield Input(
-                                id="disk-ignore-prefixes",
-                                placeholder="e.g. /boot/efi, /boot, /snap",
-                            )
-
-                        # ── Other settings organised in a 2x2 grid ──
-                        with Grid(id="settings-grid"):
-                            # Refresh rate
+                        # Row 1: Visible Widgets | Theme
+                        with Horizontal(id="settings-row-1"):
                             with Vertical(classes="settings-block"):
-                                yield Static(" Refresh rate", classes="settings-section-title")
-                                with RadioSet(id="refresh-radio-set"):
-                                    for rate in REFRESH_RATES:
-                                        bid = f"refresh-{rate}".replace(".", "-")
-                                        yield RadioButton(_refresh_label(rate), id=bid)
-
-                            # History size
-                            with Vertical(classes="settings-block"):
-                                yield Static(" History size", classes="settings-section-title")
-                                with RadioSet(id="history-radio-set"):
-                                    for size in HISTORY_SIZES:
-                                        yield RadioButton(_history_label(size), id=f"history-{size}")
-
-                            # Theme
+                                yield Static(" Visible Widgets", classes="settings-section-title")
+                                self.select = SelectionList[str]()
+                                yield self.select
                             with Vertical(classes="settings-block"):
                                 yield Static(" Theme", classes="settings-section-title")
                                 with RadioSet(id="theme-radio-set"):
@@ -776,13 +717,33 @@ class GroundControl(App):
                                             id=f"theme-{name}",
                                         )
 
-                            # Layout
+                        # Row 2: Refresh rate | History | Layout
+                        with Horizontal(id="settings-row-2"):
+                            with Vertical(classes="settings-block"):
+                                yield Static(" Refresh rate", classes="settings-section-title")
+                                with RadioSet(id="refresh-radio-set"):
+                                    for rate in REFRESH_RATES:
+                                        bid = f"refresh-{rate}".replace(".", "-")
+                                        yield RadioButton(_refresh_label(rate), id=bid)
+                            with Vertical(classes="settings-block"):
+                                yield Static(" History size", classes="settings-section-title")
+                                with RadioSet(id="history-radio-set"):
+                                    for size in HISTORY_SIZES:
+                                        yield RadioButton(_history_label(size), id=f"history-{size}")
                             with Vertical(classes="settings-block"):
                                 yield Static(" Layout", classes="settings-section-title")
                                 with RadioSet(id="layout-radio-set"):
                                     yield RadioButton("Grid", id="layout-grid")
                                     yield RadioButton("Horizontal", id="layout-horizontal")
                                     yield RadioButton("Vertical", id="layout-vertical")
+
+                        # Row 3: Disk ignore (full width)
+                        with Vertical(classes="settings-block"):
+                            yield Static(" Disk ignore prefixes", classes="settings-section-title")
+                            yield Input(
+                                id="disk-ignore-prefixes",
+                                placeholder="e.g. /boot/efi, /boot, /snap",
+                            )
             
             # Logs tab: streaming app logs in a scrollable RichLog.
             with TabPane("Logs", id="logs"):
@@ -844,100 +805,107 @@ class GroundControl(App):
                 break
 
     async def setup_widgets(self) -> None:
-        self.grid.remove_children()
-        gpu_metrics = self.system_metrics.get_gpu_metrics()
-        cpu_metrics = self.system_metrics.get_cpu_metrics()
-        disk_metrics = self.system_metrics.get_disk_metrics()
-        memory_metrics = self.system_metrics.get_memory_metrics()
-        temperature_metrics = self.system_metrics.get_temperature_metrics()
-        num_gpus = len(gpu_metrics)
-        grid_columns = self.get_layout_columns(num_gpus)
-        if self.current_layout == "horizontal":
-            self.grid.styles.grid_size_rows = 1
-            self.grid.styles.grid_size_columns = grid_columns
-        elif self.current_layout == "vertical":
-            self.grid.styles.grid_size_rows = grid_columns
-            self.grid.styles.grid_size_columns = 1
-        elif self.current_layout == "grid":
-            if grid_columns <= 12:
-                self.grid.styles.grid_size_rows = 2
-                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
-            else:
-                self.grid.styles.grid_size_rows = 3
-                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
+        """(Re)build all metric widgets and grid layout.
 
-        # Force equal fractional row/column sizes so each cell gets real space.
-        # Without this, vertical (and sometimes horizontal) layout can use
-        # content-based sizing and give 0 height to plot widgets.
-        rows = self.grid.styles.grid_size_rows
-        cols = self.grid.styles.grid_size_columns
-        self.grid.styles.grid_rows = " ".join("1fr" for _ in range(rows))
-        self.grid.styles.grid_columns = " ".join("1fr" for _ in range(cols))
+        Protected by an async lock so multiple callers (e.g. rapid layout
+        changes, temperature prefix edits, initial mount + layout restore)
+        cannot interleave and accidentally create duplicate widgets.
+        """
+        async with self._setup_lock:
+            self.grid.remove_children()
+            gpu_metrics = self.system_metrics.get_gpu_metrics()
+            cpu_metrics = self.system_metrics.get_cpu_metrics()
+            disk_metrics = self.system_metrics.get_disk_metrics()
+            memory_metrics = self.system_metrics.get_memory_metrics()
+            temperature_metrics = self.system_metrics.get_temperature_metrics()
+            num_gpus = len(gpu_metrics)
+            grid_columns = self.get_layout_columns(num_gpus)
+            if self.current_layout == "horizontal":
+                self.grid.styles.grid_size_rows = 1
+                self.grid.styles.grid_size_columns = grid_columns
+            elif self.current_layout == "vertical":
+                self.grid.styles.grid_size_rows = grid_columns
+                self.grid.styles.grid_size_columns = 1
+            elif self.current_layout == "grid":
+                if grid_columns <= 12:
+                    self.grid.styles.grid_size_rows = 2
+                    self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
+                else:
+                    self.grid.styles.grid_size_rows = 3
+                    self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
 
-        # Always create new widgets when setup_widgets is called
-        # Resolve saved tab state for CPU widget
-        cpu_title = f"{cpu_metrics['cpu_name']}"
-        cpu_initial_tab = self._widget_tab_states.get(cpu_title, "all")
-        cpu_widget = CPUWidget(cpu_title, initial_tab=cpu_initial_tab)
-        memory_widget = MemoryWidget("Memory")
-        self.disk_widgets = []
-        self.gpu_widgets = []
-        self.temperature_widget = None
-        network_widget = NetworkIOWidget("Network")
-    
-        await self.grid.mount(cpu_widget)
-        await self.grid.mount(memory_widget)
-        
-        # Create temperature widget only if temperature data is available
-        temperature_metrics = self.system_metrics.get_temperature_metrics()
-        logger.info("Setup: temperature metrics: %s", temperature_metrics)
-        if temperature_metrics:
-            self.temperature_widget = TemperatureWidget("Temperature", history_size=int(self.history_size))
-            await self.grid.mount(self.temperature_widget)
-        else:
-            logger.info("No temperature sensors found - skipping temperature widget")
+            # Force equal fractional row/column sizes so each cell gets real space.
+            # Without this, vertical (and sometimes horizontal) layout can use
+            # content-based sizing and give 0 height to plot widgets.
+            rows = self.grid.styles.grid_size_rows
+            cols = self.grid.styles.grid_size_columns
+            self.grid.styles.grid_rows = " ".join("1fr" for _ in range(rows))
+            self.grid.styles.grid_columns = " ".join("1fr" for _ in range(cols))
+
+            # Always create new widgets when setup_widgets is called
+            # Resolve saved tab state for CPU widget
+            cpu_title = f"{cpu_metrics['cpu_name']}"
+            cpu_initial_tab = self._widget_tab_states.get(cpu_title, "all")
+            cpu_widget = CPUWidget(cpu_title, initial_tab=cpu_initial_tab)
+            memory_widget = MemoryWidget("Memory")
+            self.disk_widgets = []
+            self.gpu_widgets = []
             self.temperature_widget = None
-    
-        # Mount multiple disk widgets (skip mountpoints matching user-configured prefixes)
-        # Use a running index for IDs so each mounted widget has a unique id (avoids DuplicateIds
-        # when mountpoint "/" becomes "_" and would yield "disk_0__", or when setup_widgets runs again).
-        def _disk_id_suffix(mountpoint: str) -> str:
-            if mountpoint == "/" or not mountpoint:
-                return "root"
-            return mountpoint.replace("/", "_").strip("_") or "root"
+            network_widget = NetworkIOWidget("Network")
+        
+            await self.grid.mount(cpu_widget)
+            await self.grid.mount(memory_widget)
+            
+            # Create temperature widget only if temperature data is available
+            temperature_metrics = self.system_metrics.get_temperature_metrics()
+            logger.info("Setup: temperature metrics: %s", temperature_metrics)
+            if temperature_metrics:
+                self.temperature_widget = TemperatureWidget("Temperature", history_size=int(self.history_size))
+                await self.grid.mount(self.temperature_widget)
+            else:
+                logger.info("No temperature sensors found - skipping temperature widget")
+                self.temperature_widget = None
+        
+            # Mount multiple disk widgets (skip mountpoints matching user-configured prefixes)
+            # Use a running index for IDs so each mounted widget has a unique id (avoids DuplicateIds
+            # when mountpoint "/" becomes "_" and would yield "disk_0__", or when setup_widgets runs again).
+            def _disk_id_suffix(mountpoint: str) -> str:
+                if mountpoint == "/" or not mountpoint:
+                    return "root"
+                return mountpoint.replace("/", "_").strip("_") or "root"
 
-        disk_index = 0
-        for disk in disk_metrics["disks"]:
-            if self._disk_mount_ignored(disk["mountpoint"]):
-                logger.info("Setup: skipping disk mountpoint %s (matches ignore prefix)", disk["mountpoint"])
-                continue
-            disk_id = f"disk_{disk_index}_{_disk_id_suffix(disk['mountpoint'])}"
-            disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=disk_id)
-            self.disk_widgets.append(disk_widget)
-            await self.grid.mount(disk_widget)
-            disk_index += 1
+            disk_index = 0
+            for disk in disk_metrics["disks"]:
+                if self._disk_mount_ignored(disk["mountpoint"]):
+                    logger.info("Setup: skipping disk mountpoint %s (matches ignore prefix)", disk["mountpoint"])
+                    continue
+                disk_id = f"disk_{disk_index}_{_disk_id_suffix(disk['mountpoint'])}"
+                disk_widget = DiskIOWidget(f"Disk @ {disk['mountpoint']}", id=disk_id)
+                self.disk_widgets.append(disk_widget)
+                await self.grid.mount(disk_widget)
+                disk_index += 1
+            
+            await self.grid.mount(network_widget)
         
-        await self.grid.mount(network_widget)
-
-        # Filter GPU metrics by gpu_indices if set (e.g. gc -g 0 or --gpu-index 0,1)
-        if self.gpu_indices is not None:
-            gpu_metrics = [gpu_metrics[i] for i in self.gpu_indices if 0 <= i < len(gpu_metrics)]
-        # Mount GPU widgets (restore saved tab state per GPU)
-        for gpu in gpu_metrics:
-            gpu_title = f"GPU @ {gpu['gpu_name']}"
-            gpu_initial_tab = self._widget_tab_states.get(gpu_title, "plot")
-            gpu_widget = GPUWidget(
-                gpu_title,
-                id=f"gpu_{len(self.gpu_widgets)}",
-                initial_tab=gpu_initial_tab,
-            )
-            self.gpu_widgets.append(gpu_widget)
-            await self.grid.mount(gpu_widget)
-        
-        logger.info(f"Setup complete: {len(self.disk_widgets)} disk widgets, {len(self.gpu_widgets)} GPU widgets")
-        
-        # Update selection list after widgets are created
-        self.create_selection_list()
+            # Filter GPU metrics by gpu_indices if set (e.g. gc -g 0 or --gpu-index 0,1)
+            if self.gpu_indices is not None:
+                gpu_metrics = [gpu_metrics[i] for i in self.gpu_indices if 0 <= i < len(gpu_metrics)]
+            # Mount GPU widgets (restore saved tab state per GPU)
+            for gpu in gpu_metrics:
+                gpu_title = f"GPU @ {gpu['gpu_name']}"
+                gpu_initial_tab = self._widget_tab_states.get(gpu_title, "plot")
+                gpu_widget = GPUWidget(
+                    gpu_title,
+                    id=f"gpu_{len(self.gpu_widgets)}",
+                    initial_tab=gpu_initial_tab,
+                )
+                self.gpu_widgets.append(gpu_widget)
+                await self.grid.mount(gpu_widget)
+            
+            logger.info(f"Setup complete: {len(self.disk_widgets)} disk widgets, {len(self.gpu_widgets)} GPU widgets")
+            
+            # Update selection list after widgets are created
+            self.create_selection_list()
 
     def create_json(self) -> None:
         """Create the initial config file with all current state.

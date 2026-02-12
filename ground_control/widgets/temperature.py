@@ -5,7 +5,7 @@ from textual.widgets import Static
 from textual.containers import Horizontal
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.temperature")
@@ -229,6 +229,9 @@ class TemperatureWidget(MetricWidget):
                  .replace("[yellow]", f"[{yellow_color}]")
                  .replace("\x1b[0m", "")
                  .replace("──────┐", "──°C──┐"))
+        # Show timeframe ticks only when at least one sensor's history is full
+        if any(h and len(h) >= self.history_size for h in self.temperature_histories.values()):
+            result = substitute_plot_timeframe(result, self.history_size)
         return result
 
         # except Exception as e:

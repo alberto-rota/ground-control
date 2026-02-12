@@ -5,7 +5,7 @@ from textual.widgets import Static
 from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align
+from ..utils.formatting import ansi2rich, align, format_throughput, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.network")
@@ -32,8 +32,8 @@ class NetworkIOWidget(MetricWidget):
     def create_center_bar(
         self, read_speed: float, write_speed: float, total_width: int
     ) -> str:
-        read_speed_withunits = align(f"{read_speed:.1f} MB/s", 12, "right")
-        write_speed_withunits = align(f"{write_speed:.1f} MB/s", 12, "left")
+        read_speed_withunits = align(format_throughput(read_speed), 12, "right")
+        write_speed_withunits = align(format_throughput(write_speed), 12, "left")
         aval_width = (
             total_width  # s- len(read_speed_withunits) - len(write_speed_withunits) - 2
         )
@@ -109,12 +109,13 @@ class NetworkIOWidget(MetricWidget):
             for i in range(num_ticks):
                 value = -y_limit + i * tick_step
                 y_ticks.append(value)
+                # Tick labels: numbers only; unit on top of plot (─MB/s─┐)
                 if value == 0:
                     y_labels.append("0")
                 elif value > 0:
-                    y_labels.append(f"{value:.1f}↑")
+                    y_labels.append(str(round(value)) + "↑")
                 else:
-                    y_labels.append(f"{abs(value):.1f}↓")
+                    y_labels.append(str(round(abs(value))) + "↓")
 
             plt.yticks(y_ticks, y_labels)
 
@@ -126,13 +127,11 @@ class NetworkIOWidget(MetricWidget):
 
             download_color = get_rich_color("network_plot_download", "#FF8C00")
             upload_color = get_rich_color("network_plot_upload", "#00FF00")
-            return (
-                ansi2rich(plt.build())
-                .replace("\x1b[0m", "")
-                .replace("[blue]", f"[{download_color}]")
-                .replace("[green]", f"[{upload_color}]")
-                .replace("──────┐", "─MB/s─┐")
-            )
+            build = ansi2rich(plt.build())
+            build = build.replace("\x1b[0m", "").replace("[blue]", f"[{download_color}]").replace("[green]", f"[{upload_color}]").replace("──────┐", "─MB/s─┐")
+            if len(self.download_history) >= self.download_history.maxlen:
+                build = substitute_plot_timeframe(build, self.download_history.maxlen)
+            return build
         except Exception:
             # Plotext can IndexError on small dimensions; return a safe placeholder
             plt.clear_figure()
@@ -141,7 +140,10 @@ class NetworkIOWidget(MetricWidget):
             plt.ylim(-1, 1)
             plt.plot([0] * min(10, plot_width), marker="braille", label="Network")
             plt.hline(0.0)
-            return ansi2rich(plt.build()).replace("\x1b[0m", "")
+            build = ansi2rich(plt.build()).replace("\x1b[0m", "")
+            if len(self.download_history) >= self.download_history.maxlen:
+                build = substitute_plot_timeframe(build, self.download_history.maxlen)
+            return build
 
     def update_content(self, download_speed: float, upload_speed: float):
         if self.first:
@@ -156,9 +158,8 @@ class NetworkIOWidget(MetricWidget):
 
         total_width = (
             self.size.width
-            - len("")
-            - len(f"{download_speed:6.1f} MB/s ")
-            - len(f"{upload_speed:6.1f} MB/s")
+            - len(format_throughput(download_speed) + " ")
+            - len(format_throughput(upload_speed))
             - 2
         )
         try:

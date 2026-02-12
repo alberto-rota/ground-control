@@ -50,7 +50,9 @@
     "tab_inactive_fg": "#888888",
     "header_bg": "#13A10E",
     "footer_bg": "#1A1A1A",
+    "footer_fg": "#E0E0E0",
     "footer_key_bg": "#13A10E",
     "footer_key_fg": "#000000",
-    "selection_highlight": "#13A10E"
+    "selection_highlight": "#13A10E",
+    "text_on_accent": "#000000"
 }
