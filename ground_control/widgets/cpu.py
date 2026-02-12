@@ -201,11 +201,14 @@ class CPUWidget(MetricWidget):
                 
             plt.bar(labels, list(cpu_percentages), orientation=orientation)
             cpu_bar_color = get_rich_color("cpu_bar", "#0080FF")
-            cpubars = (ansi2rich(plt.build())
-                      .replace("\x1b[0m", "")
-                      .replace("\x1b[1m", "")
-                      .replace("[blue]", f"[{cpu_bar_color}]")
-                      .replace("──────┐","────%─┐"))
+            try:
+                cpubars = (ansi2rich(plt.build())
+                          .replace("\x1b[0m", "")
+                          .replace("\x1b[1m", "")
+                          .replace("[blue]", f"[{cpu_bar_color}]")
+                          .replace("──────┐","────%─┐"))
+            except (ValueError, IndexError, TypeError):
+                cpubars = "\n".join(f"{l}: {v}%" for l, v in zip(labels, list(cpu_percentages)))
 
             
             # plt.clear_figure()
@@ -227,22 +230,31 @@ class CPUWidget(MetricWidget):
             group_width = max(1, width // num_groups)
             group_charts = []
             for idx, group in enumerate(groups):
+                group = list(group)
+                if not group:
+                    continue
                 plt.clear_figure()
                 plt.theme("pro")
-                chart_height = len(group) +2
-                plt.plot_size(width=group_width, height=chart_height)
+                chart_height = len(group) + 2
+                plt.plot_size(width=max(1, group_width), height=chart_height)
                 plt.xfrequency(0)
                 plt.xlim(6, 100)
                 start_index = idx * max_rows
                 group_labels = labels_override[start_index:start_index + len(group)] if labels_override else [f" C{start_index + i}" for i in range(len(group))]
+                group_labels = group_labels[: len(group)]
                 plt.bar(group_labels, group, orientation="h")
                 cpu_bar_color = get_rich_color("cpu_bar", "#0080FF")
-                chart_str = (ansi2rich(plt.build())
-                            .replace("\x1b[0m", "")
-                            .replace("\x1b[1m", "")
-                            .replace("[blue]", f"[{cpu_bar_color}]"))
+                try:
+                    chart_str = (ansi2rich(plt.build())
+                                .replace("\x1b[0m", "")
+                                .replace("\x1b[1m", "")
+                                .replace("[blue]", f"[{cpu_bar_color}]"))
+                except (ValueError, IndexError, TypeError):
+                    chart_str = "\n".join(f" C{start_index + i}: {v}%" for i, v in enumerate(group))
                 group_charts.append(chart_str)
             # Combine the group charts horizontally.
+            if not group_charts:
+                return "CPU chart unavailable"
             group_lines = [chart.splitlines() for chart in group_charts]
             max_lines = max(len(lines) for lines in group_lines)
             for lines in group_lines:

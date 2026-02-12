@@ -23,7 +23,7 @@ import os
 import json
 import logging
 import traceback
-from textual.events import Mount
+from textual.events import Key, Mount
 from ground_control.widgets.cpu import CPUWidget
 from ground_control.widgets.disk import DiskIOWidget
 from ground_control.widgets.network import NetworkIOWidget
@@ -41,7 +41,7 @@ from ground_control.utils.colors import (
 )
 from platformdirs import user_config_dir  # Import for cross-platform config directory
 from textual.css.stylesheet import CssSource
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
@@ -111,7 +111,7 @@ def _build_theme_swatch(theme_name: str) -> str:
         hex_color = colors.get(key)
         if hex_color:
             blocks += f"[{hex_color}]██[/]"
-    label = f"{theme_name:<14s} {blocks}" if blocks else theme_name
+    label = f"{theme_name:<22s} {blocks}" if blocks else theme_name
     return label
 
 
@@ -134,6 +134,38 @@ def _refresh_label(rate: float) -> str:
 def _history_label(size: int) -> str:
     """Label for a history size option."""
     return f"{size // 60}m" if size >= 60 else f"{size}s"
+
+
+class ShortcutsScreen(ModalScreen):
+    """Modal screen showing all available key bindings (navigation + widget tabs)."""
+
+    BINDINGS = [
+        ("q", "close", "Close"),
+        ("escape", "close", "Close"),
+    ]
+
+    DEFAULT_CSS = """
+    ShortcutsScreen {
+        align: center middle;
+    }
+    #shortcuts-content {
+        width: 90;
+        max-height: 80%;
+        padding: 1 2;
+        border: solid $accent;
+        background: $surface;
+    }
+    """
+
+    def __init__(self, content: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._content = content
+
+    def compose(self):
+        yield Static(self._content, id="shortcuts-content", markup=True)
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
 
 
 class GroundControl(App):
@@ -172,6 +204,8 @@ class GroundControl(App):
         self._setup_lock: asyncio.Lock = asyncio.Lock()
         # Disk mount paths to hide: any mountpoint that starts with one of these (after normalizing) is skipped
         self.disk_ignore_prefixes: list[str] = ["/boot/efi"]
+        # Multi-key widget tab shortcuts: None | "c" (expect a/f/m) | "g" (expect p or 0-9) | "g0"-"g9" (expect p or any for plot)
+        self._tab_key_prefix: str | None = None
 
     def _refresh_stylesheet(self) -> None:
         """Replace the app's CSS in the stylesheet with current self.CSS and re-apply to the DOM."""
@@ -247,7 +281,7 @@ class GroundControl(App):
     GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget {{
         background: {tok["bg"]};
         border: round {tok["border"]};
-        min-height: 10;
+        min-height: 14;
         color: {tok["text"]};
     }}
 
@@ -290,6 +324,30 @@ class GroundControl(App):
         width: 100%;
         height: auto;
         padding: 0;
+    }}
+    /* Match Visible Widgets selector to other settings (RadioSets): same container look */
+    #visible-widgets-list {{
+        width: 100%;
+        height: auto;
+        background: transparent;
+        border: none;
+        padding: 0;
+    }}
+    #visible-widgets-list:focus {{
+        border: none;
+    }}
+    /* Align option rows with RadioButton text color and hover */
+    #visible-widgets-list .selection-list--option {{
+        background: transparent;
+        color: {tok["text"]};
+        padding: 0;
+    }}
+    #visible-widgets-list .selection-list--option:hover {{
+        background: {tok["selection"]} 15%;
+    }}
+    #visible-widgets-list .selection-list--option.-highlight {{
+        color: {tok["selection"]};
+        text-style: bold;
     }}
 
     #settings-pane {{
@@ -374,15 +432,19 @@ class GroundControl(App):
         ("g", "set_grid", "Grid"),
         ("h", "set_horizontal", "Horiz"),
         ("v", "set_vertical", "Vert"),
-        ("r", "force_refresh", "Refresh"),
+        ("r", "force_refresh", "Refresh now"),
+        ("plus", "faster_refresh", "Faster"),
+        ("minus", "slower_refresh", "Slower"),
+        ("?", "show_shortcuts", "Shortcuts"),
     ]
 
 
 
     def watch_refresh_rate(self, new_rate: float) -> None:
-        """React to changes in refresh rate."""
+        """React to changes in refresh rate: update the metrics timer so the selected rate is used."""
         if self._update_timer:
             self._update_timer.stop()
+            self._update_timer = None
         self._update_timer = self.set_interval(new_rate, self._update_metrics_sync)
         self.save_config()
         self._select_refresh_radio(new_rate)
@@ -445,6 +507,105 @@ class GroundControl(App):
             if layout in {"grid", "horizontal", "vertical"}:
                 self.set_layout(layout)
 
+    @on(Key)
+    def _on_key_widget_tab(self, event: Key) -> None:
+        """Handle multi-key shortcuts for widget tabs: ca/cf/cm (CPU), gp/g0p (GPU)."""
+        char = (event.character or "").lower()
+        key_name = (event.key or "").lower()
+        # Resolve digit from key name (e.g. digit0 -> 0) or character
+        digit = None
+        if len(char) == 1 and char.isdigit():
+            digit = char
+        elif key_name.startswith("digit") and len(key_name) == 6 and key_name[5].isdigit():
+            digit = key_name[5]
+        prefix = self._tab_key_prefix
+
+        if prefix is None:
+            if char == "c" or key_name == "c":
+                self._tab_key_prefix = "c"
+                event.prevent_default()
+                event.stop()
+            elif char == "g" or key_name == "g":
+                self._tab_key_prefix = "g"
+                event.prevent_default()
+                event.stop()
+            return
+
+        if prefix == "c":
+            self._tab_key_prefix = None
+            if char == "a":
+                self._switch_cpu_tab("all")
+                event.prevent_default()
+                event.stop()
+            elif char == "f":
+                self._switch_cpu_tab("affinity")
+                event.prevent_default()
+                event.stop()
+            elif char == "m":
+                self._switch_cpu_tab("user")
+                event.prevent_default()
+                event.stop()
+            return
+
+        if prefix == "g":
+            if char == "p":
+                self._tab_key_prefix = None
+                self._switch_gpu_tab(0, "processes")
+                event.prevent_default()
+                event.stop()
+            elif char == "t":
+                self._tab_key_prefix = None
+                self._switch_gpu_tab(0, "plot")
+                event.prevent_default()
+                event.stop()
+            elif digit is not None:
+                self._tab_key_prefix = f"g{digit}"
+                event.prevent_default()
+                event.stop()
+            else:
+                self._tab_key_prefix = None
+            return
+
+        if prefix and prefix.startswith("g") and len(prefix) == 2 and prefix[1].isdigit():
+            gpu_idx = int(prefix[1])
+            self._tab_key_prefix = None
+            if char == "p":
+                self._switch_gpu_tab(gpu_idx, "processes")
+                event.prevent_default()
+                event.stop()
+            elif char == "t":
+                self._switch_gpu_tab(gpu_idx, "plot")
+                event.prevent_default()
+                event.stop()
+            # any other key: clear prefix and let the key propagate
+
+    def _switch_cpu_tab(self, pane_id: str) -> None:
+        """Switch the CPU widget to the given tab (all, affinity, user)."""
+        try:
+            cpu = self.query_one(CPUWidget)
+            tabbed = cpu.query_one("#cpu-tabbed")
+            if hasattr(tabbed, "active"):
+                tabbed.active = pane_id
+            labels = {"all": "All cores", "affinity": "Affinity", "user": "My processes"}
+            # if not self._is_initializing:
+                # self.notify(labels.get(pane_id, pane_id), title="CPU tab", severity="information")
+        except Exception:
+            pass
+
+    def _switch_gpu_tab(self, gpu_index: int, pane_id: str) -> None:
+        """Switch GPU widget at gpu_index to the given tab (plot or processes)."""
+        if not self.gpu_widgets or gpu_index < 0 or gpu_index >= len(self.gpu_widgets):
+            return
+        try:
+            gpu_widget = self.gpu_widgets[gpu_index]
+            gpu_widget._set_tab(pane_id)
+            title = f"GPU {gpu_index}"
+            label = "Processes" if pane_id == "processes" else "Plot"
+            # if not self._is_initializing:
+                # self.notify(label, title=title, severity="information")
+        except Exception:
+            pass
+
     @on(Input.Submitted, "#disk-ignore-prefixes")
     async def _on_disk_ignore_prefixes_submitted(self, event: Input.Submitted) -> None:
         """Apply disk ignore prefixes and rebuild disk widgets."""
@@ -464,8 +625,11 @@ class GroundControl(App):
         """
         try:
             radio_set = self.query_one("#layout-radio-set", RadioSet)
-            for idx, btn in enumerate(radio_set.query(RadioButton)):
+            buttons = list(radio_set.query(RadioButton))
+            for idx, btn in enumerate(buttons):
                 if btn.id == f"layout-{layout}":
+                    for b in buttons:
+                        b.value = False
                     radio_set._selected = idx
                     btn.value = True
                     break
@@ -477,9 +641,14 @@ class GroundControl(App):
         """Pre-select the refresh rate RadioButton matching the given rate."""
         try:
             radio_set = self.query_one("#refresh-radio-set", RadioSet)
-            bid = f"refresh-{rate}".replace(".", "-")
-            for idx, btn in enumerate(radio_set.query(RadioButton)):
+            # Match config value to button id: 1.0 -> "refresh-1", 0.5 -> "refresh-0-5"
+            normalized = int(rate) if rate == int(rate) else rate
+            bid = f"refresh-{normalized}".replace(".", "-")
+            buttons = list(radio_set.query(RadioButton))
+            for idx, btn in enumerate(buttons):
                 if btn.id == bid:
+                    for b in buttons:
+                        b.value = False
                     radio_set._selected = idx
                     btn.value = True
                     return
@@ -502,8 +671,11 @@ class GroundControl(App):
         """Pre-select the history size RadioButton matching the given size."""
         try:
             radio_set = self.query_one("#history-radio-set", RadioSet)
-            for idx, btn in enumerate(radio_set.query(RadioButton)):
+            buttons = list(radio_set.query(RadioButton))
+            for idx, btn in enumerate(buttons):
                 if btn.id == f"history-{size}":
+                    for b in buttons:
+                        b.value = False
                     radio_set._selected = idx
                     btn.value = True
                     return
@@ -565,7 +737,11 @@ class GroundControl(App):
                         self.disk_ignore_prefixes = [p.strip() for p in str(raw).split(",") if p.strip()]
                     if not self.disk_ignore_prefixes:
                         self.disk_ignore_prefixes = ["/boot/efi"]
-                    return config.get("selected", {})
+                    raw_selected = config.get("selected", {})
+                    if not isinstance(raw_selected, dict):
+                        return {}
+                    # Normalize: only string keys, coerce values to bool so JSON true/false and edge cases work
+                    return {str(k): bool(v) for k, v in raw_selected.items()}
             except (json.JSONDecodeError, ValueError):
                 pass
         return {}
@@ -675,8 +851,58 @@ class GroundControl(App):
                 return True
         return False
 
-    def get_layout_columns(self, num_gpus: int) -> int:
-        return len(self.select.selected)
+    def get_layout_columns(self, visible_count: int) -> int:
+        """Return the number of columns for layout; value is the visible widget count from setup_widgets."""
+        return visible_count
+
+    def _apply_grid_layout_dimensions(self, visible_count: int) -> None:
+        """Update grid rows/columns and template from current layout and visible widget count.
+
+        Call this when the number of visible widgets changes so proportions update (e.g. after
+        toggling visibility in Settings). Does not mount/unmount widgets.
+        """
+        if self.grid is None:
+            return
+        grid_columns = self.get_layout_columns(visible_count)
+        if self.current_layout == "horizontal":
+            self.grid.styles.grid_size_rows = 1
+            self.grid.styles.grid_size_columns = grid_columns
+        elif self.current_layout == "vertical":
+            self.grid.styles.grid_size_rows = grid_columns
+            self.grid.styles.grid_size_columns = 1
+        elif self.current_layout == "grid":
+            if grid_columns <= 12:
+                self.grid.styles.grid_size_rows = 2
+                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
+            else:
+                self.grid.styles.grid_size_rows = 3
+                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
+        rows = self.grid.styles.grid_size_rows
+        cols = self.grid.styles.grid_size_columns
+        self.grid.styles.grid_rows = " ".join("1fr" for _ in range(rows))
+        self.grid.styles.grid_columns = " ".join("1fr" for _ in range(cols))
+
+    def _get_shortcuts_banner_text(self) -> str:
+        """Build Rich markup text listing all available key bindings for the current configuration."""
+        lines = ["[bold]Keyboard shortcuts[/]\n"]
+        key_display = {"plus": "+", "minus": "-"}
+        for key, _action, desc in self.BINDINGS:
+            k = key_display.get(key, key)
+            lines.append(f"  [bold]{k}[/]  {desc}")
+        lines.append("\n[bold]Widget tabs[/] (key sequence)")
+        lines.append("  [bold]ca[/]  CPU: All cores   [bold]cf[/]  CPU: Affinity   [bold]cm[/]  CPU: My processes")
+        n = len(self.gpu_widgets)
+        if n:
+            lines.append("  [bold]gp[/]  GPU 0: Processes   [bold]gt[/]  GPU 0: Plot")
+            for i in range(n):
+                lines.append(f"  [bold]g{i}p[/]  GPU {i}: Processes   [bold]g{i}t[/]  GPU {i}: Plot")
+        lines.append("\n[dim]Press q or Escape to close[/]")
+        return "\n".join(lines)
+
+    def action_show_shortcuts(self) -> None:
+        """Show a modal banner with all available movement and widget tab shortcuts."""
+        content = self._get_shortcuts_banner_text()
+        self.push_screen(ShortcutsScreen(content=content))
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app.
@@ -706,7 +932,7 @@ class GroundControl(App):
                         with Horizontal(id="settings-row-1"):
                             with Vertical(classes="settings-block"):
                                 yield Static(" Visible Widgets", classes="settings-section-title")
-                                self.select = SelectionList[str]()
+                                self.select = SelectionList[str](id="visible-widgets-list")
                                 yield self.select
                             with Vertical(classes="settings-block"):
                                 yield Static(" Theme", classes="settings-section-title")
@@ -768,6 +994,11 @@ class GroundControl(App):
         self.set_layout(self.load_layout())
 
         self.apply_widget_visibility()
+        # Single timer using the selected refresh rate (from config or default); stop any timer
+        # created by watch_refresh_rate when load_config() set refresh_rate, then create one.
+        if self._update_timer:
+            self._update_timer.stop()
+            self._update_timer = None
         self._update_timer = self.set_interval(self.refresh_rate, self._update_metrics_sync)
         self._select_refresh_radio(self.refresh_rate)
         self._select_history_radio(self.history_size)
@@ -818,29 +1049,19 @@ class GroundControl(App):
             disk_metrics = self.system_metrics.get_disk_metrics()
             memory_metrics = self.system_metrics.get_memory_metrics()
             temperature_metrics = self.system_metrics.get_temperature_metrics()
-            num_gpus = len(gpu_metrics)
-            grid_columns = self.get_layout_columns(num_gpus)
-            if self.current_layout == "horizontal":
-                self.grid.styles.grid_size_rows = 1
-                self.grid.styles.grid_size_columns = grid_columns
-            elif self.current_layout == "vertical":
-                self.grid.styles.grid_size_rows = grid_columns
-                self.grid.styles.grid_size_columns = 1
-            elif self.current_layout == "grid":
-                if grid_columns <= 12:
-                    self.grid.styles.grid_size_rows = 2
-                    self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
-                else:
-                    self.grid.styles.grid_size_rows = 3
-                    self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
-
-            # Force equal fractional row/column sizes so each cell gets real space.
-            # Without this, vertical (and sometimes horizontal) layout can use
-            # content-based sizing and give 0 height to plot widgets.
-            rows = self.grid.styles.grid_size_rows
-            cols = self.grid.styles.grid_size_columns
-            self.grid.styles.grid_rows = " ".join("1fr" for _ in range(rows))
-            self.grid.styles.grid_columns = " ".join("1fr" for _ in range(cols))
+            # Build widget titles in same order as mounting to compute visible count from saved config
+            _gpu_for_layout = gpu_metrics if self.gpu_indices is None else [gpu_metrics[i] for i in self.gpu_indices if 0 <= i < len(gpu_metrics)]
+            _disk_titles = [f"Disk @ {d['mountpoint']}" for d in disk_metrics["disks"] if not self._disk_mount_ignored(d["mountpoint"])]
+            _gpu_titles = [f"GPU @ {g['gpu_name']}" for g in _gpu_for_layout]
+            _visible = 2  # CPU, Memory always visible
+            if temperature_metrics:
+                _visible += 1 if bool(self.selected_widgets.get("Temperature", True)) else 0
+            for _t in _disk_titles:
+                _visible += 1 if bool(self.selected_widgets.get(_t, True)) else 0
+            _visible += 1 if bool(self.selected_widgets.get("Network", True)) else 0
+            for _t in _gpu_titles:
+                _visible += 1 if bool(self.selected_widgets.get(_t, True)) else 0
+            self._apply_grid_layout_dimensions(_visible)
 
             # Always create new widgets when setup_widgets is called
             # Resolve saved tab state for CPU widget
@@ -946,18 +1167,19 @@ class GroundControl(App):
             if not hasattr(widget, "title"):
                 continue
             widget_type = self._get_widget_type(widget)
-            # CPU and Memory are always visible; do not add them to the selector list
-            if widget_type in ("cpu", "ram"):
-                continue
-            # Prefer saved/config and user choices; use CLI filter only as default when missing
+            # CPU and Memory are always visible but still appear in the list (always selected)
             if self.allowed_types:
                 default = widget_type in self.allowed_types
             else:
                 default = True
             had_key = widget.title in self.selected_widgets
-            selected = self.selected_widgets.get(widget.title, default)
-            if not had_key:
-                self.selected_widgets[widget.title] = selected
+            if widget_type in ("cpu", "ram"):
+                selected = True
+            else:
+                selected = self.selected_widgets.get(widget.title, default)
+                if not had_key:
+                    self.selected_widgets[widget.title] = selected
+            self.selected_widgets[widget.title] = selected
 
             self.select.add_option(Selection(widget.title, widget.title, selected))
             self.selectionoptions.append(widget.title)
@@ -1018,9 +1240,11 @@ class GroundControl(App):
 
     @on(SelectionList.SelectedChanged)
     async def on_selection_list_selected(self) -> None:
-        # if event.selection:
+        # During init, create_selection_list() add_option() can emit SelectedChanged;
+        # ignore so we don't overwrite loaded config with a partial selection.
+        if self._is_initializing:
+            return
         selected = self.query_one(SelectionList).selected
-        hidden = [option for option in self.selectionoptions if option not in selected]
         self.toggle_widget_visibility(selected)
         # Update selected_widgets dictionary
         self.selected_widgets = {option: (option in selected) for option in self.selectionoptions}
@@ -1031,18 +1255,26 @@ class GroundControl(App):
 
         CPU and Memory are always shown (not in selector). In normal mode, failed
         widgets are fully hidden. In debug mode, failed widgets remain visible.
+        Updates grid dimensions so proportions change when the visible set changes.
         """
         for widget in self.grid.children:
             if not hasattr(widget, "title"):
                 continue
             wt = self._get_widget_type(widget)
-            if widget.title in self._failed_widget_titles:
-                widget.styles.display = "block" if self._debug_mode else "none"
-            elif wt in ("cpu", "ram"):
+            if wt in ("cpu", "ram"):
                 widget.styles.display = "block"
+            elif widget.title in self._failed_widget_titles:
+                widget.styles.display = "block" if self._debug_mode else "none"
             else:
                 widget.styles.display = "block" if widget.title in selected_titles else "none"
             logger.debug("Widget %s display: %s", widget.title, widget.styles.display)
+        if self.grid is not None:
+            visible_count = sum(
+                1 for w in self.grid.children
+                if hasattr(w, "title") and w.styles.display != "none"
+            )
+            self._apply_grid_layout_dimensions(visible_count)
+            self.grid.refresh()
 
     def _update_metrics_sync(self):
         """Synchronous wrapper to trigger async update_metrics"""
@@ -1327,33 +1559,35 @@ class GroundControl(App):
         """Decrease the refresh interval (faster updates).
 
         Cycles through the predefined refresh rate buttons towards faster
-        values, clamping at 0.5 s.
+        values, clamping at 0.5 s. Shows a toast with the new rate.
         """
-        rates = sorted([60, 30, 15, 10, 5, 2, 1, 0.5])  # ascending
+        rates = sorted(REFRESH_RATES)  # ascending
         current = self.refresh_rate
-        # Find next faster (smaller) rate
         for r in reversed(rates):
             if r < current - 0.01:
                 self.refresh_rate = r
+                if not self._is_initializing:
+                    self.notify(f"Refresh rate: {_refresh_label(r)}", title="Faster", severity="information")
                 return
-        # Already at fastest
-        logger.info("Refresh: already at fastest rate")
+        if not self._is_initializing:
+            self.notify("Already at fastest rate (500ms)", title="Faster", severity="information")
 
     def action_slower_refresh(self) -> None:
         """Increase the refresh interval (slower updates).
 
         Cycles through the predefined refresh rate buttons towards slower
-        values, clamping at 60 s.
+        values, clamping at 60 s. Shows a toast with the new rate.
         """
-        rates = sorted([60, 30, 15, 10, 5, 2, 1, 0.5])  # ascending
+        rates = sorted(REFRESH_RATES)  # ascending
         current = self.refresh_rate
-        # Find next slower (larger) rate
         for r in rates:
             if r > current + 0.01:
                 self.refresh_rate = r
+                if not self._is_initializing:
+                    self.notify(f"Refresh rate: {_refresh_label(r)}", title="Slower", severity="information")
                 return
-        # Already at slowest
-        logger.info("Refresh: already at slowest rate")
+        if not self._is_initializing:
+            self.notify("Already at slowest rate (1m)", title="Slower", severity="information")
 
     # def on_resize(self) -> None:
     #     if self.auto_layout:
@@ -1374,15 +1608,17 @@ class GroundControl(App):
         #         self.set_layout("grid")
 
     def set_layout(self, layout: str):
-        if layout != self.current_layout and self.grid is not None:
+        """Set layout (grid/horizontal/vertical). Rebuilds widgets only when layout actually changes."""
+        layout_changed = layout != self.current_layout
+        if layout_changed and self.grid is not None:
             self.grid.remove_class(self.current_layout)
             self.current_layout = layout
             self.grid.add_class(layout)
-        asyncio.create_task(self.setup_widgets())
+            asyncio.create_task(self.setup_widgets())
+            asyncio.create_task(self.apply_visibility_after_setup())
+        elif self.grid is None:
+            self.current_layout = layout
         self.save_layout()
-        # Apply widget visibility after changing layout
-        # We need to wait for setup_widgets to finish
-        asyncio.create_task(self.apply_visibility_after_setup())
         
     async def apply_visibility_after_setup(self):
         """Apply widget visibility after layout change and widget setup.
@@ -1408,12 +1644,13 @@ class GroundControl(App):
             if not hasattr(widget, "title"):
                 continue
             wt = self._get_widget_type(widget)
-            if widget.title in self._failed_widget_titles:
-                widget.styles.display = "block" if self._debug_mode else "none"
-            elif wt in ("cpu", "ram"):
+            # CPU and Memory are always visible (never hide even if they previously failed)
+            if wt in ("cpu", "ram"):
                 widget.styles.display = "block"
+            elif widget.title in self._failed_widget_titles:
+                widget.styles.display = "block" if self._debug_mode else "none"
             else:
-                is_visible = self.selected_widgets.get(widget.title, True)
+                is_visible = bool(self.selected_widgets.get(widget.title, True))
                 widget.styles.display = "block" if is_visible else "none"
             logger.debug("Widget %s visible: %s", widget.title, widget.styles.display != "none")
 
