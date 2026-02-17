@@ -5,7 +5,9 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static, TabbedContent, TabPane, Button
 from textual import on
+from textual.message import Message
 from textual.css.query import NoMatches
+from textual.geometry import Size
 from .base import MetricWidget
 import plotext as plt
 from ..utils.formatting import ansi2rich, align, format_size, substitute_plot_timeframe
@@ -242,6 +244,27 @@ class GPUWidget(MetricWidget):
             with TabPane("Processes", id="processes"):
                 yield GPUProcessList(id="gpu-processes", classes="gpu-processes-pane")
 
+    def on_resize(self, event: Message) -> None:
+        """Update plot dimensions; use smaller fallback height to leave room for the bar line."""
+        try:
+            plot_region = self.query_one(".metric-plot")
+            pw = getattr(plot_region.size, "width", 0) or 0
+            ph = getattr(plot_region.size, "height", 0) or 0
+            if pw > 0 and ph > 0:
+                self.plot_width = max(30, pw)
+                self.plot_height = max(8, ph)
+                self.virtual_size = Size(max(1, ph), pw)
+                self.refresh()
+                return
+        except NoMatches:
+            pass
+        w = max(0, event.size.width - 3)
+        h = max(0, event.size.height - 3)  # leave room for bar line
+        self.plot_width = max(30, w)
+        self.plot_height = max(8, h)
+        self.virtual_size = Size(max(1, event.size.height // 4), event.size.width)
+        self.refresh()
+
     def _set_tab(self, tab_id: str) -> None:
         """Programmatically switch between plot and processes tabs."""
         if tab_id not in ("plot", "processes"):
@@ -262,13 +285,15 @@ class GPUWidget(MetricWidget):
         self._set_tab("processes")
 
     def create_center_bar(
-        self, gpu_ram: float, gpu_usage: float, total_width: int
+        self, gpu_ram: float, gpu_usage: float, content_width: int
     ) -> str:
-        gpu_ram_withunits = align(format_size(gpu_ram, in_gb=True), 12, "right")
+        """Build the RAM | Usage bar, spanning content_width and centered."""
+        # Fixed label widths: 12 (ram) + 14 (usage) + 3 spaces/separator = 29
+        bar_total = max(10, content_width - 15)
+        half_width = bar_total // 2
+
+        gpu_ram_withunits = align(format_size(gpu_ram, in_gb=True), 6, "right")
         gpu_usage_withunits = align(f"{gpu_usage:.1f} %", 14, "left")
-        aval_width = total_width
-        half_width = aval_width // 2
-        # Compute the percentage relative to the current maximum value
         gpu_ram_percent = min((gpu_ram / self.max_val) * 100, 100)
         gpu_usage_percent = gpu_usage
 
@@ -297,7 +322,14 @@ class GPUWidget(MetricWidget):
             warning_color = get_rich_color("gpu_ram_warning", "#FF0000")
             gpu_ram_withunits = f"[{warning_color}]{gpu_ram_withunits}[/]"
             left_bar = left_bar.replace(f"[{gpu_ram_color}]", f"[{warning_color}]")
-        return f"{gpu_ram_withunits} {left_bar}│{right_bar} {gpu_usage_withunits}"
+
+        bar_content = f"{gpu_ram_withunits} {left_bar}│{right_bar} {gpu_usage_withunits}"
+        bar_display_len = 12 + 1 + half_width + 1 + half_width + 1 + 14
+        if content_width > bar_display_len:
+            pad_left = (content_width - bar_display_len) // 2
+            pad_right = content_width - bar_display_len - pad_left
+            return " " * pad_left + bar_content + " " * pad_right
+        return bar_content
 
     def get_dual_plot(self) -> str:
         if not self.gpu_ram_history:
@@ -310,8 +342,14 @@ class GPUWidget(MetricWidget):
         if plot_height <= 0 or plot_width <= 0:
             return "Initializing..."
 
+        # #region agent log
+        try:
+            f = open("/home/atuin/v120bb/v120bb18/ground-control/.cursor/debug.log", "a"); f.write('{"timestamp":' + str(int(__import__("time").time()*1000)) + ',"location":"gpu.py:get_dual_plot","message":"plot dimensions","data":{"plot_height":' + str(plot_height) + ',"plot_width":' + str(plot_width) + ',"height_used_plotext":' + str(plot_height) + '},"hypothesisId":"H1,H4,H5"}\n'); f.close()
+        except Exception: pass
+        # #endregion
+
         plt.clear_figure()
-        plt.plot_size(height=plot_height-2, width=plot_width)
+        plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
 
         # Plot GPU RAM as positive values and GPU Usage as negative
@@ -375,16 +413,25 @@ class GPUWidget(MetricWidget):
             "gpu_name: %s, gpu_usage: %.1f, mem_used_gb: %.2f, mem_total_gb: %.2f, processes_count: %d",
             gpu_name, gpu_usage, mem_used, mem_total, n_proc,
         )
-        total_width = (
-            self.size.width
-            - len(format_size(mem_used, in_gb=True) + " ")
-            - len(f"{gpu_usage:.1f} %")
-            - 2
-        )
+        # Use the bar container's width so the bar spans full width; fallback to widget size.
+        try:
+            bar_region = self.query_one("#current-value")
+            content_width = getattr(bar_region.size, "width", 0) or 0
+        except NoMatches:
+            content_width = 0
+        if content_width <= 0:
+            content_width = self.size.width or 0
+        # #region agent log
+        try:
+            sw = getattr(self.size, "width", None)
+            sh = getattr(self.size, "height", None)
+            f = open("/home/atuin/v120bb/v120bb18/ground-control/.cursor/debug.log", "a"); f.write('{"timestamp":' + str(int(__import__("time").time()*1000)) + ',"location":"gpu.py:update_content","message":"bar width","data":{"size_width":' + str(sw) + ',"size_height":' + str(sh) + ',"content_width":' + str(content_width) + '},"hypothesisId":"H2,H4"}\n'); f.close()
+        except Exception: pass
+        # #endregion
         try:
             self.query_one("#history-plot").update(self.get_dual_plot())
             self.query_one("#current-value").update(
-                self.create_center_bar(mem_used, gpu_usage, total_width=total_width)
+                self.create_center_bar(mem_used, gpu_usage, content_width)
             )
             if processes is not None:
                 self.query_one("#gpu-processes").update_processes(processes)

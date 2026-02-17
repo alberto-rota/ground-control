@@ -863,7 +863,7 @@ class GroundControl(App):
         """
         if self.grid is None:
             return
-        grid_columns = self.get_layout_columns(visible_count)
+        grid_columns = max(1, self.get_layout_columns(visible_count))
         if self.current_layout == "horizontal":
             self.grid.styles.grid_size_rows = 1
             self.grid.styles.grid_size_columns = grid_columns
@@ -1053,7 +1053,10 @@ class GroundControl(App):
             _gpu_for_layout = gpu_metrics if self.gpu_indices is None else [gpu_metrics[i] for i in self.gpu_indices if 0 <= i < len(gpu_metrics)]
             _disk_titles = [f"Disk @ {d['mountpoint']}" for d in disk_metrics["disks"] if not self._disk_mount_ignored(d["mountpoint"])]
             _gpu_titles = [f"GPU @ {g['gpu_name']}" for g in _gpu_for_layout]
-            _visible = 2  # CPU, Memory always visible
+            cpu_title = f"{cpu_metrics['cpu_name']}"
+            _visible = 0
+            _visible += 1 if bool(self.selected_widgets.get(cpu_title, True)) else 0
+            _visible += 1 if bool(self.selected_widgets.get("Memory", True)) else 0
             if temperature_metrics:
                 _visible += 1 if bool(self.selected_widgets.get("Temperature", True)) else 0
             for _t in _disk_titles:
@@ -1064,8 +1067,7 @@ class GroundControl(App):
             self._apply_grid_layout_dimensions(_visible)
 
             # Always create new widgets when setup_widgets is called
-            # Resolve saved tab state for CPU widget
-            cpu_title = f"{cpu_metrics['cpu_name']}"
+            # Resolve saved tab state for CPU widget (cpu_title already set above)
             cpu_initial_tab = self._widget_tab_states.get(cpu_title, "all")
             cpu_widget = CPUWidget(cpu_title, initial_tab=cpu_initial_tab)
             memory_widget = MemoryWidget("Memory")
@@ -1167,18 +1169,14 @@ class GroundControl(App):
             if not hasattr(widget, "title"):
                 continue
             widget_type = self._get_widget_type(widget)
-            # CPU and Memory are always visible but still appear in the list (always selected)
             if self.allowed_types:
                 default = widget_type in self.allowed_types
             else:
                 default = True
             had_key = widget.title in self.selected_widgets
-            if widget_type in ("cpu", "ram"):
-                selected = True
-            else:
-                selected = self.selected_widgets.get(widget.title, default)
-                if not had_key:
-                    self.selected_widgets[widget.title] = selected
+            selected = self.selected_widgets.get(widget.title, default)
+            if not had_key:
+                self.selected_widgets[widget.title] = selected
             self.selected_widgets[widget.title] = selected
 
             self.select.add_option(Selection(widget.title, widget.title, selected))
@@ -1253,17 +1251,14 @@ class GroundControl(App):
     def toggle_widget_visibility(self, selected_titles) -> None:
         """Toggle widget visibility based on selected titles.
 
-        CPU and Memory are always shown (not in selector). In normal mode, failed
-        widgets are fully hidden. In debug mode, failed widgets remain visible.
-        Updates grid dimensions so proportions change when the visible set changes.
+        In normal mode, failed widgets are fully hidden. In debug mode, failed
+        widgets remain visible. Updates grid dimensions when the visible set changes.
         """
         for widget in self.grid.children:
             if not hasattr(widget, "title"):
                 continue
             wt = self._get_widget_type(widget)
-            if wt in ("cpu", "ram"):
-                widget.styles.display = "block"
-            elif widget.title in self._failed_widget_titles:
+            if widget.title in self._failed_widget_titles:
                 widget.styles.display = "block" if self._debug_mode else "none"
             else:
                 widget.styles.display = "block" if widget.title in selected_titles else "none"
@@ -1644,10 +1639,7 @@ class GroundControl(App):
             if not hasattr(widget, "title"):
                 continue
             wt = self._get_widget_type(widget)
-            # CPU and Memory are always visible (never hide even if they previously failed)
-            if wt in ("cpu", "ram"):
-                widget.styles.display = "block"
-            elif widget.title in self._failed_widget_titles:
+            if widget.title in self._failed_widget_titles:
                 widget.styles.display = "block" if self._debug_mode else "none"
             else:
                 is_visible = bool(self.selected_widgets.get(widget.title, True))

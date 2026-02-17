@@ -285,7 +285,7 @@ class CPUWidget(MetricWidget):
         )
         # Clamp so plotext gets valid size when layout has not run yet (e.g. after layout change)
         width = max(10, (self.size.width or 0) - 1)
-        height = max(4, (self.size.height or 0) - 4)  # border + tab bar
+        height = max(4, (self.size.height or 0) - 3)  # border + tab bar
 
         for mode in VIEW_MODES:
             display_percentages, labels_override = self._get_display_for_mode(mode, cpu_percentages, n)

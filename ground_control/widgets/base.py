@@ -58,6 +58,9 @@ class MetricWidget(Static):
         match the plot region (not the whole widget). Fallback: widget size minus
         a small margin. Min 8x30 keeps plotext readable.
         """
+        # #region agent log
+        used_plot_region = False
+        pw, ph = 0, 0
         try:
             plot_region = self.query_one(".metric-plot")
             pw = getattr(plot_region.size, "width", 0) or 0
@@ -68,6 +71,10 @@ class MetricWidget(Static):
                 rows = max(1, ph)
                 self.virtual_size = Size(rows, pw)
                 self.refresh()
+                used_plot_region = True
+                try:
+                    f = open("/home/atuin/v120bb/v120bb18/ground-control/.cursor/debug.log", "a"); f.write('{"timestamp":' + str(int(__import__("time").time()*1000)) + ',"location":"base.py:on_resize","message":"resize using plot_region","data":{"event_w":' + str(event.size.width) + ',"event_h":' + str(event.size.height) + ',"pw":' + str(pw) + ',"ph":' + str(ph) + ',"plot_width":' + str(self.plot_width) + ',"plot_height":' + str(self.plot_height) + ',"used_plot_region":true},"hypothesisId":"H1,H3"}\n'); f.close()
+                except Exception: pass
                 return
         except NoMatches:
             pass
@@ -78,6 +85,10 @@ class MetricWidget(Static):
         rows = max(1, event.size.height // 4)
         self.virtual_size = Size(rows, event.size.width)
         self.refresh()
+        try:
+            f = open("/home/atuin/v120bb/v120bb18/ground-control/.cursor/debug.log", "a"); f.write('{"timestamp":' + str(int(__import__("time").time()*1000)) + ',"location":"base.py:on_resize","message":"resize fallback","data":{"event_w":' + str(event.size.width) + ',"event_h":' + str(event.size.height) + ',"pw":' + str(pw) + ',"ph":' + str(ph) + ',"plot_width":' + str(self.plot_width) + ',"plot_height":' + str(self.plot_height) + ',"used_plot_region":false},"hypothesisId":"H1,H3,H5"}\n'); f.close()
+        except Exception: pass
+        # #endregion
 
     def get_plot(self, y_min=0, y_max=100) -> str:
         if not self.history:

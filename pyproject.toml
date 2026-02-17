@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ground-control-tui"
-version = "1.3.0"
+version = "1.3.2"
 description = "A Python Textual app for monitoring hardware in the terminal"
 readme = "README.md"
 authors = [{ name = "Alberto Rota", email = "alberto1.rota@polimi.it" }]
