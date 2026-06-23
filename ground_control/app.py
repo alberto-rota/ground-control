@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import queue
 from textual.app import App, ComposeResult
@@ -17,20 +19,22 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection
 from textual.reactive import reactive
+from textual.binding import Binding
 from textual import on
 import math
 import os
 import json
 import logging
 import traceback
-from textual.events import Key, Mount
 from ground_control.widgets.cpu import CPUWidget
 from ground_control.widgets.disk import DiskIOWidget
 from ground_control.widgets.network import NetworkIOWidget
 from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
 from ground_control.widgets.temperature import TemperatureWidget
+from ground_control.widgets.slurm_jobs import SlurmJobsWidget
 from ground_control.utils.system_metrics import SystemMetrics
+from ground_control.utils import slurm as slurm_utils
 from ground_control.utils.colors import (
     load_colors,
     load_theme,
@@ -168,18 +172,154 @@ class ShortcutsScreen(ModalScreen):
         self.app.pop_screen()
 
 
+def _job_option_label(job: dict) -> str:
+    """Build a one-line Rich label for a job in the selection picker."""
+    jid = job.get("jobid", "?")
+    state = (job.get("state") or "").upper()
+    name = (job.get("name") or "")[:24]
+    part = job.get("partition") or ""
+    nodes = job.get("nodes") or ""
+    elapsed = job.get("elapsed") or ""
+    state_color = {
+        "RUNNING": "green", "PENDING": "yellow", "COMPLETING": "cyan",
+        "SUSPENDED": "magenta",
+    }.get(state, "white")
+    return (
+        f"[bold]{jid:<10}[/] [{state_color}]{state:<10}[/] "
+        f"{name:<26} [dim]{part:<10} {nodes:>2}n  {elapsed}[/]"
+    )
+
+
+class JobSelectScreen(ModalScreen):
+    """Modal to pick which Slurm jobs to monitor (multi-select, keyboard-first).
+
+    Dismisses with the list of selected job ids, or ``None`` if cancelled.
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("a", "toggle_all", "All/none"),
+        Binding("enter", "confirm", "Monitor", priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    JobSelectScreen {
+        align: center middle;
+    }
+    #job-select-box {
+        width: 84;
+        max-width: 95%;
+        height: auto;
+        max-height: 80%;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #job-select-title {
+        text-style: bold;
+        height: 1;
+        margin-bottom: 1;
+    }
+    #job-select-list {
+        height: auto;
+        max-height: 20;
+        background: transparent;
+        border: none;
+    }
+    #job-select-hint {
+        height: 1;
+        margin-top: 1;
+    }
+    #job-select-buttons {
+        height: auto;
+        margin-top: 1;
+        align-horizontal: right;
+    }
+    #job-select-buttons Button {
+        margin-left: 2;
+    }
+    """
+
+    def __init__(self, jobs: list, preselected: set | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self._jobs = jobs or []
+        self._preselected = preselected or set()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="job-select-box"):
+            yield Static("Select Slurm jobs to monitor", id="job-select-title")
+            if not self._jobs:
+                yield Static(
+                    "[dim]No jobs found in your queue.[/]\n\n"
+                    "[dim]Press Escape to close.[/]",
+                    id="job-select-empty",
+                )
+            else:
+                options = [
+                    Selection(
+                        _job_option_label(job),
+                        job.get("jobid"),
+                        job.get("jobid") in self._preselected,
+                    )
+                    for job in self._jobs
+                ]
+                yield SelectionList[str](*options, id="job-select-list")
+                yield Static(
+                    "[dim]space: toggle · a: all/none · enter: monitor · esc: cancel[/]",
+                    id="job-select-hint",
+                )
+                with Horizontal(id="job-select-buttons"):
+                    yield Button("Monitor", variant="success", id="job-confirm")
+                    yield Button("Cancel", id="job-cancel")
+
+    def action_confirm(self) -> None:
+        try:
+            sl = self.query_one("#job-select-list", SelectionList)
+            self.dismiss(list(sl.selected))
+        except Exception:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_toggle_all(self) -> None:
+        try:
+            sl = self.query_one("#job-select-list", SelectionList)
+        except Exception:
+            return
+        if set(sl.selected):
+            sl.deselect_all()
+        else:
+            sl.select_all()
+
+    @on(Button.Pressed, "#job-confirm")
+    def _confirm_btn(self) -> None:
+        self.action_confirm()
+
+    @on(Button.Pressed, "#job-cancel")
+    def _cancel_btn(self) -> None:
+        self.action_cancel()
+
+
 class GroundControl(App):
     """App uses only its own themes (themes/*.json); Textual built-in themes are disabled."""
 
     CSS_PATH: list[str] = []  # Do not load any Textual theme; all styling comes from _generate_css() and our theme JSONs
 
-    def __init__(self, allowed_types: set[str] | None = None, gpu_indices: list[int] | None = None, debug: bool = False):
+    def __init__(self, allowed_types: set[str] | None = None, gpu_indices: list[int] | None = None,
+                 debug: bool = False, all_gpus: bool = False, squeue: bool = False):
         super().__init__()
         # Load colors and generate CSS dynamically
         self._color_config = load_colors()
         self._generate_css()
 
-        self.system_metrics = SystemMetrics()
+        self.system_metrics = SystemMetrics(all_gpus=all_gpus)
+        # Slurm job monitoring (--squeue). The widget is only added to the grid
+        # when squeue_mode is on; the monitor throttles its own polling.
+        self.squeue_mode = squeue
+        self.slurm_jobs_widget = None
+        self._slurm_monitor = slurm_utils.SlurmMonitor()
+        self._monitored_jobids: list[str] = []
         self.gpu_widgets = []
         self.disk_widgets = []
         self.temperature_widget = None
@@ -204,8 +344,6 @@ class GroundControl(App):
         self._setup_lock: asyncio.Lock = asyncio.Lock()
         # Disk mount paths to hide: any mountpoint that starts with one of these (after normalizing) is skipped
         self.disk_ignore_prefixes: list[str] = ["/boot/efi"]
-        # Multi-key widget tab shortcuts: None | "c" (expect a/f/m) | "g" (expect p or 0-9) | "g0"-"g9" (expect p or any for plot)
-        self._tab_key_prefix: str | None = None
 
     def _refresh_stylesheet(self) -> None:
         """Replace the app's CSS in the stylesheet with current self.CSS and re-apply to the DOM."""
@@ -278,11 +416,16 @@ class GroundControl(App):
         width: 100%;
         height: 100%;
     }}
-    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget {{
+    GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget, SlurmJobsWidget {{
         background: {tok["bg"]};
         border: round {tok["border"]};
         min-height: 14;
         color: {tok["text"]};
+    }}
+    /* Highlight the focused panel so keyboard navigation is visible */
+    GPUWidget:focus, NetworkIOWidget:focus, DiskIOWidget:focus, CPUWidget:focus, MemoryWidget:focus, TemperatureWidget:focus, SlurmJobsWidget:focus,
+    GPUWidget:focus-within, CPUWidget:focus-within, SlurmJobsWidget:focus-within {{
+        border: round {tok["selection"]};
     }}
 
     Tab {{
@@ -424,18 +567,35 @@ class GroundControl(App):
     MAX_REFRESH_RATE = 100
     REFRESH_STEP = 0.05
 
+    # Keyboard map. Single-key, conflict-free. Less-common actions are kept off
+    # the footer (show=False) but are listed in the ? help overlay. Per-panel
+    # keys (CPU 1/2/3, GPU 1/2/p, x=hide) are local bindings on the widgets and
+    # only fire when that panel is focused.
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("d", "open_dashboard", "Dashboard"),
-        ("s", "open_settings", "Settings"),
-        ("l", "open_logs", "Logs"),
-        ("g", "set_grid", "Grid"),
-        ("h", "set_horizontal", "Horiz"),
-        ("v", "set_vertical", "Vert"),
-        ("r", "force_refresh", "Refresh now"),
-        ("plus", "faster_refresh", "Faster"),
-        ("minus", "slower_refresh", "Slower"),
-        ("?", "show_shortcuts", "Shortcuts"),
+        # Views
+        Binding("d", "open_dashboard", "Dash"),
+        Binding("s", "open_settings", "Settings"),
+        Binding("l", "open_logs", "Logs"),
+        # Layout
+        Binding("g", "set_grid", "Grid"),
+        Binding("h", "set_horizontal", "Horiz"),
+        Binding("v", "set_vertical", "Vert"),
+        Binding("space", "cycle_layout", "Cycle layout", show=False),
+        # Refresh rate
+        Binding("r", "force_refresh", "Refresh"),
+        Binding("plus", "faster_refresh", "Faster"),
+        Binding("equals_sign", "faster_refresh", "Faster", show=False),
+        Binding("minus", "slower_refresh", "Slower"),
+        # Theme
+        Binding("t", "cycle_theme", "Theme", show=False),
+        # Focus a dashboard panel (then use its local keys)
+        Binding("right_square_bracket", "focus_next_widget", "Next panel", show=False),
+        Binding("left_square_bracket", "focus_prev_widget", "Prev panel", show=False),
+        # Slurm
+        Binding("J", "select_jobs", "Jobs"),
+        # Help / quit
+        Binding("question_mark", "show_shortcuts", "Help"),
+        Binding("q", "quit", "Quit"),
     ]
 
 
@@ -506,105 +666,6 @@ class GroundControl(App):
             layout = btn.id.replace("layout-", "")
             if layout in {"grid", "horizontal", "vertical"}:
                 self.set_layout(layout)
-
-    @on(Key)
-    def _on_key_widget_tab(self, event: Key) -> None:
-        """Handle multi-key shortcuts for widget tabs: ca/cf/cm (CPU), gp/g0p (GPU)."""
-        char = (event.character or "").lower()
-        key_name = (event.key or "").lower()
-        # Resolve digit from key name (e.g. digit0 -> 0) or character
-        digit = None
-        if len(char) == 1 and char.isdigit():
-            digit = char
-        elif key_name.startswith("digit") and len(key_name) == 6 and key_name[5].isdigit():
-            digit = key_name[5]
-        prefix = self._tab_key_prefix
-
-        if prefix is None:
-            if char == "c" or key_name == "c":
-                self._tab_key_prefix = "c"
-                event.prevent_default()
-                event.stop()
-            elif char == "g" or key_name == "g":
-                self._tab_key_prefix = "g"
-                event.prevent_default()
-                event.stop()
-            return
-
-        if prefix == "c":
-            self._tab_key_prefix = None
-            if char == "a":
-                self._switch_cpu_tab("all")
-                event.prevent_default()
-                event.stop()
-            elif char == "f":
-                self._switch_cpu_tab("affinity")
-                event.prevent_default()
-                event.stop()
-            elif char == "m":
-                self._switch_cpu_tab("user")
-                event.prevent_default()
-                event.stop()
-            return
-
-        if prefix == "g":
-            if char == "p":
-                self._tab_key_prefix = None
-                self._switch_gpu_tab(0, "processes")
-                event.prevent_default()
-                event.stop()
-            elif char == "t":
-                self._tab_key_prefix = None
-                self._switch_gpu_tab(0, "plot")
-                event.prevent_default()
-                event.stop()
-            elif digit is not None:
-                self._tab_key_prefix = f"g{digit}"
-                event.prevent_default()
-                event.stop()
-            else:
-                self._tab_key_prefix = None
-            return
-
-        if prefix and prefix.startswith("g") and len(prefix) == 2 and prefix[1].isdigit():
-            gpu_idx = int(prefix[1])
-            self._tab_key_prefix = None
-            if char == "p":
-                self._switch_gpu_tab(gpu_idx, "processes")
-                event.prevent_default()
-                event.stop()
-            elif char == "t":
-                self._switch_gpu_tab(gpu_idx, "plot")
-                event.prevent_default()
-                event.stop()
-            # any other key: clear prefix and let the key propagate
-
-    def _switch_cpu_tab(self, pane_id: str) -> None:
-        """Switch the CPU widget to the given tab (all, affinity, user)."""
-        try:
-            cpu = self.query_one(CPUWidget)
-            tabbed = cpu.query_one("#cpu-tabbed")
-            if hasattr(tabbed, "active"):
-                tabbed.active = pane_id
-            labels = {"all": "All cores", "affinity": "Affinity", "user": "My processes"}
-            # if not self._is_initializing:
-                # self.notify(labels.get(pane_id, pane_id), title="CPU tab", severity="information")
-        except Exception:
-            pass
-
-    def _switch_gpu_tab(self, gpu_index: int, pane_id: str) -> None:
-        """Switch GPU widget at gpu_index to the given tab (plot or processes)."""
-        if not self.gpu_widgets or gpu_index < 0 or gpu_index >= len(self.gpu_widgets):
-            return
-        try:
-            gpu_widget = self.gpu_widgets[gpu_index]
-            gpu_widget._set_tab(pane_id)
-            title = f"GPU {gpu_index}"
-            label = "Processes" if pane_id == "processes" else "Plot"
-            # if not self._is_initializing:
-                # self.notify(label, title=title, severity="information")
-        except Exception:
-            pass
 
     @on(Input.Submitted, "#disk-ignore-prefixes")
     async def _on_disk_ignore_prefixes_submitted(self, event: Input.Submitted) -> None:
@@ -883,19 +944,32 @@ class GroundControl(App):
         self.grid.styles.grid_columns = " ".join("1fr" for _ in range(cols))
 
     def _get_shortcuts_banner_text(self) -> str:
-        """Build Rich markup text listing all available key bindings for the current configuration."""
+        """Build Rich markup text listing all key bindings, grouped by purpose."""
+        def row(k: str, desc: str) -> str:
+            return f"  [bold]{k:<7}[/] {desc}"
+
         lines = ["[bold]Keyboard shortcuts[/]\n"]
-        key_display = {"plus": "+", "minus": "-"}
-        for key, _action, desc in self.BINDINGS:
-            k = key_display.get(key, key)
-            lines.append(f"  [bold]{k}[/]  {desc}")
-        lines.append("\n[bold]Widget tabs[/] (key sequence)")
-        lines.append("  [bold]ca[/]  CPU: All cores   [bold]cf[/]  CPU: Affinity   [bold]cm[/]  CPU: My processes")
-        n = len(self.gpu_widgets)
-        if n:
-            lines.append("  [bold]gp[/]  GPU 0: Processes   [bold]gt[/]  GPU 0: Plot")
-            for i in range(n):
-                lines.append(f"  [bold]g{i}p[/]  GPU {i}: Processes   [bold]g{i}t[/]  GPU {i}: Plot")
+        lines.append("[bold]Views[/]")
+        lines += [row("d", "Dashboard"), row("s", "Settings (jumps to widget list)"), row("l", "Logs")]
+        lines.append("\n[bold]Layout[/]")
+        lines += [row("g", "Grid"), row("h", "Horizontal"), row("v", "Vertical"), row("space", "Cycle layout")]
+        lines.append("\n[bold]Refresh & theme[/]")
+        lines += [row("r", "Refresh now"), row("+ / -", "Faster / slower"), row("t", "Cycle theme")]
+        lines.append("\n[bold]Dashboard panels[/]")
+        lines += [
+            row("] / [", "Focus next / previous panel"),
+            row("tab", "Focus next panel"),
+            row("x", "Hide focused panel"),
+        ]
+        lines.append("  [dim]When a panel is focused:[/]")
+        lines += [
+            row("1 2 3", "CPU: All cores / Affinity / My processes"),
+            row("1 2 / p", "GPU: Plot / Processes"),
+        ]
+        lines.append("\n[bold]Slurm[/]")
+        lines += [row("J", "Select jobs to monitor (--squeue)")]
+        lines.append("\n[bold]Other[/]")
+        lines += [row("?", "This help"), row("q", "Quit")]
         lines.append("\n[dim]Press q or Escape to close[/]")
         return "\n".join(lines)
 
@@ -1019,6 +1093,14 @@ class GroundControl(App):
         self._log_handler = rich_handler
         self._log_drain_timer = self.set_interval(0.15, self._drain_log_queue)
 
+        # In --squeue mode, prompt for which jobs to monitor once the UI is live.
+        if self.squeue_mode:
+            if slurm_utils.slurm_available():
+                self.call_after_refresh(lambda: asyncio.create_task(self.action_select_jobs()))
+            else:
+                self.notify("Slurm not found; --squeue panel will be empty.",
+                            title="Slurm", severity="warning")
+
     def _drain_log_queue(self) -> None:
         """Drain pending log lines from the queue into the RichLog (called on main thread)."""
         try:
@@ -1064,6 +1146,8 @@ class GroundControl(App):
             _visible += 1 if bool(self.selected_widgets.get("Network", True)) else 0
             for _t in _gpu_titles:
                 _visible += 1 if bool(self.selected_widgets.get(_t, True)) else 0
+            if self.squeue_mode:
+                _visible += 1 if bool(self.selected_widgets.get("Slurm Jobs", True)) else 0
             self._apply_grid_layout_dimensions(_visible)
 
             # Always create new widgets when setup_widgets is called
@@ -1124,11 +1208,21 @@ class GroundControl(App):
                 )
                 self.gpu_widgets.append(gpu_widget)
                 await self.grid.mount(gpu_widget)
-            
+
+            # Slurm jobs widget (only in --squeue mode)
+            self.slurm_jobs_widget = None
+            if self.squeue_mode:
+                self.slurm_jobs_widget = SlurmJobsWidget("Slurm Jobs", id="slurm_jobs")
+                await self.grid.mount(self.slurm_jobs_widget)
+
             logger.info(f"Setup complete: {len(self.disk_widgets)} disk widgets, {len(self.gpu_widgets)} GPU widgets")
-            
+
             # Update selection list after widgets are created
             self.create_selection_list()
+            # Push current monitored jobs into the freshly-mounted widget
+            # (use cache to avoid a blocking subprocess on the main thread).
+            if self.slurm_jobs_widget is not None:
+                self._refresh_slurm_widget(self._slurm_monitor.cached())
 
     def create_json(self) -> None:
         """Create the initial config file with all current state.
@@ -1169,7 +1263,10 @@ class GroundControl(App):
             if not hasattr(widget, "title"):
                 continue
             widget_type = self._get_widget_type(widget)
-            if self.allowed_types:
+            if widget_type == "slurm":
+                # The Slurm panel is opt-in via --squeue, so always default it on.
+                default = True
+            elif self.allowed_types:
                 default = widget_type in self.allowed_types
             else:
                 default = True
@@ -1196,6 +1293,8 @@ class GroundControl(App):
             return "net"
         elif isinstance(widget, TemperatureWidget):
             return "temp"
+        elif isinstance(widget, SlurmJobsWidget):
+            return "slurm"
         return "unknown"
 
     # Metric types required per widget type (used to collect only what visible widgets need)
@@ -1206,6 +1305,7 @@ class GroundControl(App):
         "net": ["network"],
         "gpu": ["gpu"],
         "temp": ["temperature"],
+        "slurm": ["slurm"],
     }
 
     def _get_required_metric_types(self, widget) -> set:
@@ -1306,6 +1406,7 @@ class GroundControl(App):
                 "network": self.system_metrics.get_network_metrics,
                 "gpu": self.system_metrics.get_gpu_metrics,
                 "temperature": self.system_metrics.get_temperature_metrics,
+                "slurm": self._slurm_monitor.poll,
             }
             tasks = [loop.run_in_executor(None, collectors[t]) for t in required_types]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1418,6 +1519,23 @@ class GroundControl(App):
             temp = metrics_by_type.get("temperature")
             if temp is not None:
                 await self._update_temperature_widget(widget, temp)
+        elif isinstance(widget, SlurmJobsWidget):
+            self._refresh_slurm_widget(metrics_by_type.get("slurm"))
+
+    def _refresh_slurm_widget(self, jobs) -> None:
+        """Update the Slurm jobs widget, choosing an informative empty-state note."""
+        if self.slurm_jobs_widget is None:
+            return
+        note = None
+        if not slurm_utils.slurm_available():
+            note = "Slurm not available on this system."
+        elif not self._monitored_jobids:
+            note = "No jobs selected — press [bold]J[/] to choose."
+        try:
+            self.slurm_jobs_widget.update_jobs(jobs or [], note=note)
+        except Exception:
+            if self._debug_mode:
+                raise
     
     async def _update_cpu_widget(self, widget, cpu_metrics):
         """Update CPU widget (plot operations on main thread due to plotext)."""
@@ -1473,29 +1591,49 @@ class GroundControl(App):
         if self.auto_layout:
             self.update_layout()
 
+    def _apply_layout_from_key(self, layout: str) -> None:
+        """Set a layout and keep the Settings radio in sync (for keyboard use)."""
+        self.set_layout(layout)
+        self._select_layout_radio(layout)
+
     def action_set_horizontal(self) -> None:
-        # self.auto_layout = False
-        self.set_layout("horizontal")
+        self._apply_layout_from_key("horizontal")
 
     def action_set_vertical(self) -> None:
-        # self.auto_layout = False
-        self.set_layout("vertical")
+        self._apply_layout_from_key("vertical")
 
     def action_set_grid(self) -> None:
-        # self.auto_layout = False
-        self.set_layout("grid")
+        self._apply_layout_from_key("grid")
+
+    def action_cycle_layout(self) -> None:
+        """Cycle grid -> horizontal -> vertical -> grid (single-key)."""
+        order = ["grid", "horizontal", "vertical"]
+        cur = getattr(self, "current_layout", "grid")
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "grid"
+        self._apply_layout_from_key(nxt)
+        if not self._is_initializing:
+            self.notify(f"Layout: {nxt}", title="Layout", severity="information")
 
     def action_quit(self) -> None:
         self.exit()
 
     def action_open_settings(self) -> None:
-        """Switch to the Settings tab."""
+        """Switch to the Settings tab and focus the widget list for fast toggling."""
         try:
             root_tabs = self.query_one("#root-tabs", TabbedContent)
             root_tabs.active = "settings"
+            # Focus the visibility list so the user can immediately toggle
+            # widgets with arrows + space — "change displayed widgets" in 2 keys.
+            self.call_after_refresh(self._focus_widget_list)
         except Exception:
             if self._debug_mode:
                 raise
+
+    def _focus_widget_list(self) -> None:
+        try:
+            self.query_one("#visible-widgets-list", SelectionList).focus()
+        except Exception:
+            pass
 
     def action_open_dashboard(self) -> None:
         """Switch back to the main Dashboard tab."""
@@ -1515,6 +1653,58 @@ class GroundControl(App):
             if self._debug_mode:
                 raise
 
+    async def action_select_jobs(self) -> None:
+        """Open the Slurm job picker (works any time; enables --squeue mode)."""
+        if not slurm_utils.slurm_available():
+            self.notify("Slurm not found (squeue is not on PATH).",
+                        title="Slurm", severity="warning")
+            return
+        # Fetch the queue off the UI thread so a slow controller can't freeze us.
+        loop = asyncio.get_event_loop()
+        try:
+            jobs = await loop.run_in_executor(None, slurm_utils.get_user_jobs)
+        except Exception as e:
+            logger.error("Failed to list Slurm jobs: %s", e)
+            self.notify("Failed to query Slurm jobs (see Logs).",
+                        title="Slurm", severity="error")
+            return
+        self.push_screen(
+            JobSelectScreen(jobs, set(self._monitored_jobids)),
+            self._on_jobs_selected,
+        )
+
+    def _on_jobs_selected(self, jobids) -> None:
+        """Callback from JobSelectScreen with the chosen job ids (or None)."""
+        if jobids is None:
+            return  # cancelled
+        self._monitored_jobids = [str(j) for j in jobids]
+        self._slurm_monitor.set_jobs(self._monitored_jobids)
+        logger.info("Now monitoring Slurm jobs: %s", self._monitored_jobids)
+        if not self.squeue_mode:
+            # Pressing J without --squeue enables the panel on the fly.
+            self.squeue_mode = True
+            asyncio.create_task(self._enable_squeue_and_refresh())
+        else:
+            asyncio.create_task(self._poll_and_refresh_slurm())
+
+    async def _enable_squeue_and_refresh(self) -> None:
+        """Rebuild widgets so the Slurm panel appears, then refresh it."""
+        await self.setup_widgets()
+        self.apply_widget_visibility()
+        await self._poll_and_refresh_slurm()
+
+    async def _poll_and_refresh_slurm(self) -> None:
+        """Force a Slurm poll off-thread and push results into the widget."""
+        if self.slurm_jobs_widget is None:
+            return
+        loop = asyncio.get_event_loop()
+        try:
+            jobs = await loop.run_in_executor(None, lambda: self._slurm_monitor.poll(force=True))
+        except Exception as e:
+            logger.error("Slurm poll failed: %s", e)
+            jobs = self._slurm_monitor.cached()
+        self._refresh_slurm_widget(jobs)
+
     def _iter_visible_metric_widgets(self):
         """Return a list of visible metric widgets in the grid, in DOM order."""
         if self.grid is None:
@@ -1527,6 +1717,13 @@ class GroundControl(App):
 
     def _focus_widget_by_offset(self, offset: int) -> None:
         """Move focus to the next/previous visible metric widget."""
+        # Panel focus only makes sense on the dashboard; switch there first.
+        try:
+            root_tabs = self.query_one("#root-tabs", TabbedContent)
+            if root_tabs.active != "dashboard":
+                root_tabs.active = "dashboard"
+        except Exception:
+            pass
         widgets = self._iter_visible_metric_widgets()
         if not widgets:
             return
@@ -1534,7 +1731,7 @@ class GroundControl(App):
         try:
             idx = widgets.index(current)
         except ValueError:
-            idx = 0
+            idx = -1 if offset > 0 else 0
         new_idx = (idx + offset) % len(widgets)
         try:
             self.set_focus(widgets[new_idx])
@@ -1545,6 +1742,71 @@ class GroundControl(App):
     def action_focus_next_widget(self) -> None:
         """Cycle focus to the next visible metric widget in the dashboard grid."""
         self._focus_widget_by_offset(1)
+
+    def action_focus_prev_widget(self) -> None:
+        """Cycle focus to the previous visible metric widget in the dashboard grid."""
+        self._focus_widget_by_offset(-1)
+
+    def _hide_widget(self, widget) -> None:
+        """Hide a dashboard panel (triggered by the panel's local 'x' binding)."""
+        title = getattr(widget, "title", None)
+        if not title:
+            return
+        self.selected_widgets[title] = False
+        # Keep the Settings selection list in sync.
+        try:
+            self.select.deselect(title)
+        except Exception:
+            pass
+        widget.styles.display = "none"
+        if self.grid is not None:
+            visible_count = sum(
+                1 for w in self.grid.children
+                if hasattr(w, "title") and w.styles.display != "none"
+            )
+            self._apply_grid_layout_dimensions(visible_count)
+            self.grid.refresh()
+        self.save_config()
+        if not self._is_initializing:
+            self.notify(f"Hid {title} — press s to manage widgets",
+                        title="Widget hidden", severity="information")
+
+    def _detect_current_theme(self) -> str | None:
+        """Return the name of the theme whose palette matches the current config."""
+        try:
+            if not os.path.exists(CONFIG_FILE):
+                return None
+            with open(CONFIG_FILE, "r") as f:
+                current_colors = json.load(f).get("colors", {})
+            for name in get_available_themes():
+                if (load_theme(name) or {}) == current_colors:
+                    return name
+        except Exception:
+            pass
+        return None
+
+    def action_cycle_theme(self) -> None:
+        """Cycle to the next available theme and apply it live (single-key)."""
+        themes = get_available_themes()
+        if not themes:
+            return
+        cur = self._detect_current_theme()
+        idx = (themes.index(cur) + 1) % len(themes) if cur in themes else 0
+        name = themes[idx]
+        self._apply_theme_from_ui(name)
+        # Reflect the change in the Settings radio set.
+        try:
+            radio_set = self.query_one("#theme-radio-set", RadioSet)
+            for i, btn in enumerate(radio_set.query(RadioButton)):
+                if btn.id == f"theme-{name}":
+                    radio_set._selected = i
+                    btn.value = True
+                else:
+                    btn.value = False
+        except Exception:
+            pass
+        if not self._is_initializing:
+            self.notify(f"Theme: {name}", title="Theme", severity="information")
 
     def action_force_refresh(self) -> None:
         """Force an immediate metrics refresh."""

@@ -6,22 +6,97 @@ import glob
 import subprocess
 import random
 import math
+import logging
+from typing import List, Union, Dict, Optional
+
+logger = logging.getLogger("ground-control.metrics")
+
+# NVML (nvidia-ml-py) and nvitop are optional. On login nodes, CPU-only nodes,
+# machines without an NVIDIA driver, or where the driver/NVML mismatches, these
+# imports or nvmlInit() can fail. Treat GPU support as entirely best-effort so
+# the rest of the monitor keeps working.
 try:
     import pynvml
     pynvml.nvmlInit()
     NVML_AVAILABLE = True
-except:
+except Exception as _nvml_err:  # noqa: BLE001 - any failure means "no NVML"
+    pynvml = None
     NVML_AVAILABLE = False
-from nvitop import Device, MigDevice,NA
-from typing import List, Union, Dict, Optional
-import nvitop  # Ensure nvitop is installed: pip install nvitop
+    logger.info("NVML unavailable, GPU metrics disabled: %s", _nvml_err)
 
-import platform
-import subprocess
+try:
+    import nvitop
+    from nvitop import Device, MigDevice, NA
+    NVITOP_AVAILABLE = True
+except Exception as _nvitop_err:  # noqa: BLE001
+    nvitop = None
+    Device = MigDevice = None
+    NA = None  # sentinel; `x is not NA` then behaves like `x is not None`
+    NVITOP_AVAILABLE = False
+    logger.info("nvitop unavailable, GPU metrics disabled: %s", _nvitop_err)
+
 import multiprocessing
 
+
+def _parse_visible_gpu_spec(spec: Optional[str]) -> Optional[object]:
+    """Parse a CUDA_VISIBLE_DEVICES-style string into a filter.
+
+    Returns one of:
+      * ``None``  -> no restriction (caller should show all detected GPUs)
+      * ``"none"`` -> an explicit "no GPUs are visible" marker (empty / -1 /
+                       NoDevFiles), caller should expose zero GPUs
+      * a ``dict`` ``{"indices": set[int], "uuids": set[str], "order": list}``
+        describing which physical GPU indices and/or UUIDs are allocated.
+
+    Slurm and CUDA accept either integer ordinals (``"0,1,3"``) or UUIDs
+    (``"GPU-abc..."`` / ``"MIG-..."``). An empty string, ``-1`` or the literal
+    ``NoDevFiles`` (set by Slurm when a job is allocated no GPUs) all mean
+    "no GPUs".
+    """
+    if spec is None:
+        return None
+    spec = spec.strip()
+    if spec == "":
+        return "none"
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        return "none"
+    # Sentinels that mean "no GPUs visible".
+    if any(p.lower() in ("nodevfiles", "-1") for p in parts):
+        return "none"
+    indices: set = set()
+    uuids: set = set()
+    order: list = []
+    for p in parts:
+        if p.lstrip("+-").isdigit():
+            try:
+                idx = int(p)
+            except ValueError:
+                continue
+            if idx < 0:
+                return "none"
+            indices.add(idx)
+            order.append(("index", idx))
+        else:
+            # UUID form (GPU-..., MIG-...); compare case-insensitively
+            uuids.add(p.lower())
+            order.append(("uuid", p.lower()))
+    if not indices and not uuids:
+        return "none"
+    return {"indices": indices, "uuids": uuids, "order": order}
+
 class SystemMetrics:
-    def __init__(self):
+    def __init__(self, all_gpus: bool = False):
+        """Collect system metrics.
+
+        Args:
+            all_gpus: When True, ignore ``CUDA_VISIBLE_DEVICES`` / Slurm GPU
+                allocation env vars and enumerate every physical GPU NVML can
+                see. By default (False) the monitor only shows the GPUs the
+                current job/session is actually allocated, which is the correct
+                behaviour on Slurm compute nodes and login nodes.
+        """
+        self.all_gpus = all_gpus
         self.prev_read_bytes = 0
         self.prev_write_bytes = 0
         self.prev_net_bytes_recv = 0
@@ -30,7 +105,7 @@ class SystemMetrics:
         self.prev_net_time = time.time()
         self.prev_disk_io = {}  # Store previous disk IO counters per disk
         self._initialize_counters()
-        self.devices = self._get_all_gpu_devices() if NVML_AVAILABLE else []
+        self.devices = self._get_all_gpu_devices() if (NVML_AVAILABLE and NVITOP_AVAILABLE) else []
         
         # Initialize memory I/O counters
         self.prev_memory_io = self._get_memory_io_counters()
@@ -380,16 +455,30 @@ class SystemMetrics:
     def get_cpu_info(self):
         system = platform.system()
         cpu_models = []
-        core_count = multiprocessing.cpu_count()  # Get number of cores
+        # Total logical cores on the machine.
+        try:
+            core_count = multiprocessing.cpu_count()
+        except (NotImplementedError, Exception):  # noqa: BLE001
+            core_count = psutil.cpu_count() or 1
+        # On a Slurm/cgroup allocation the job may only own a subset of cores;
+        # surface that so the label reflects what the user actually has.
+        alloc_count = None
+        try:
+            if hasattr(os, "sched_getaffinity"):
+                alloc_count = len(os.sched_getaffinity(0))
+        except Exception:  # noqa: BLE001
+            alloc_count = None
 
         if system == "Windows":
             cpu_models = [platform.processor()]
 
         elif system == "Linux":
             try:
-                output = subprocess.check_output("cat /proc/cpuinfo | grep 'model name'", shell=True).decode().strip()
-                cpu_models = list(set(line.split(":")[1].strip() for line in output.split("\n")))
-            except:
+                with open("/proc/cpuinfo", "r") as f:
+                    models = [line.split(":", 1)[1].strip()
+                              for line in f if line.lower().startswith("model name")]
+                cpu_models = list(dict.fromkeys(models)) or ["CPU"]
+            except Exception:  # noqa: BLE001
                 cpu_models = ["CPU"]
 
         elif system == "Darwin":
@@ -402,14 +491,34 @@ class SystemMetrics:
         else:
             cpu_models = ["CPU"]
 
-        return f"{', '.join(cpu_models)} [{core_count} cores]"
+        if alloc_count is not None and alloc_count < core_count:
+            core_label = f"{alloc_count}/{core_count} cores"
+        else:
+            core_label = f"{core_count} cores"
+        return f"{', '.join(cpu_models)} [{core_label}]"
 
 
     def get_cpu_metrics(self):
+        try:
+            cpu_percentages = psutil.cpu_percent(percpu=True)
+        except Exception:  # noqa: BLE001
+            cpu_percentages = []
+        # cpu_freq is frequently unavailable in containers / cgroup-limited
+        # Slurm allocations / some VMs (returns None, [], or raises).
+        try:
+            cpu_freqs = psutil.cpu_freq(percpu=True)
+            if cpu_freqs is None:
+                cpu_freqs = []
+        except Exception:  # noqa: BLE001
+            cpu_freqs = []
+        try:
+            mem_percent = psutil.virtual_memory().percent
+        except Exception:  # noqa: BLE001
+            mem_percent = 0.0
         return {
-            'cpu_percentages': psutil.cpu_percent(percpu=True),
-            'cpu_freqs': psutil.cpu_freq(percpu=True),
-            'mem_percent': psutil.virtual_memory().percent,
+            'cpu_percentages': cpu_percentages,
+            'cpu_freqs': cpu_freqs,
+            'mem_percent': mem_percent,
             'cpu_name': self.get_cpu_info(),
         }
 
@@ -423,28 +532,49 @@ class SystemMetrics:
         except Exception:
             per_disk_io = {}
 
-        # Get total IO counters
-        total_io = psutil.disk_io_counters()
+        # Get total IO counters. disk_io_counters() returns None on systems with
+        # no measurable disks (some containers / diskless compute nodes).
+        try:
+            total_io = psutil.disk_io_counters()
+        except Exception:  # noqa: BLE001
+            total_io = None
 
-        # Calculate total read/write speeds with a smooth factor
-        total_read_speed = (total_io.read_bytes - self.prev_read_bytes) / (1024**2) / disk_time_delta
-        total_write_speed = (total_io.write_bytes - self.prev_write_bytes) / (1024**2) / disk_time_delta
+        if total_io is not None:
+            # Calculate total read/write speeds with a smooth factor
+            total_read_speed = (total_io.read_bytes - self.prev_read_bytes) / (1024**2) / disk_time_delta
+            total_write_speed = (total_io.write_bytes - self.prev_write_bytes) / (1024**2) / disk_time_delta
 
-        # Apply smoothing and prevent negative values
-        total_read_speed = max(0, total_read_speed)
-        total_write_speed = max(0, total_write_speed)
+            # Apply smoothing and prevent negative values
+            total_read_speed = max(0, total_read_speed)
+            total_write_speed = max(0, total_write_speed)
 
-        # Debug check - ensure we're not zeroing out valid read values
-        if total_read_speed < 0.01 and total_io.read_bytes > self.prev_read_bytes:
-            total_read_speed = 0.01  # Set a minimum value if there was positive activity
+            # Debug check - ensure we're not zeroing out valid read values
+            if total_read_speed < 0.01 and total_io.read_bytes > self.prev_read_bytes:
+                total_read_speed = 0.01  # Set a minimum value if there was positive activity
 
-        # Update previous values for total IO
-        self.prev_read_bytes = total_io.read_bytes
-        self.prev_write_bytes = total_io.write_bytes
+            # Update previous values for total IO
+            self.prev_read_bytes = total_io.read_bytes
+            self.prev_write_bytes = total_io.write_bytes
+        else:
+            total_read_speed = 0
+            total_write_speed = 0
         self.prev_disk_time = current_time
-    
+
         # Get all mounted partitions
-        partitions = psutil.disk_partitions(all=False)
+        try:
+            partitions = psutil.disk_partitions(all=False)
+        except Exception:  # noqa: BLE001
+            partitions = []
+
+        # Precompute total space once (avoids O(n^2) disk_usage() calls, which
+        # are slow and can block on networked / stale HPC mounts).
+        partition_total = {}
+        for p in partitions:
+            try:
+                partition_total[p.mountpoint] = psutil.disk_usage(p.mountpoint).total
+            except Exception:  # noqa: BLE001 - stale NFS, perms, etc.
+                continue
+        all_partitions_total = sum(partition_total.values())
     
         # Prepare result structure
         disks = []
@@ -491,7 +621,7 @@ class SystemMetrics:
                     }
                 else:
                     # Distribute total IO proportionally based on disk size ratio
-                    total_disk_space = sum(psutil.disk_usage(p.mountpoint).total for p in partitions if p.mountpoint != partition.mountpoint)
+                    total_disk_space = all_partitions_total - partition_total.get(partition.mountpoint, 0)
                     if total_disk_space > 0:
                         size_ratio = usage.total / total_disk_space
                         read_speed = total_read_speed * size_ratio
@@ -510,10 +640,13 @@ class SystemMetrics:
             
                 total_used += usage.used
                 total_space += usage.total
-            except (PermissionError, FileNotFoundError):
-                # Skip partitions we can't access
-                pass
-    
+            except (PermissionError, FileNotFoundError, OSError):
+                # Skip partitions we can't access (perms, stale NFS handle,
+                # disconnected network mount that raises OSError on statvfs).
+                continue
+            except Exception:  # noqa: BLE001 - never let one bad mount kill the panel
+                continue
+
         return {
             'disks': disks,
             'total_disk_used': total_used,
@@ -524,7 +657,13 @@ class SystemMetrics:
 
     def get_network_metrics(self):
         current_time = time.time()
-        net_io_counters = psutil.net_io_counters()
+        try:
+            net_io_counters = psutil.net_io_counters()
+        except Exception:  # noqa: BLE001
+            net_io_counters = None
+        if net_io_counters is None:
+            self.prev_net_time = current_time
+            return {'download_speed': 0, 'upload_speed': 0}
 
         time_delta = max(current_time - self.prev_net_time, 1e-6)
 
@@ -556,11 +695,35 @@ class SystemMetrics:
         except Exception:
             return None
 
+    @staticmethod
+    def _safe_metric(fn, default):
+        """Call a device accessor, returning default on NA/exception."""
+        try:
+            val = fn()
+            return default if (val is None or val is NA) else val
+        except Exception:  # noqa: BLE001
+            return default
+
     def get_gpu_metrics(self):
-        """Return per-GPU metrics including running processes on each device."""
+        """Return per-GPU metrics including running processes on each device.
+
+        Each device is collected independently: a device that becomes
+        inaccessible (driver hiccup, job preemption, permission change) is
+        skipped rather than aborting collection for every GPU.
+        """
         gpu_metrics = []
         for device in self.devices:
-            with device.oneshot():
+            try:
+                gpu_metrics.append(self._collect_one_gpu(device))
+            except Exception as err:  # noqa: BLE001
+                logger.warning("GPU collection failed for %r: %s",
+                               getattr(device, "index", "?"), err)
+                continue
+        return gpu_metrics
+
+    def _collect_one_gpu(self, device):
+        """Collect metrics for a single GPU device (raises only on total failure)."""
+        with device.oneshot():
                 processes = []
                 pids_on_this_device = self._get_pids_on_device(device)
                 try:
@@ -637,14 +800,22 @@ class SystemMetrics:
                                 continue
                 except Exception:
                     pass
-                gpu_metrics.append({
-                    'gpu_name': f"{list(device.index) if isinstance(device.index,tuple) else [device.index]} {device.name()}",
-                    'gpu_util': device.gpu_utilization() if device.gpu_utilization() is not NA else -1,
-                    'mem_used': device.memory_used() / (1000**3) if device.memory_used() is not NA else -1,
-                    'mem_total': device.memory_total() / (1000**3) if device.memory_total() is not NA else -1,
+                try:
+                    idx = device.index
+                    idx_label = list(idx) if isinstance(idx, tuple) else [idx]
+                except Exception:  # noqa: BLE001
+                    idx_label = ["?"]
+                name = self._safe_metric(device.name, "GPU")
+                util = self._safe_metric(device.gpu_utilization, -1)
+                mem_used = self._safe_metric(device.memory_used, None)
+                mem_total = self._safe_metric(device.memory_total, None)
+                return {
+                    'gpu_name': f"{idx_label} {name}",
+                    'gpu_util': util if util is not None else -1,
+                    'mem_used': mem_used / (1000**3) if mem_used is not None else -1,
+                    'mem_total': mem_total / (1000**3) if mem_total is not None else -1,
                     'processes': processes,
-                })
-        return gpu_metrics
+                }
 
     def get_memory_metrics(self):
         """
@@ -744,36 +915,137 @@ class SystemMetrics:
         
         return memory_data
 
-    def _get_all_gpu_devices(self) -> List[Union[nvitop.Device, nvitop.MigDevice]]:
+    def _get_visible_gpu_filter(self):
+        """Resolve which GPUs the current job/session may use.
+
+        Honours (in order) ``CUDA_VISIBLE_DEVICES``, then the Slurm-provided
+        ``SLURM_STEP_GPUS`` / ``SLURM_JOB_GPUS``, then ``GPU_DEVICE_ORDINAL``.
+        Returns the parsed filter from :func:`_parse_visible_gpu_spec`
+        (``None`` = all, ``"none"`` = none, or a dict of indices/uuids).
+
+        When ``self.all_gpus`` is set, restriction is disabled (returns None).
         """
-        Combine Physical Devices and MIG Devices into a single list.
-        If a PhysicalDevice has MIGs, include the MIGs instead of the PhysicalDevice.
-        If not, include the PhysicalDevice itself.
-    
+        if self.all_gpus:
+            return None
+        for var in ("CUDA_VISIBLE_DEVICES", "SLURM_STEP_GPUS", "SLURM_JOB_GPUS", "GPU_DEVICE_ORDINAL"):
+            if var in os.environ:
+                parsed = _parse_visible_gpu_spec(os.environ.get(var))
+                logger.info("GPU visibility from %s=%r -> %r", var, os.environ.get(var), parsed)
+                return parsed
+        return None
+
+    @staticmethod
+    def _device_uuid(device) -> Optional[str]:
+        """Best-effort lowercase UUID for a device; None if unavailable."""
+        try:
+            uuid = device.uuid()
+            if uuid is not None and uuid is not NA:
+                return str(uuid).lower()
+        except Exception:
+            pass
+        return None
+
+    def _device_is_visible(self, device, phys_index, gpu_filter) -> bool:
+        """Decide whether a physical device passes the CUDA/Slurm visibility filter."""
+        if gpu_filter is None:
+            return True
+        if gpu_filter == "none":
+            return False
+        if isinstance(phys_index, int) and phys_index in gpu_filter["indices"]:
+            return True
+        uuid = self._device_uuid(device)
+        if uuid is not None:
+            # CUDA_VISIBLE_DEVICES UUIDs may be a prefix (e.g. "GPU-abc")
+            for want in gpu_filter["uuids"]:
+                if uuid == want or uuid.startswith(want) or want.startswith(uuid):
+                    return True
+        return False
+
+    @staticmethod
+    def _device_accessible(device) -> bool:
+        """Probe a device with a cheap query. NVML can list GPUs that the
+        current user/job cannot actually read (e.g. cgroup device isolation on
+        Slurm), which raises NVMLError or returns NA. Such devices are skipped.
+        """
+        try:
+            name = device.name()
+            if name is None or name is NA:
+                # Some drivers return NA for name but still expose memory.
+                mem = device.memory_total()
+                return mem is not None and mem is not NA
+            return True
+        except Exception as err:  # noqa: BLE001
+            logger.info("Skipping inaccessible GPU %r: %s", getattr(device, "index", "?"), err)
+            return False
+
+    def _get_all_gpu_devices(self) -> list:
+        """
+        Combine Physical Devices and MIG Devices into a single list, filtered to
+        the GPUs the current job/session is allowed to use and that are actually
+        accessible.
+
+        If a PhysicalDevice has MIGs, include the MIGs instead of the
+        PhysicalDevice. If not, include the PhysicalDevice itself.
+
+        Robust to enumeration failures (returns whatever could be collected),
+        which matters on Slurm/login nodes with partial or restricted access.
+
         Returns:
             List of GPU devices (PhysicalDevice or MigDevice)
         """
-        physical_devices = nvitop.Device.all()
-        mig_devices = nvitop.MigDevice.all()
-    
-        # Create a mapping from PhysicalDevice index to its MigDevices
-        mig_map = {}
+        if not NVITOP_AVAILABLE:
+            return []
+        try:
+            gpu_filter = self._get_visible_gpu_filter()
+        except Exception:  # noqa: BLE001
+            gpu_filter = None
+        if gpu_filter == "none":
+            logger.info("No GPUs visible to this session (CUDA_VISIBLE_DEVICES/Slurm allocation is empty)")
+            return []
+
+        try:
+            physical_devices = list(nvitop.Device.all())
+        except Exception as err:  # noqa: BLE001
+            logger.warning("nvitop.Device.all() failed: %s", err)
+            return []
+
+        try:
+            mig_devices = list(nvitop.MigDevice.all())
+        except Exception as err:  # noqa: BLE001
+            logger.info("nvitop.MigDevice.all() failed (no MIG support?): %s", err)
+            mig_devices = []
+
+        # Map physical index -> its MIG devices (index is a (phys, mig) tuple).
+        mig_map: Dict[int, list] = {}
         for mig in mig_devices:
-            phys_idx, mig_idx = mig.index  # Assuming index is a tuple (physical_idx, mig_idx)
-            if phys_idx not in mig_map:
-                mig_map[phys_idx] = []
-            mig_map[phys_idx].append(mig)
-    
-        # Build the combined device list
-        combined_devices = []
+            try:
+                idx = mig.index
+                phys_idx = idx[0] if isinstance(idx, tuple) else idx
+            except Exception:  # noqa: BLE001
+                continue
+            mig_map.setdefault(phys_idx, []).append(mig)
+
+        combined_devices: list = []
         for phys_dev in physical_devices:
-            if phys_dev.index in mig_map:
-                # If PhysicalDevice has MIGs, include all its MIGs
-                combined_devices.extend(mig_map[phys_dev.index])
+            try:
+                phys_idx = phys_dev.index
+            except Exception:  # noqa: BLE001
+                phys_idx = None
+            # Apply CUDA/Slurm visibility filter at the physical-device level.
+            if not self._device_is_visible(phys_dev, phys_idx, gpu_filter):
+                continue
+            if phys_idx in mig_map:
+                # Physical device runs in MIG mode: expose its MIG instances.
+                for mig in mig_map[phys_idx]:
+                    if self._device_accessible(mig):
+                        combined_devices.append(mig)
             else:
-                # If no MIGs, include the PhysicalDevice itself
-                combined_devices.append(phys_dev)
-    
+                if self._device_accessible(phys_dev):
+                    combined_devices.append(phys_dev)
+
+        logger.info("Detected %d usable GPU device(s)%s",
+                    len(combined_devices),
+                    "" if gpu_filter is None else " (filtered by allocation)")
         return combined_devices
 
     def _get_memory_io_counters(self):

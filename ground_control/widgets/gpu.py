@@ -183,9 +183,12 @@ class GPUWidget(MetricWidget):
     """Widget for GPU monitoring with dual plots for GPU RAM and Usage and a processes list in tabs."""
 
     # Local keyboard bindings: active only when this GPU widget has focus.
+    # Numbered tabs mirror the CPU widget (1/2/3); p is a plot mnemonic.
+    # Note: avoid binding "r" here — it is the app-global "refresh now".
     BINDINGS = [
+        ("1", "show_plot", "GPU: plot"),
+        ("2", "show_processes", "GPU: processes"),
         ("p", "show_plot", "GPU: plot"),
-        ("r", "show_processes", "GPU: processes"),
     ]
 
     DEFAULT_CSS = """
@@ -342,12 +345,6 @@ class GPUWidget(MetricWidget):
         if plot_height <= 0 or plot_width <= 0:
             return "Initializing..."
 
-        # #region agent log
-        try:
-            f = open("/home/atuin/v120bb/v120bb18/ground-control/.cursor/debug.log", "a"); f.write('{"timestamp":' + str(int(__import__("time").time()*1000)) + ',"location":"gpu.py:get_dual_plot","message":"plot dimensions","data":{"plot_height":' + str(plot_height) + ',"plot_width":' + str(plot_width) + ',"height_used_plotext":' + str(plot_height) + '},"hypothesisId":"H1,H4,H5"}\n'); f.close()
-        except Exception: pass
-        # #endregion
-
         plt.clear_figure()
         plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
@@ -421,13 +418,6 @@ class GPUWidget(MetricWidget):
             content_width = 0
         if content_width <= 0:
             content_width = self.size.width or 0
-        # #region agent log
-        try:
-            sw = getattr(self.size, "width", None)
-            sh = getattr(self.size, "height", None)
-            f = open("/home/atuin/v120bb/v120bb18/ground-control/.cursor/debug.log", "a"); f.write('{"timestamp":' + str(int(__import__("time").time()*1000)) + ',"location":"gpu.py:update_content","message":"bar width","data":{"size_width":' + str(sw) + ',"size_height":' + str(sh) + ',"content_width":' + str(content_width) + '},"hypothesisId":"H2,H4"}\n'); f.close()
-        except Exception: pass
-        # #endregion
         try:
             self.query_one("#history-plot").update(self.get_dual_plot())
             self.query_one("#current-value").update(

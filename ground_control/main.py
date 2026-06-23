@@ -127,12 +127,16 @@ def _parse_gpu_indices(value):
 @click.option('--gpu', '-g', is_flag=True, help='Show GPU widgets (all GPUs by default).')
 @click.option('--gpu-index', type=str, default=None, metavar='IDX',
              help='Filter to specific GPU(s): 0, 0,1, etc. Use with -g (e.g. gc -g --gpu-index 0).')
+@click.option('--all-gpus', is_flag=True,
+             help='Show every physical GPU, ignoring CUDA_VISIBLE_DEVICES / Slurm allocation.')
+@click.option('--squeue', is_flag=True,
+             help='Add a Slurm panel and prompt for which queued/running jobs to monitor.')
 @click.option('--ram', '-r', is_flag=True, help='Show Memory widgets')
 @click.option('--disk', '-d', is_flag=True, help='Show Disk widgets')
 @click.option('--net', '-n', is_flag=True, help='Show Network widgets')
 @click.option('--temp', '-t', is_flag=True, help='Show Temperature widgets')
 @click.pass_context
-def cli(ctx, log, debug, cpu, gpu, gpu_index, ram, disk, net, temp):
+def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, temp):
     """Ground Control - Terminal System Monitor"""
     if ctx.invoked_subcommand is None:
         # No subcommand specified, run the app
@@ -154,7 +158,8 @@ def cli(ctx, log, debug, cpu, gpu, gpu_index, ram, disk, net, temp):
         # GPU filter: -g alone -> all; --gpu-index 0 or 0,1 -> filter to those indices
         gpu_indices = _parse_gpu_indices(gpu_index) if gpu_index else None
 
-        appl = GroundControl(allowed_types=allowed_types, gpu_indices=gpu_indices, debug=debug)
+        appl = GroundControl(allowed_types=allowed_types, gpu_indices=gpu_indices,
+                             debug=debug, all_gpus=all_gpus, squeue=squeue)
         appl.run()
     else:
         # Store log flag in context for subcommands if needed
