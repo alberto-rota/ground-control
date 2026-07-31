@@ -3,14 +3,18 @@ import re
 def ansi2rich(text: str) -> str:
     """Replace ANSI color sequences with Rich markup."""
     # Define a mapping of ANSI codes to Rich markup colors or styles
+    # Plotext colours its series in plot order: 1st -> 12, 2nd -> 10, 3rd -> 9, 4th -> 14.
+    # Widgets rely on that order to recolour each line, so all four must be named here
+    # (an unmapped code loses its colour entirely).
     color_map = {
         '12': 'blue',
         '10': 'green',
         '9': 'magenta',
+        '14': 'cyan',
         '2': 'brown',
         '13': 'red',
         '7': 'bold',
-        
+
         # Add more mappings as needed
     }
     
@@ -35,6 +39,108 @@ def ansi2rich(text: str) -> str:
     text = re.sub(r'\x1b\[[0-9;]*m', '', text)
     
     return text
+
+
+def recolor(text: str, mapping: dict) -> str:
+    """Rewrite plotext's series colour tags in a single pass.
+
+    Chained ``str.replace`` calls are unsafe here: a target colour can be a plain
+    colour name (``get_rich_color`` returns e.g. ``green``), so a later call would
+    rewrite the tags an earlier one just inserted — which is how the network plot
+    ended up drawing its upload line in the download colour. Substituting every tag
+    simultaneously keeps each series on its own colour.
+    """
+    if not mapping:
+        return text
+    pattern = re.compile("|".join(re.escape(f"[{name}]") for name in mapping))
+    return pattern.sub(lambda m: f"[{mapping[m.group(0)[1:-1]]}]", text)
+
+
+_MARKUP_TOKEN_RE = re.compile(r"(\[[^\[\]]*\])")
+
+
+def clip_markup(line: str, width: int) -> str:
+    """Truncate a Rich-markup line to ``width`` rendered cells.
+
+    Markup tags do not occupy cells, so a plain slice would cut in the wrong place
+    (or in the middle of a tag). Any style still open at the cut is closed so the
+    result stays valid markup.
+    """
+    if width <= 0:
+        return ""
+    used = 0
+    out = []
+    open_tags = 0
+    for token in _MARKUP_TOKEN_RE.split(line):
+        if not token:
+            continue
+        if token.startswith("[") and token.endswith("]"):
+            out.append(token)
+            if token.startswith("[/"):
+                open_tags = max(0, open_tags - 1)
+            else:
+                open_tags += 1
+            continue
+        remaining = width - used
+        if len(token) <= remaining:
+            out.append(token)
+            used += len(token)
+        else:
+            out.append(token[:remaining])
+            used = width
+            break
+    return "".join(out) + "[/]" * open_tags
+
+
+def markup_cell_len(line: str) -> int:
+    """Rendered width of a markup line (tags do not occupy cells)."""
+    return sum(
+        len(token)
+        for token in _MARKUP_TOKEN_RE.split(line)
+        if token and not (token.startswith("[") and token.endswith("]"))
+    )
+
+
+def pad_markup(line: str, width: int) -> str:
+    """Clip or space-pad a markup line so it renders as exactly ``width`` cells."""
+    length = markup_cell_len(line)
+    if length > width:
+        return clip_markup(line, width)
+    return line + " " * (width - length)
+
+
+def fit_lines(text: str, height: int, width: int = 0) -> str:
+    """Trim rendered text to at most ``height`` lines and ``width`` cells per line.
+
+    Drops the trailing blank line that ``plotext.build()`` always emits, then keeps
+    the first ``height`` lines. Cutting whole lines never breaks the markup (plot
+    lines close every colour tag they open); over-long lines are clipped with
+    :func:`clip_markup`, which is the last-resort guard for renderers that ignore
+    the canvas width they were given.
+    """
+    lines = text.split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if height > 0 and len(lines) > height:
+        lines = lines[:height]
+    if width > 0:
+        lines = [clip_markup(line, width) if len(line) > width else line for line in lines]
+    return "\n".join(lines)
+
+
+def pad_to_width(text: str, used_width: int, total_width: int, center: bool = False) -> str:
+    """Pad a markup string with spaces so it occupies exactly ``total_width`` cells.
+
+    ``used_width`` is the *rendered* width of ``text`` (markup tags do not count),
+    which the caller knows because it built the segments.
+    """
+    extra = max(0, total_width - used_width)
+    if not extra:
+        return text
+    if center:
+        left = extra // 2
+        return " " * left + text + " " * (extra - left)
+    return text + " " * extra
 
 
 def align(input_str, max_length, alignment):

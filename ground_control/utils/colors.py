@@ -196,6 +196,11 @@ def get_theme_tokens(colors: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         "footer_key_bg": rgb("footer_key_bg", "#13A10E"),
         "footer_key_fg": rgb_hex(c.get("footer_key_fg") or c.get("text_on_accent") or "#000000"),
         "selection": rgb("selection_highlight", "#13A10E"),
+        # Signal-button backgrounds (GPU process rows); their label uses text_on_accent
+        # so it flips with the theme instead of being a hardcoded white/black.
+        "danger": rgb("high_value", "#FF0000"),
+        "warn": rgb("temp_hot", "#FF8C00"),
+        "caution": rgb("temp_warm", "#FFFF00"),
     }
 
 

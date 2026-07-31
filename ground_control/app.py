@@ -16,11 +16,12 @@ from textual.widgets import (
     RadioButton,
     RadioSet,
     RichLog,
+    Select,
 )
 from textual.widgets.selection_list import Selection
 from textual.reactive import reactive
 from textual.binding import Binding
-from textual import on
+from textual import events, on
 import math
 import os
 import json
@@ -50,6 +51,14 @@ from textual.screen import ModalScreen, Screen
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+# Mountpoints hidden by default: pseudo-filesystems that would otherwise fill the
+# dashboard with one panel per entry (a squashfs mount per installed snap, the ESP).
+# Editable per user in Settings -> Disk ignore.
+DEFAULT_DISK_IGNORE_PREFIXES: list[str] = ["/boot/efi", "/snap"]
+# Previous default, kept so a config saved before /snap was added still picks it up
+# instead of pinning the user to the old list forever.
+_LEGACY_DISK_IGNORE_PREFIXES: list[str] = ["/boot/efi"]
 
 
 # Logger will be set up in main.py before app is created
@@ -138,6 +147,16 @@ def _refresh_label(rate: float) -> str:
 def _history_label(size: int) -> str:
     """Label for a history size option."""
     return f"{size // 60}m" if size >= 60 else f"{size}s"
+
+
+def _nearest_refresh(rate: float) -> float:
+    """Snap a refresh rate to an offered option (a hand-edited config can hold any value)."""
+    return float(min(REFRESH_RATES, key=lambda r: abs(float(r) - float(rate))))
+
+
+def _nearest_history(size: int) -> int:
+    """Snap a history size to an offered option."""
+    return int(min(HISTORY_SIZES, key=lambda s: abs(s - int(size))))
 
 
 class ShortcutsScreen(ModalScreen):
@@ -343,7 +362,7 @@ class GroundControl(App):
         # Prevent concurrent layout/widget rebuilds that can create duplicate widgets
         self._setup_lock: asyncio.Lock = asyncio.Lock()
         # Disk mount paths to hide: any mountpoint that starts with one of these (after normalizing) is skipped
-        self.disk_ignore_prefixes: list[str] = ["/boot/efi"]
+        self.disk_ignore_prefixes: list[str] = list(DEFAULT_DISK_IGNORE_PREFIXES)
 
     def _refresh_stylesheet(self) -> None:
         """Replace the app's CSS in the stylesheet with current self.CSS and re-apply to the DOM."""
@@ -419,7 +438,10 @@ class GroundControl(App):
     GPUWidget, NetworkIOWidget, DiskIOWidget, CPUWidget, MemoryWidget, TemperatureWidget, SlurmJobsWidget {{
         background: {tok["bg"]};
         border: round {tok["border"]};
-        min-height: 14;
+        /* No min-height: a grid cell must never be taller than its share of the
+           screen, or the dashboard itself would start to scroll. Panels shrink and
+           their content degrades gracefully instead. */
+        min-height: 0;
         color: {tok["text"]};
     }}
     /* Highlight the focused panel so keyboard navigation is visible */
@@ -462,78 +484,142 @@ class GroundControl(App):
         color: {tok["footer_key_fg"]};
     }}
 
+    /* Signal buttons on GPU process rows: themed background with the theme's
+       on-accent text colour, so labels stay readable in light and dark themes. */
+    ProcessRow .sigkill-btn {{
+        background: {tok["danger"]};
+        color: {tok["text_on_accent"]};
+    }}
+    ProcessRow .sigterm-btn {{
+        background: {tok["warn"]};
+        color: {tok["text_on_accent"]};
+    }}
+    ProcessRow .sigint-btn {{
+        background: {tok["caution"]};
+        color: {tok["text_on_accent"]};
+    }}
+
     SelectionList {{
         background: {tok["bg"]};
+        color: {tok["text"]};
         width: 100%;
         height: auto;
         padding: 0;
     }}
-    /* Match Visible Widgets selector to other settings (RadioSets): same container look */
+    /* Match Visible Widgets selector to other settings (RadioSets): same container look.
+       Option text takes the list's own color — SelectionList has no per-option
+       component class, only the OptionList highlight/hover ones below. */
     #visible-widgets-list {{
         width: 100%;
         height: auto;
         background: transparent;
+        color: {tok["text"]};
         border: none;
         padding: 0;
     }}
     #visible-widgets-list:focus {{
         border: none;
     }}
-    /* Align option rows with RadioButton text color and hover */
-    #visible-widgets-list .selection-list--option {{
-        background: transparent;
+    #visible-widgets-list > .option-list--option-highlighted {{
+        background: {tok["selection"]} 25%;
         color: {tok["text"]};
-        padding: 0;
-    }}
-    #visible-widgets-list .selection-list--option:hover {{
-        background: {tok["selection"]} 15%;
-    }}
-    #visible-widgets-list .selection-list--option.-highlight {{
-        color: {tok["selection"]};
         text-style: bold;
     }}
+    #visible-widgets-list > .option-list--option-hover {{
+        background: {tok["selection"]} 15%;
+        color: {tok["text"]};
+    }}
+    /* Checkbox glyphs: off = dim, on = theme accent (Textual defaults to green) */
+    #visible-widgets-list > .selection-list--button,
+    #visible-widgets-list > .selection-list--button-highlighted {{
+        color: {tok["text"]} 30%;
+        background: {tok["panel_dim"]};
+    }}
+    #visible-widgets-list > .selection-list--button-selected,
+    #visible-widgets-list > .selection-list--button-selected-highlighted {{
+        color: {tok["selection"]};
+        background: {tok["panel_dim"]};
+    }}
 
+    /* Settings: two columns. Left = what to show + how; right = the (long)
+       theme list, which scrolls on its own so the pane itself never has to. */
     #settings-pane {{
         height: 1fr;
-        overflow-y: auto;
-        padding: 0;
+        overflow: hidden hidden;
+        padding: 0 1 0 1;
     }}
-    #settings-sections {{
+    #settings-columns {{
         width: 100%;
-        height: auto;
+        height: 1fr;
+    }}
+    /* Narrow terminals: stack the columns and scroll the whole page instead of
+       squeezing both into a width where labels get clipped (see on_resize). */
+    #settings-columns.-stacked {{
         layout: vertical;
-        padding: 0;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
     }}
-    #settings-row-1, #settings-row-2 {{
+    #settings-columns.-stacked > #settings-col-left,
+    #settings-columns.-stacked > #settings-col-right {{
+        width: 100%;
+        height: auto;
+        overflow: hidden hidden;
+    }}
+    #settings-columns.-stacked #theme-block, #settings-columns.-stacked #theme-radio-set {{
+        height: auto;
+    }}
+    #settings-col-left {{
+        width: 2fr;
+        height: 1fr;
+        overflow-y: auto;
+    }}
+    #settings-col-right {{
+        width: 3fr;
+        height: 1fr;
+    }}
+    #settings-timing-row {{
         width: 100%;
         height: auto;
     }}
-    #settings-row-1 > Vertical, #settings-row-2 > Vertical {{
+    #settings-timing-row > .settings-block {{
         width: 1fr;
     }}
     .settings-block {{
         width: 100%;
         height: auto;
         min-height: 3;
-        padding: 0;
-        margin: 0;
+        padding: 0 1;
+        margin: 0 1 1 0;
         border: round {tok["border"]};
         background: {tok["bg"]};
+        border-title-color: {tok["text"]};
+        border-title-style: bold;
     }}
-    .settings-section-title {{
-        text-style: bold;
-        height: 1;
-        margin: 0 0 1 0;
-        padding: 0;
-        color: {tok["text"]};
+    #theme-block {{
+        height: 1fr;
     }}
 
-    #refresh-radio-set, #history-radio-set, #theme-radio-set, #layout-radio-set {{
+    #theme-radio-set {{
+        width: 100%;
+        height: 1fr;
+        background: transparent;
+        border: none;
+        padding: 0;
+        scrollbar-size-vertical: 1;
+    }}
+    /* Layout is a 3-option choice: one segmented row instead of a stacked list. */
+    #layout-radio-set {{
+        layout: horizontal;
         width: 100%;
         height: auto;
         background: transparent;
         border: none;
         padding: 0;
+        overflow: hidden hidden;
+    }}
+    #layout-radio-set > RadioButton {{
+        width: auto;
+        margin: 0 2 0 0;
     }}
     RadioButton {{
         background: transparent;
@@ -547,10 +633,71 @@ class GroundControl(App):
         color: {tok["selection"]};
         text-style: bold;
     }}
+    /* Radio glyphs: off = dim, on = theme accent (Textual defaults to green) */
+    RadioButton .toggle--button {{
+        color: {tok["text"]} 30%;
+        background: {tok["panel_dim"]};
+    }}
+    RadioButton.-on .toggle--button {{
+        color: {tok["selection"]};
+        background: {tok["panel_dim"]};
+    }}
+
+    /* Refresh rate / history window: ordered scales with one answer each, so a
+       compact dropdown beats a column of radio buttons. */
+    #refresh-select, #history-select {{
+        width: 100%;
+        height: 1;
+        background: transparent;
+    }}
+    #refresh-select > SelectCurrent, #history-select > SelectCurrent {{
+        background: transparent;
+        color: {tok["text"]};
+        padding: 0;
+    }}
+    #refresh-select > SelectCurrent Static#label,
+    #history-select > SelectCurrent Static#label {{
+        color: {tok["text"]};
+    }}
+    #refresh-select > SelectCurrent .arrow,
+    #history-select > SelectCurrent .arrow {{
+        color: {tok["text"]};
+    }}
+    #refresh-select:focus > SelectCurrent Static#label,
+    #history-select:focus > SelectCurrent Static#label {{
+        color: {tok["selection"]};
+        text-style: bold;
+    }}
+    #refresh-select > SelectOverlay, #history-select > SelectOverlay {{
+        background: {tok["bg"]};
+        border: round {tok["border"]};
+        max-height: 12;
+    }}
+    #refresh-select > SelectOverlay > .option-list--option-highlighted,
+    #history-select > SelectOverlay > .option-list--option-highlighted {{
+        background: {tok["selection"]} 25%;
+        color: {tok["text"]};
+        text-style: bold;
+    }}
+    #refresh-select > SelectOverlay > .option-list--option-hover,
+    #history-select > SelectOverlay > .option-list--option-hover {{
+        background: {tok["selection"]} 15%;
+        color: {tok["text"]};
+    }}
+
+    #disk-ignore-prefixes {{
+        width: 100%;
+        height: 1;
+        background: transparent;
+        color: {tok["text"]};
+        padding: 0;
+    }}
 
     #dashboard-pane {{
         height: 1fr;
-        overflow: auto;
+        /* The grid always fits the viewport exactly, so scrollbars would only ever
+           appear because of a sizing bug — and would shrink every panel by a cell. */
+        overflow: hidden hidden;
     }}
     #logs-pane {{
         height: 1fr;
@@ -566,6 +713,8 @@ class GroundControl(App):
     MIN_REFRESH_RATE = 1
     MAX_REFRESH_RATE = 100
     REFRESH_STEP = 0.05
+    # Below this terminal width the Settings tab stacks its two columns.
+    SETTINGS_TWO_COLUMN_WIDTH = 100
 
     # Keyboard map. Single-key, conflict-free. Less-common actions are kept off
     # the footer (show=False) but are listed in the ? help overlay. Per-panel
@@ -607,40 +756,29 @@ class GroundControl(App):
             self._update_timer = None
         self._update_timer = self.set_interval(new_rate, self._update_metrics_sync)
         self.save_config()
-        self._select_refresh_radio(new_rate)
+        self._select_refresh_option(new_rate)
 
     def watch_history_size(self, new_size: int) -> None:
         """React to changes in history size."""
         self.save_config()
-        self._select_history_radio(new_size)
+        self._select_history_option(new_size)
         if not self._is_initializing:
             self._update_widget_history_sizes(new_size)
         logger.debug(f"History size changed to {new_size}s")
 
-    @on(RadioSet.Changed, "#refresh-radio-set")
-    def _on_refresh_radio_changed(self, event: RadioSet.Changed) -> None:
-        """Handle refresh rate selection from the RadioSet."""
-        if self._is_initializing:
+    @on(Select.Changed, "#refresh-select")
+    def _on_refresh_select_changed(self, event: Select.Changed) -> None:
+        """Handle refresh rate selection from the Select."""
+        if self._is_initializing or event.value is Select.BLANK:
             return
-        btn = event.pressed
-        if btn and btn.id and btn.id.startswith("refresh-"):
-            rate_str = btn.id.replace("refresh-", "").replace("-", ".")
-            try:
-                self.refresh_rate = float(rate_str)
-            except ValueError:
-                pass
+        self.refresh_rate = float(event.value)
 
-    @on(RadioSet.Changed, "#history-radio-set")
-    def _on_history_radio_changed(self, event: RadioSet.Changed) -> None:
-        """Handle history size selection from the RadioSet."""
-        if self._is_initializing:
+    @on(Select.Changed, "#history-select")
+    def _on_history_select_changed(self, event: Select.Changed) -> None:
+        """Handle history size selection from the Select."""
+        if self._is_initializing or event.value is Select.BLANK:
             return
-        btn = event.pressed
-        if btn and btn.id and btn.id.startswith("history-"):
-            try:
-                self.history_size = int(btn.id.replace("history-", ""))
-            except ValueError:
-                pass
+        self.history_size = int(event.value)
 
     @on(RadioSet.Changed, "#theme-radio-set")
     def _on_theme_radio_changed(self, event: RadioSet.Changed) -> None:
@@ -673,7 +811,7 @@ class GroundControl(App):
         raw = (event.value or "").strip()
         self.disk_ignore_prefixes = [p.strip() for p in raw.split(",") if p.strip()]
         if not self.disk_ignore_prefixes:
-            self.disk_ignore_prefixes = ["/boot/efi"]
+            self.disk_ignore_prefixes = list(DEFAULT_DISK_IGNORE_PREFIXES)
         self._do_save_config()
         await self.setup_widgets()
         self.apply_widget_visibility()
@@ -698,48 +836,22 @@ class GroundControl(App):
             if self._debug_mode:
                 raise
 
-    def _select_refresh_radio(self, rate: float) -> None:
-        """Pre-select the refresh rate RadioButton matching the given rate."""
+    def _select_refresh_option(self, rate: float) -> None:
+        """Show the given rate in the refresh Select (without re-firing Changed)."""
         try:
-            radio_set = self.query_one("#refresh-radio-set", RadioSet)
-            # Match config value to button id: 1.0 -> "refresh-1", 0.5 -> "refresh-0-5"
-            normalized = int(rate) if rate == int(rate) else rate
-            bid = f"refresh-{normalized}".replace(".", "-")
-            buttons = list(radio_set.query(RadioButton))
-            for idx, btn in enumerate(buttons):
-                if btn.id == bid:
-                    for b in buttons:
-                        b.value = False
-                    radio_set._selected = idx
-                    btn.value = True
-                    return
+            select = self.query_one("#refresh-select", Select)
+            with select.prevent(Select.Changed):
+                select.value = _nearest_refresh(rate)
         except Exception:
             if self._debug_mode:
                 raise
 
-    def _update_refresh_buttons(self) -> None:
-        """Sync the refresh rate radio selection with the current refresh_rate.
-
-        Used when opening the settings panel so the correct button is highlighted.
-        Safe to call even if the settings DOM is not mounted yet.
-        """
+    def _select_history_option(self, size: int) -> None:
+        """Show the given history size in the history Select (without re-firing Changed)."""
         try:
-            self._select_refresh_radio(self.refresh_rate)
-        except Exception:
-            pass
-
-    def _select_history_radio(self, size: int) -> None:
-        """Pre-select the history size RadioButton matching the given size."""
-        try:
-            radio_set = self.query_one("#history-radio-set", RadioSet)
-            buttons = list(radio_set.query(RadioButton))
-            for idx, btn in enumerate(buttons):
-                if btn.id == f"history-{size}":
-                    for b in buttons:
-                        b.value = False
-                    radio_set._selected = idx
-                    btn.value = True
-                    return
+            select = self.query_one("#history-select", Select)
+            with select.prevent(Select.Changed):
+                select.value = _nearest_history(size)
         except Exception:
             if self._debug_mode:
                 raise
@@ -791,13 +903,16 @@ class GroundControl(App):
                     self.history_size = int(config.get("history_size", 120))
                     self._widget_tab_states = config.get("widget_tabs", {})
                     # Disk ignore prefixes: comma-separated in config, e.g. "/boot/efi, /boot, /snap"
-                    raw = config.get("disk_ignore_prefixes", "/boot/efi")
+                    raw = config.get("disk_ignore_prefixes", ", ".join(DEFAULT_DISK_IGNORE_PREFIXES))
                     if isinstance(raw, list):
                         self.disk_ignore_prefixes = [str(p).strip() for p in raw if str(p).strip()]
                     else:
                         self.disk_ignore_prefixes = [p.strip() for p in str(raw).split(",") if p.strip()]
                     if not self.disk_ignore_prefixes:
-                        self.disk_ignore_prefixes = ["/boot/efi"]
+                        self.disk_ignore_prefixes = list(DEFAULT_DISK_IGNORE_PREFIXES)
+                    elif self.disk_ignore_prefixes == _LEGACY_DISK_IGNORE_PREFIXES:
+                        # Untouched old default: adopt the current one (adds /snap).
+                        self.disk_ignore_prefixes = list(DEFAULT_DISK_IGNORE_PREFIXES)
                     raw_selected = config.get("selected", {})
                     if not isinstance(raw_selected, dict):
                         return {}
@@ -998,18 +1113,52 @@ class GroundControl(App):
                     self.grid = Grid(classes="grid")
                     yield self.grid
 
-            # Settings tab: row 1 = Visible Widgets & Theme; row 2 = Refresh, History, Layout; row 3 = Disk ignore.
+            # Settings tab: left column = widget visibility, layout, timing, disk
+            # filter; right column = the theme list (long, so it gets its own column
+            # and scrolls internally). Section names live in the block borders.
             with TabPane("Settings", id="settings"):
                 with Vertical(id="settings-pane"):
-                    with Vertical(id="settings-sections"):
-                        # Row 1: Visible Widgets | Theme
-                        with Horizontal(id="settings-row-1"):
-                            with Vertical(classes="settings-block"):
-                                yield Static(" Visible Widgets", classes="settings-section-title")
+                    with Horizontal(id="settings-columns"):
+                        with Vertical(id="settings-col-left"):
+                            with Vertical(classes="settings-block") as block:
+                                block.border_title = "Visible widgets"
                                 self.select = SelectionList[str](id="visible-widgets-list")
                                 yield self.select
-                            with Vertical(classes="settings-block"):
-                                yield Static(" Theme", classes="settings-section-title")
+                            with Vertical(classes="settings-block") as block:
+                                block.border_title = "Layout"
+                                with RadioSet(id="layout-radio-set"):
+                                    yield RadioButton("Grid", id="layout-grid")
+                                    yield RadioButton("Horizontal", id="layout-horizontal")
+                                    yield RadioButton("Vertical", id="layout-vertical")
+                            with Horizontal(id="settings-timing-row"):
+                                with Vertical(classes="settings-block") as block:
+                                    block.border_title = "Refresh rate"
+                                    yield Select(
+                                        [(_refresh_label(r), float(r)) for r in REFRESH_RATES],
+                                        value=_nearest_refresh(self.refresh_rate),
+                                        allow_blank=False,
+                                        compact=True,
+                                        id="refresh-select",
+                                    )
+                                with Vertical(classes="settings-block") as block:
+                                    block.border_title = "History window"
+                                    yield Select(
+                                        [(_history_label(s), s) for s in HISTORY_SIZES],
+                                        value=_nearest_history(self.history_size),
+                                        allow_blank=False,
+                                        compact=True,
+                                        id="history-select",
+                                    )
+                            with Vertical(classes="settings-block") as block:
+                                block.border_title = "Disk ignore prefixes (enter to apply)"
+                                yield Input(
+                                    id="disk-ignore-prefixes",
+                                    placeholder="e.g. /boot/efi, /boot, /snap",
+                                    compact=True,
+                                )
+                        with Vertical(id="settings-col-right"):
+                            with Vertical(classes="settings-block", id="theme-block") as block:
+                                block.border_title = "Theme"
                                 with RadioSet(id="theme-radio-set"):
                                     for name in get_available_themes():
                                         yield RadioButton(
@@ -1017,34 +1166,7 @@ class GroundControl(App):
                                             id=f"theme-{name}",
                                         )
 
-                        # Row 2: Refresh rate | History | Layout
-                        with Horizontal(id="settings-row-2"):
-                            with Vertical(classes="settings-block"):
-                                yield Static(" Refresh rate", classes="settings-section-title")
-                                with RadioSet(id="refresh-radio-set"):
-                                    for rate in REFRESH_RATES:
-                                        bid = f"refresh-{rate}".replace(".", "-")
-                                        yield RadioButton(_refresh_label(rate), id=bid)
-                            with Vertical(classes="settings-block"):
-                                yield Static(" History size", classes="settings-section-title")
-                                with RadioSet(id="history-radio-set"):
-                                    for size in HISTORY_SIZES:
-                                        yield RadioButton(_history_label(size), id=f"history-{size}")
-                            with Vertical(classes="settings-block"):
-                                yield Static(" Layout", classes="settings-section-title")
-                                with RadioSet(id="layout-radio-set"):
-                                    yield RadioButton("Grid", id="layout-grid")
-                                    yield RadioButton("Horizontal", id="layout-horizontal")
-                                    yield RadioButton("Vertical", id="layout-vertical")
 
-                        # Row 3: Disk ignore (full width)
-                        with Vertical(classes="settings-block"):
-                            yield Static(" Disk ignore prefixes", classes="settings-section-title")
-                            yield Input(
-                                id="disk-ignore-prefixes",
-                                placeholder="e.g. /boot/efi, /boot, /snap",
-                            )
-            
             # Logs tab: streaming app logs in a scrollable RichLog.
             with TabPane("Logs", id="logs"):
                 with Vertical(id="logs-pane"):
@@ -1074,8 +1196,8 @@ class GroundControl(App):
             self._update_timer.stop()
             self._update_timer = None
         self._update_timer = self.set_interval(self.refresh_rate, self._update_metrics_sync)
-        self._select_refresh_radio(self.refresh_rate)
-        self._select_history_radio(self.history_size)
+        self._select_refresh_option(self.refresh_rate)
+        self._select_history_option(self.history_size)
         self._select_layout_radio(self.current_layout)
         self._select_current_theme_radio()
         try:
@@ -1846,9 +1968,13 @@ class GroundControl(App):
         if not self._is_initializing:
             self.notify("Already at slowest rate (1m)", title="Slower", severity="information")
 
-    # def on_resize(self) -> None:
-    #     if self.auto_layout:
-    #         self.update_layout()
+    def on_resize(self, event: events.Resize) -> None:
+        """Stack the Settings columns on narrow terminals; side by side they clip."""
+        try:
+            columns = self.query_one("#settings-columns", Horizontal)
+        except Exception:
+            return
+        columns.set_class(event.size.width < self.SETTINGS_TWO_COLUMN_WIDTH, "-stacked")
 
     def update_layout(self) -> None:
         if not self.is_mounted:

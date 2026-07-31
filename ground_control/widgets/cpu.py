@@ -7,7 +7,7 @@ from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
 import psutil
-from ..utils.formatting import ansi2rich
+from ..utils.formatting import ansi2rich, fit_lines, pad_markup, recolor
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.cpu")
@@ -26,21 +26,21 @@ class CPUWidget(MetricWidget):
         ("3", "view_user", "CPU: my cores"),
     ]
 
+    # Rows taken by the tab bar (tabs + underline); only used to estimate the chart
+    # region before the first layout pass.
+    TAB_BAR_HEIGHT = 2
+    # Narrowest column that still shows a core label plus a few bar cells. Cores that
+    # do not fit in width // MIN_GROUP_WIDTH columns are not drawn (a 3-cell column
+    # would be label-only anyway).
+    MIN_GROUP_WIDTH = 8
+
     DEFAULT_CSS = """
     CPUWidget {
-        height: 100%;
-        border: solid green;
-        background: $surface;
         layout: vertical;
-        overflow-y: auto;
     }
-    
+
     .metric-title {
         text-align: left;
-    }
-    
-    .cpu-metric-value {
-        height: 1fr;
     }
 
     #cpu-tabbed {
@@ -154,59 +154,36 @@ class CPUWidget(MetricWidget):
             return
         mode = event.pane.id
         self._view_mode_idx = VIEW_MODES.index(mode)
-        n = len(self._last_cpu_percentages) if self._last_cpu_percentages else 0
-        if mode == "all":
-            msg = f"Showing all {n} cores."
-        elif mode == "affinity":
-            aff = self._get_affinity_cpus()
-            k = len(aff) if aff else n
-            msg = f"Showing {k} affinity core(s)." if aff else "Affinity not available; showing all cores."
-        else:
-            user_cpus = self._get_user_cpus(n) if n else None
-            k = len(user_cpus) if user_cpus else 0
-            msg = f"Showing {k} core(s) with your processes." if user_cpus else "No user cores found; showing all cores."
+        # The newly revealed pane only gets a region once it is active: redraw for it.
+        self.call_after_refresh(self.rerender)
 
     def _refresh_display(self) -> None:
         """Re-render the chart from last stored data using current view mode."""
-        if self._last_cpu_percentages is None:
-            return
-        self.update_content(
-            self._last_cpu_percentages,
-            self._last_cpu_freqs,
-            self._last_mem_percent,
-        )
+        self.rerender()
 
     def create_bar_chart(self, cpu_percentages, cpu_freqs, mem_percent, width, height, labels_override=None):
         """
-        Build a bar chart for CPU usage. If labels_override is provided (e.g. affinity core indices),
-        those labels are used instead of 0..N.
+        Build a bar chart for CPU usage, drawn on a canvas of exactly (width, height).
+        If labels_override is provided (e.g. affinity core indices), those labels are
+        used instead of 0..N.
         """
         cpu_percentages = [int(x) for x in cpu_percentages]
         labels = labels_override if labels_override is not None else [f" C{i}" for i in range(len(cpu_percentages))]
-        if len(cpu_percentages) + 2 <= height-2:
+        if not self.plot_fits(width, height):
+            return self.too_small_text(width, height)
+        if len(cpu_percentages) + 2 <= height - 2:
             plt.clear_figure()
             plt.theme("pro")
-            if len(cpu_percentages) + 2 <= height-2:
-                orientation = "v" 
-                plt.ylim(6, 100)
-                plt.plot_size(width=width+1, height=height+2)
-                
-                # plt.yfrequency(0)
-                
-            else:
-                orientation = "h"
-                plt.xlim(6, 100)
-                plt.xfrequency(0)
-                plt.plot_size(width=width, height=len(cpu_percentages) + 2)
-                
+            orientation = "v"
+            plt.ylim(6, 100)
+            plt.plot_size(width=width, height=height)
             plt.bar(labels, list(cpu_percentages), orientation=orientation)
             cpu_bar_color = get_rich_color("cpu_bar", "#0080FF")
             try:
-                cpubars = (ansi2rich(plt.build())
-                          .replace("\x1b[0m", "")
-                          .replace("\x1b[1m", "")
-                          .replace("[blue]", f"[{cpu_bar_color}]")
-                          .replace("──────┐","────%─┐"))
+                cpubars = recolor(
+                    ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", ""),
+                    {"blue": cpu_bar_color},
+                ).replace("──────┐", "────%─┐")
             except (ValueError, IndexError, TypeError):
                 cpubars = "\n".join(f"{l}: {v}%" for l, v in zip(labels, list(cpu_percentages)))
 
@@ -219,14 +196,23 @@ class CPUWidget(MetricWidget):
             # plt.bar(["RAM"], [mem_percent], orientation="h")
             # rambars = ansi2rich(plt.build()).replace("blue","orange1").replace("──────┐","────%─┐")
 
-            return cpubars#+ rambars
+            return self.finish_plot(cpubars, width, height)
         else:
-            # Group CPU cores to avoid an overly tall chart.
-            # Maximum rows per group is the available height minus 2 (for borders/margins).
-            max_rows = height
+            # Group CPU cores into side-by-side columns so the chart never grows
+            # taller than the region: each group chart is len(group) + 2 rows
+            # (2 rows of axis), hence at most `height` rows.
+            max_rows = max(1, height - 2)
             groups = [cpu_percentages[i:i+max_rows] for i in range(0, len(cpu_percentages), max_rows)]
+            # Plotext needs ~MIN_GROUP_WIDTH columns per group for the core label and a
+            # visible bar; showing fewer complete columns beats squeezing every core
+            # into a column too narrow to draw (which plotext would silently widen).
+            max_groups = max(1, width // self.MIN_GROUP_WIDTH)
+            if len(groups) > max_groups:
+                dropped = sum(len(g) for g in groups[max_groups:])
+                logger.debug("CPU chart: %d core(s) not shown at %dx%d", dropped, width, height)
+                groups = groups[:max_groups]
             num_groups = len(groups)
-            # Divide available width among the groups (with a minimum width).
+            # Divide available width among the groups.
             group_width = max(1, width // num_groups)
             group_charts = []
             for idx, group in enumerate(groups):
@@ -245,13 +231,18 @@ class CPUWidget(MetricWidget):
                 plt.bar(group_labels, group, orientation="h")
                 cpu_bar_color = get_rich_color("cpu_bar", "#0080FF")
                 try:
-                    chart_str = (ansi2rich(plt.build())
-                                .replace("\x1b[0m", "")
-                                .replace("\x1b[1m", "")
-                                .replace("[blue]", f"[{cpu_bar_color}]"))
+                    chart_str = recolor(
+                        ansi2rich(plt.build()).replace("\x1b[0m", "").replace("\x1b[1m", ""),
+                        {"blue": cpu_bar_color},
+                    )
                 except (ValueError, IndexError, TypeError):
                     chart_str = "\n".join(f" C{start_index + i}: {v}%" for i, v in enumerate(group))
-                group_charts.append(chart_str)
+                # Clip each column before stacking them side by side, so the combined
+                # line width stays num_groups * group_width.
+                chart_str = fit_lines(chart_str, chart_height)
+                group_charts.append(
+                    "\n".join(pad_markup(line, group_width) for line in chart_str.split("\n"))
+                )
             # Combine the group charts horizontally.
             if not group_charts:
                 return "CPU chart unavailable"
@@ -259,19 +250,45 @@ class CPUWidget(MetricWidget):
             max_lines = max(len(lines) for lines in group_lines)
             for lines in group_lines:
                 while len(lines) < max_lines:
-                    lines.append(" " * group_width)
+                    lines.append(" " * group_width)  # short columns padded to align rows
             combined_lines = []
             for i in range(max_lines):
                 combined_line = "".join(lines[i] for lines in group_lines)
                 combined_lines.append(combined_line)
             combined_cpu_chart = "\n".join(combined_lines)
-            
+            return self.finish_plot(combined_cpu_chart, width, height)
 
-            
-            return combined_cpu_chart#+"\n"+ rambars
+    def rerender(self) -> None:
+        """Re-draw every pane's chart at the size of the active pane's region.
+
+        Only the active pane has a region (Textual gives hidden panes zero size) and
+        all three panes share the same geometry, so the active one defines the canvas.
+        """
+        if self._last_cpu_percentages is None:
+            return
+        active = VIEW_MODES[self._view_mode_idx]
+        width, height = self.plot_region(
+            f"#cpu-content-{active}", reserve_height=self.TAB_BAR_HEIGHT
+        )
+        cpu_percentages = self._last_cpu_percentages
+        n = len(cpu_percentages)
+        for mode in VIEW_MODES:
+            display_percentages, labels_override = self._get_display_for_mode(mode, cpu_percentages, n)
+            chart = self.create_bar_chart(
+                display_percentages,
+                self._last_cpu_freqs,
+                self._last_mem_percent,
+                width,
+                height,
+                labels_override=labels_override,
+            )
+            try:
+                self.query_one(f"#cpu-content-{mode}").update(chart)
+            except NoMatches:
+                pass  # DOM not ready yet (e.g. after layout change)
 
     def update_content(self, cpu_percentages, cpu_freqs, mem_percent):
-        """Update the CPU widget: store data and refresh the plot in each tab pane."""
+        """Update the CPU widget: store data and refresh the chart in each tab pane."""
         self._last_cpu_percentages = cpu_percentages
         self._last_cpu_freqs = cpu_freqs
         self._last_mem_percent = mem_percent
@@ -283,21 +300,4 @@ class CPUWidget(MetricWidget):
             "cpu_percent_avg: %.1f, cpu_percent_max: %.1f, n_cores: %d, mem_percent: %.1f",
             avg, max_cpu, n, mem_percent,
         )
-        # Clamp so plotext gets valid size when layout has not run yet (e.g. after layout change)
-        width = max(10, (self.size.width or 0) - 1)
-        height = max(4, (self.size.height or 0) - 3)  # border + tab bar
-
-        for mode in VIEW_MODES:
-            display_percentages, labels_override = self._get_display_for_mode(mode, cpu_percentages, n)
-            chart = self.create_bar_chart(
-                display_percentages,
-                cpu_freqs,
-                mem_percent,
-                width,
-                height,
-                labels_override=labels_override,
-            )
-            try:
-                self.query_one(f"#cpu-content-{mode}").update(chart)
-            except NoMatches:
-                pass  # DOM not ready yet (e.g. after layout change)
+        self.rerender()

@@ -2,10 +2,10 @@ import logging
 from collections import deque
 from textual.app import ComposeResult
 from textual.widgets import Static
-from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align, substitute_plot_timeframe
+from ..utils.formatting import align, ansi2rich, recolor, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.temperature")
@@ -14,6 +14,25 @@ logger = logging.getLogger("ground-control.temperature")
 class TemperatureWidget(MetricWidget):
     """Widget for system temperature monitoring."""
 
+    # Sensor bars sit under the plot, one row per plotted sensor. The plot keeps at
+    # least PLOT_MIN_ROWS rows; whatever the bars cannot get, they do not show.
+    MAX_PLOT_SENSORS = 4
+    PLOT_MIN_ROWS = 6
+    # Narrowest bar row that still fits a name, a reading and some bar.
+    BARS_MIN_WIDTH = 9
+
+    DEFAULT_CSS = """
+    TemperatureWidget {
+        layout: vertical;
+    }
+    TemperatureWidget #temp-bars {
+        width: 1fr;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
+    }
+    """
+
     def __init__(self, title: str, id: str = None, history_size: int = 120):
         super().__init__(title=title, color=get_rich_color("temp_critical", "#FF0000"), history_size=history_size, id=id)
         self.temperature_histories = {}  # Store history for each sensor
@@ -21,11 +40,22 @@ class TemperatureWidget(MetricWidget):
         self.title = title
         self.border_title = title
         self.history_size = history_size
+        self._last_temperatures = {}
+        self._bars_rows_applied = None
 
     def compose(self) -> ComposeResult:
-        with Horizontal():
-            yield Static("", id="temp-plot", classes="metric-plot")
-            yield Static("", id="temp-bars", classes="metric-value")
+        yield Static("", id="temp-plot", classes="metric-plot")
+        yield Static("", id="temp-bars", classes="metric-value")
+
+    def _plotted_sensors(self, temperatures: dict) -> list:
+        """Sensors the plot will draw, in plot order (same order the bars use)."""
+        return [name for name, _ in self._sensor_priority_order(temperatures)][: self.MAX_PLOT_SENSORS]
+
+    def _bars_rows(self, panel_height: int, n_sensors: int) -> int:
+        """Rows for the bar block under the plot; 0 means "no room, hide it"."""
+        if panel_height <= self.PLOT_MIN_ROWS or n_sensors <= 0:
+            return 0
+        return min(n_sensors, self.MAX_PLOT_SENSORS, panel_height - self.PLOT_MIN_ROWS)
 
     def get_temp_color(self, temp: float) -> str:
         """Get color based on temperature value."""
@@ -40,63 +70,78 @@ class TemperatureWidget(MetricWidget):
         else:
             return get_rich_color("temp_critical", "#FF0000")  # Critical - red
 
-    def create_temperature_bars(self, temperatures: dict, total_width: int = 40) -> str:
-        """Create vertical temperature bars for current readings."""
+    # Palette used for the plot lines, in series order; the bars reuse it so a sensor
+    # has the same colour in both places.
+    def _plot_palette(self) -> list:
+        return [
+            get_rich_color("temp_plot_1", "#FF8C00"),
+            get_rich_color("temp_plot_2", "#00FF00"),
+            get_rich_color("temp_plot_3", "#0080FF"),
+        ]
+
+    def _sensor_priority_order(self, temperatures: dict) -> list:
+        """(name, temp) pairs ordered the way the plot draws them (priority, then hottest)."""
+        priorities = {
+            "cpu": 1, "core": 2, "gpu": 3, "motherboard": 4, "chipset": 5,
+            "acpi": 6, "temp1": 7, "temp2": 8, "temp3": 9,
+        }
+        valid = {k: v for k, v in temperatures.items() if 0 <= v <= 150}
+        return sorted(
+            valid.items(),
+            key=lambda item: (
+                min([p for key, p in priorities.items() if key in item[0].lower()] or [10]),
+                -item[1],
+            ),
+        )
+
+    def create_temperature_bars(self, temperatures: dict, total_width: int, total_height: int) -> str:
+        """One row per plotted sensor, in plot order, each exactly ``total_width`` cells.
+
+        A sensor's bar uses the colour of its line in the plot above, so the two views
+        read as one; a sensor the plot did not draw gets no row.
+        """
         if not temperatures:
             return "No temperature data available"
+        if total_width < self.BARS_MIN_WIDTH or total_height <= 0:
+            return ""
 
-        # try:
-        # Filter out extremely high or low values (likely sensor errors)
-        valid_temps = {k: v for k, v in temperatures.items() if 0 <= v <= 150}
-
-        if not valid_temps:
+        ordered = self._sensor_priority_order(temperatures)
+        if not ordered:
             return "No valid temperature readings"
 
-        # Sort sensors by temperature (hottest first)
-        sorted_temps = sorted(valid_temps.items(), key=lambda x: x[1], reverse=True)
+        # Line layout: name + " " + "100.0°C" + " " + bar == total_width
+        temp_field = 7
+        bar_width = max(3, total_width // 3)
+        name_width = total_width - bar_width - temp_field - 2
+        if name_width < 3:
+            name_width = 0
+            bar_width = max(1, total_width - temp_field - 1)
 
-        # Create bars for each sensor
+        palette = self._plot_palette()
+        max_temp = max(1.0, float(self.max_temp))
         bars = []
-        for sensor_name, temp in sorted_temps[:6]:  # Show max 6 sensors
-            # Clean up sensor name for display
-            display_name = sensor_name.replace("_", " ").title()
-            if len(display_name) > 12:
-                display_name = display_name[:12] + "..."
-
-            # Calculate bar length (scale to available width)
-            bar_width = min(total_width - 20, 25)  # Reserve space for labels
-            temp_percent = min(temp / self.max_temp, 1.0)
+        for i, (sensor_name, temp) in enumerate(ordered[: min(total_height, self.MAX_PLOT_SENSORS)]):
+            temp_percent = min(temp / max_temp, 1.0)
             filled_blocks = int(bar_width * temp_percent)
             empty_blocks = bar_width - filled_blocks
 
-            # Get color based on temperature
-            color = self.get_temp_color(temp)
-
-            # Create temperature bar
+            # Same colour as this sensor's line in the plot (series order == this order).
+            color = palette[i % len(palette)]
             temp_bar = f"[{color}]{'█' * filled_blocks}[/]{'░' * empty_blocks}"
+            temp_str = align(f"{temp:.1f}°C", temp_field, "right")
 
-            # Format temperature value
-            temp_str = f"{temp:5.1f}°C"
-
-            # Align sensor name
-            sensor_aligned = align(display_name, 12, "left")
-
-            bar_line = f"{sensor_aligned} {temp_str} {temp_bar}"
+            if name_width:
+                display_name = sensor_name.replace("_", " ").title()
+                bar_line = f"[{color}]{align(display_name, name_width, 'left')}[/] {temp_str} {temp_bar}"
+            else:
+                bar_line = f"{temp_str} {temp_bar}"
             bars.append(bar_line)
 
         return "\n".join(bars)
 
-        # except Exception as e:
-        #     return f"Error creating temperature bars: {str(e)}"
-
-    def get_temperature_plot(self, temperatures: dict) -> str:
-        """Create a multi-line temperature plot."""
-        # Validate plot dimensions
-        plot_height = max(1, getattr(self, "plot_height", 10))
-        plot_width = max(10, getattr(self, "plot_width", 40))
-        
-        if plot_height <= 0 or plot_width <= 0:
-            return "Initializing..."
+    def get_temperature_plot(self, temperatures: dict, width: int, height: int) -> str:
+        """Create a multi-line temperature plot on a (width, height) canvas."""
+        plot_width, plot_height = width, height
         # Update histories for each sensor
         for sensor_name, temp in temperatures.items():
             if sensor_name not in self.temperature_histories:
@@ -117,9 +162,8 @@ class TemperatureWidget(MetricWidget):
         if not self.temperature_histories:
             return "No temperature data to plot"
 
-        # Use validated dimensions from earlier
-        plot_height = max(6, plot_height)
-        plot_width = max(20, plot_width)
+        if not self.plot_fits(plot_width, plot_height):
+            return self.too_small_text(plot_width, plot_height)
 
         plt.clear_figure()
         plt.plot_size(height=plot_height, width=plot_width)
@@ -143,58 +187,13 @@ class TemperatureWidget(MetricWidget):
 
         plt.ylim(min_temp, max_temp)
 
-        # Plot up to 4 most important sensors
-        sensor_priorities = {
-            "cpu": 1,
-            "core": 2,
-            "gpu": 3,
-            "motherboard": 4,
-            "chipset": 5,
-            "acpi": 6,
-            "temp1": 7,
-            "temp2": 8,
-            "temp3": 9,
-        }
-
-        # Sort sensors by priority and temperature
-        sorted_sensors = sorted(
-            self.temperature_histories.items(),
-            key=lambda x: (
-                min(
-                    [
-                        sensor_priorities.get(key, 10)
-                        for key in sensor_priorities.keys()
-                        if key in x[0].lower()
-                    ]
-                    or [10]
-                ),  # Provide fallback value
-                -max(x[1]) if x[1] else 0,
-            ),
-        )
-
-        colors = [
-            get_rich_color("temp_plot_1", "#FF8C00"),
-            get_rich_color("temp_plot_2", "#00FF00"),
-            get_rich_color("temp_plot_3", "#0080FF"),
-            get_rich_color("temp_plot_1", "#FF8C00"),
-            get_rich_color("temp_plot_2", "#00FF00"),
-            get_rich_color("temp_plot_3", "#0080FF"),
-            get_rich_color("temp_plot_1", "#FF8C00"),
-            get_rich_color("temp_plot_2", "#00FF00"),
-            get_rich_color("temp_plot_3", "#0080FF"),
-            get_rich_color("temp_plot_1", "#FF8C00"),
-            get_rich_color("temp_plot_2", "#00FF00"),
-            get_rich_color("temp_plot_3", "#0080FF"),
-        ]
-
-        for i, (sensor_name, history) in enumerate(sorted_sensors[:4]):
+        # Draw the most important sensors, in the same order the bars list them
+        for sensor_name in self._plotted_sensors(temperatures):
+            history = self.temperature_histories.get(sensor_name)
             if history:
-                color = colors[i % len(colors)]
-                # Create short label for legend
+                # Short label for the legend
                 short_name = sensor_name.replace("_", "").replace(" ", "")
-                plt.plot(
-                    list(history), marker="braille", label=short_name
-                )  # , color=color)
+                plt.plot(list(history), marker="braille", label=short_name)
 
         # Set temperature-specific y-axis labels
         num_ticks = min(5, plot_height - 1)
@@ -214,28 +213,65 @@ class TemperatureWidget(MetricWidget):
         if max_temp > 60:
             plt.hline(60, color=caution_color)  # Caution line
 
-        # Map plotext colors to config colors
-        plot_color_1 = get_rich_color("temp_plot_1", "#FF8C00")
-        plot_color_2 = get_rich_color("temp_plot_2", "#00FF00")
-        plot_color_3 = get_rich_color("temp_plot_3", "#0080FF")
+        # Recolour the series to the palette the bars use. Plotext assigns its colours
+        # in plot order: 1st -> [blue], 2nd -> [green], 3rd -> [magenta], 4th -> [cyan].
+        palette = self._plot_palette()
         yellow_color = get_rich_color("temp_warm", "#FFFF00")
         red_color = get_rich_color("temp_critical", "#FF0000")
-        result = (ansi2rich(plt.build())
-                 .replace("[brown]", f"[{yellow_color}]")
-                 .replace("[red]", f"[{red_color}]")
-                 .replace("[blue]", f"[{plot_color_1}]")
-                 .replace("[green]", f"[{yellow_color}]")
-                 .replace("[magenta]", f"[{red_color}]")
-                 .replace("[yellow]", f"[{yellow_color}]")
-                 .replace("\x1b[0m", "")
-                 .replace("──────┐", "──°C──┐"))
+        result = recolor(
+            ansi2rich(plt.build()).replace("\x1b[0m", ""),
+            {
+                "blue": palette[0],      # 1st sensor plotted
+                "green": palette[1],     # 2nd
+                "magenta": palette[2],   # 3rd
+                "cyan": palette[0],      # 4th wraps around the palette
+                "brown": yellow_color,
+                "red": red_color,
+                "yellow": yellow_color,
+            },
+        ).replace("──────┐", "──°C──┐")
         # Show timeframe ticks only when at least one sensor's history is full
         if any(h and len(h) >= self.history_size for h in self.temperature_histories.values()):
             result = substitute_plot_timeframe(result, self.history_size)
-        return result
+        return self.finish_plot(result, plot_width, plot_height)
 
-        # except Exception as e:
-        #     return f"Error creating temperature plot: {str(e)}"
+    def rerender(self) -> None:
+        """Re-draw plot and sensor bars for the current region sizes."""
+        temperatures = self._last_temperatures
+        try:
+            temp_plot = self.query_one("#temp-plot")
+            temp_bars = self.query_one("#temp-bars")
+        except NoMatches:
+            return  # DOM not ready yet (e.g. after layout change)
+
+        if not temperatures:
+            temp_plot.update("No temperature sensors detected\non this system")
+            temp_bars.update("Temperature monitoring\nnot available")
+            return
+
+        # Fix the bar block's height (or hide it) so the plot's 1fr region is exact.
+        bars_rows = self._bars_rows(
+            self.content_size.height, len(self._plotted_sensors(temperatures))
+        )
+        if bars_rows != self._bars_rows_applied:
+            self._bars_rows_applied = bars_rows
+            temp_bars.styles.height = bars_rows or None
+            temp_bars.display = bool(bars_rows)
+            # The plot's region only reflects the new split after this layout pass.
+            self.call_after_refresh(self.rerender)
+
+        plot_width, plot_height = self.plot_region("#temp-plot", reserve_height=bars_rows)
+        try:
+            temp_plot.update(self.get_temperature_plot(temperatures, plot_width, plot_height))
+            if bars_rows:
+                bars_width, bars_height = self.region_size("#temp-bars")
+                temp_bars.update(
+                    self.create_temperature_bars(temperatures, bars_width, bars_height)
+                )
+        except Exception as e:
+            logger.debug("Temperature render error: %s", e, exc_info=True)
+            temp_plot.update(f"Temperature widget error:\n{str(e)}")
+            temp_bars.update("Error updating\ntemperature data")
 
     def update_content(self, temperatures: dict):
         """Update the widget with new temperature data."""
@@ -243,36 +279,5 @@ class TemperatureWidget(MetricWidget):
             parts = [f"{k}: {v:.1f}" for k, v in sorted(temperatures.items()) if 0 <= v <= 150]
             if parts:
                 logger.info(", ".join(parts))
-        if not temperatures:
-            # Show a message when no temperature data is available
-            try:
-                temp_plot = self.query_one("#temp-plot")
-                temp_plot.update("No temperature sensors detected\non this system")
-
-                temp_bars = self.query_one("#temp-bars")
-                temp_bars.update("Temperature monitoring\nnot available")
-            except Exception as e:
-                print(f"Error updating empty temperature widget: {e}")
-            return
-
-        try:
-            # Update the temperature plot
-            temp_plot = self.query_one("#temp-plot")
-            plot_content = self.get_temperature_plot(temperatures)
-            temp_plot.update(plot_content)
-
-            # Update the temperature bars
-            temp_bars = self.query_one("#temp-bars")
-            bar_width = getattr(self, "plot_width", 40)
-            bars_content = self.create_temperature_bars(temperatures, bar_width)
-            temp_bars.update(bars_content)
-
-        except Exception as e:
-            # Show the actual error for debugging
-            try:
-                temp_plot = self.query_one("#temp-plot")
-                temp_plot.update(f"Temperature widget error:\n{str(e)}")
-                temp_bars = self.query_one("#temp-bars")
-                temp_bars.update("Error updating\ntemperature data")
-            except:
-                pass
+        self._last_temperatures = temperatures or {}
+        self.rerender()

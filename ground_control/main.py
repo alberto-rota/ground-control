@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 import click
 from platformdirs import user_config_dir
-from .app import GroundControl
+from .app import DEFAULT_DISK_IGNORE_PREFIXES, GroundControl
 from .utils.colors import DEFAULT_COLORS, apply_theme, get_available_themes
 
 # Set up the user-specific config file path
@@ -183,6 +183,7 @@ def get_default_config():
         "refresh_rate": 1.0,
         "history_size": 120,
         "widget_tabs": {},
+        "disk_ignore_prefixes": ", ".join(DEFAULT_DISK_IGNORE_PREFIXES),
         "colors": DEFAULT_COLORS.copy(),
     }
 

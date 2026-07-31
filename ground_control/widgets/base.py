@@ -3,10 +3,8 @@ from textual.widgets import Static
 from textual.message import Message
 from textual.css.query import NoMatches
 import plotext as plt
-from ..utils.formatting import ansi2rich
+from ..utils.formatting import align, ansi2rich, fit_lines
 from ..utils.colors import get_rich_color, load_colors
-from textual.scroll_view import ScrollView
-from textual.geometry import Size
 class MetricWidget(Static):
     """Base widget for system metrics with plot."""
 
@@ -27,31 +25,50 @@ class MetricWidget(Static):
         except Exception:
             pass
 
+    # Below this, a plotext canvas has no room for axis + labels: show a hint instead.
+    MIN_PLOT_WIDTH = 8
+    MIN_PLOT_HEIGHT = 3
+
     DEFAULT_CSS = """
     MetricWidget {
         height: 100%;
         border: solid green;
         background: $surface;
-        overflow-y: auto;
-        overflow-x: auto;
+        /* Panels never scroll: every child is rendered to fit its region exactly,
+           so a scrollbar would only ever appear because of a sizing bug (and would
+           itself steal a row/column and make the overflow worse). */
+        overflow: hidden hidden;
     }
-    
+
     .metric-title {
         text-align: left;
         height: 1;
     }
-    
+
+    /* Plot/bar content is pre-sized to the region: never re-wrap it, clip instead.
+       A single wrapped line would shift everything below it out of the panel. */
     .metric-value {
         text-align: left;
         height: 1;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
     }
     .cpu-metric-value {
         text-align: left;
-    }
-    
-    .metric-plot {
         height: 1fr;
-        min-height: 10;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
+    }
+
+    .metric-plot {
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
     }
     """
 
@@ -69,67 +86,193 @@ class MetricWidget(Static):
         self.plot_width = 0
         self.plot_height = 0
 
-    def on_resize(self, event: Message) -> None:
-        """Handle resize events to update plot dimensions.
+    # ------------------------------------------------------------------ geometry
 
-        Uses the actual .metric-plot container size when available so width/height
-        match the plot region (not the whole widget). Fallback: widget size minus
-        a small margin. Min 8x30 keeps plotext readable.
+    def region_size(self, selector: str, reserve_width: int = 0, reserve_height: int = 0):
+        """Return the live content region ``(width, height)`` of a child widget.
+
+        This is the single source of truth for how big a plot or bar may be: the
+        child's region already excludes the panel border, the tab bar and any
+        sibling rows, so plotext can be asked for exactly that many cells.
+
+        Before the first layout pass the child has no size yet; then fall back to
+        this widget's own content area minus the chrome the caller knows about.
         """
         try:
-            plot_region = self.query_one(".metric-plot")
-            pw = getattr(plot_region.size, "width", 0) or 0
-            ph = getattr(plot_region.size, "height", 0) or 0
-            if pw > 0 and ph > 0:
-                self.plot_width = max(30, pw)
-                self.plot_height = max(8, ph)
-                rows = max(1, ph)
-                self.virtual_size = Size(rows, pw)
-                self.refresh()
-                return
+            child = self.query_one(selector)
         except NoMatches:
-            pass
-        w = max(0, event.size.width - 3)
-        h = max(0, event.size.height - 3)
-        self.plot_width = max(30, w)
-        self.plot_height = max(8, h)
-        rows = max(1, event.size.height // 4)
-        self.virtual_size = Size(rows, event.size.width)
-        self.refresh()
+            child = None
+        if child is not None:
+            size = child.content_size
+            if size.width > 0 and size.height > 0:
+                return size.width, size.height
+        own = self.content_size
+        return (
+            max(0, own.width - reserve_width),
+            max(0, own.height - reserve_height),
+        )
 
-    def get_plot(self, y_min=0, y_max=100) -> str:
+    def plot_region(self, selector: str = ".metric-plot", reserve_width: int = 0, reserve_height: int = 0):
+        """Region size for a plot child; also caches it as ``plot_width``/``plot_height``."""
+        width, height = self.region_size(selector, reserve_width, reserve_height)
+        self.plot_width = width
+        self.plot_height = height
+        return width, height
+
+    def plot_fits(self, width: int, height: int) -> bool:
+        """True when the region is big enough for plotext to draw axes and labels."""
+        return width >= self.MIN_PLOT_WIDTH and height >= self.MIN_PLOT_HEIGHT
+
+    def too_small_text(self, width: int, height: int) -> str:
+        """Placeholder for regions too small to plot in; never wider than the region."""
+        if width <= 0 or height <= 0:
+            return ""
+        for text in ("too small", "small", "···"):
+            if len(text) <= width:
+                return f"[dim]{text}[/]"
+        return "[dim]" + "·" * width + "[/]"
+
+    # ------------------------------------------------------------------ split bars
+
+    # Powerline tips drawn at the growing end of a bar (one cell each).
+    ARROW_LEFT = ""
+    ARROW_RIGHT = ""
+    # Width of the value labels flanking a split bar, and the smallest bar worth
+    # keeping them for (below it the bar spans the whole width instead).
+    SPLIT_LABEL_WIDTH = 9
+    SPLIT_MIN_BAR = 6
+
+    def build_split_bar(
+        self,
+        total_width: int,
+        left_fraction: float,
+        right_fraction: float,
+        left_color: str,
+        right_color: str,
+        left_label: str = None,
+        right_label: str = None,
+        left_from_centre: bool = True,
+    ) -> str:
+        """One-line bar split by a separator sitting on the exact centre column.
+
+        The separator is placed at ``total_width // 2`` and the two label fields have
+        equal width, so the bar reads as centred; the left label is flush with the left
+        edge and the right label with the right edge, so the line spans the full region.
+        The result is exactly ``total_width`` cells.
+
+        ``left_from_centre`` mirrors the left half (blocks grow from the separator
+        outwards, as in the network widget); when False the left half is a gauge growing
+        from the left edge towards the separator, as in the GPU widget.
+        """
+        total_width = int(total_width)
+        if total_width <= 0:
+            return ""
+
+        label_w = self.SPLIT_LABEL_WIDTH if (left_label is not None and right_label is not None) else 0
+        separator = total_width // 2
+        left_half = separator - (label_w + 1 if label_w else 0)
+        right_half = total_width - separator - 1 - (label_w + 1 if label_w else 0)
+        if label_w and min(left_half, right_half) < self.SPLIT_MIN_BAR // 2:
+            # Not enough room for labels: let the bar use the full width.
+            label_w = 0
+            left_half = separator
+            right_half = total_width - separator - 1
+        left_half = max(0, left_half)
+        right_half = max(0, right_half)
+
+        left_blocks = min(left_half, int(left_half * min(max(left_fraction, 0.0), 1.0)))
+        right_blocks = min(right_half, int(right_half * min(max(right_fraction, 0.0), 1.0)))
+
+        if left_blocks >= 1:
+            if left_from_centre:
+                left_bar = (
+                    f"{'─' * (left_half - left_blocks)}"
+                    f"[{left_color}]{self.ARROW_LEFT}{'█' * (left_blocks - 1)}[/]"
+                )
+            else:
+                left_bar = (
+                    f"[{left_color}]{'█' * (left_blocks - 1)}{self.ARROW_RIGHT}[/]"
+                    f"{'─' * (left_half - left_blocks)}"
+                )
+        else:
+            left_bar = "─" * left_half
+        if right_blocks >= 1:
+            right_bar = (
+                f"[{right_color}]{'█' * (right_blocks - 1)}{self.ARROW_RIGHT}[/]"
+                f"{'─' * (right_half - right_blocks)}"
+            )
+        else:
+            right_bar = "─" * right_half
+
+        if not label_w:
+            return f"{left_bar}│{right_bar}"
+        # Labels hug the outer edges so the line reaches both borders.
+        left_text = align(left_label, label_w, "left")
+        right_text = align(right_label, label_w, "right")
+        return (
+            f"[{left_color}]{left_text}[/] {left_bar}│{right_bar} "
+            f"[{right_color}]{right_text}[/]"
+        )
+
+    def finish_plot(self, build: str, width: int, height: int) -> str:
+        """Trim a built plot so it can never exceed its region.
+
+        ``plt.build()`` terminates with a newline, which Rich renders as an extra
+        blank row; combined with an off-by-one canvas that alone pushed the last
+        plot row out of the panel. Lines are clipped too, because plotext quietly
+        overshoots the requested width on very narrow labelled bar charts.
+        """
+        return fit_lines(build, height, width)
+
+    def on_resize(self, event: Message) -> None:
+        """Re-draw cached data at the new size (nothing is re-sampled).
+
+        Runs after the refresh so children have their new regions when we measure.
+        """
+        self.call_after_refresh(self.rerender)
+
+    def rerender(self) -> None:
+        """Re-draw from the last received data. Overridden by widgets that plot."""
+
+    # -------------------------------------------------------------------- drawing
+
+    def get_plot(self, y_min=0, y_max=100, width: int = None, height: int = None) -> str:
         if not self.history:
             return "No data yet..."
 
+        if width is None or height is None:
+            width, height = self.plot_region()
+        if not self.plot_fits(width, height):
+            return self.too_small_text(width, height)
+
         plt.clear_figure()
-        h = max(1, getattr(self, "plot_height", 10))
-        w = max(10, getattr(self, "plot_width", 40))
-        plt.plot_size(height=h, width=w)
+        plt.plot_size(height=height, width=width)
         plt.theme("pro")
         plt.plot(list(self.history), marker="braille")
         plt.ylim(y_min, y_max)
         plt.xfrequency(0)
         plt.yfrequency(3)
-        return ansi2rich(plt.build()).replace("\x1b[0m","").replace("[blue]",f"[{self.color}]")
-    
+        build = ansi2rich(plt.build()).replace("\x1b[0m", "").replace("[blue]", f"[{self.color}]")
+        return self.finish_plot(build, width, height)
+
     def create_gradient_bar(self, value: float, width: int = 20, color: str = None) -> str:
         """Creates a gradient bar with custom base color."""
         filled = int((width * value) / 100)
         if filled > width * 0.8:
             color = get_rich_color("high_value", "#FF0000")
         empty = width - filled
-        
+
         if filled == 0:
             return "─" * width
-        
+
         bar_color = self.color if color is None else color
-        
+
         if value < 20:
             return f"[{bar_color}]{'█' * filled}[/]{'─' * empty}"
-        
+
         bar = (f"[{bar_color}]{'█' * filled}[/]"
                f"{'─' * empty}")
-        
+
         return bar
 
     def format_metric_line(self, label: str, value: float, suffix: str = "%") -> str:

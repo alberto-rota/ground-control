@@ -54,13 +54,17 @@ class SlurmJobsWidget(VerticalScroll):
 
     DEFAULT_CSS = """
     SlurmJobsWidget {
+        /* Job list may be longer than the panel (scrolls vertically), but rows are
+           clipped rather than wrapped so nothing spills past the border. */
         overflow-y: auto;
-        overflow-x: auto;
+        overflow-x: hidden;
     }
     SlurmJobsWidget > #slurm-jobs-body {
         width: 1fr;
         height: auto;
         padding: 0 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
     """
 

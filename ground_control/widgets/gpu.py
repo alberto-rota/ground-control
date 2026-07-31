@@ -5,12 +5,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static, TabbedContent, TabPane, Button
 from textual import on
-from textual.message import Message
 from textual.css.query import NoMatches
-from textual.geometry import Size
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, align, format_size, substitute_plot_timeframe
+from ..utils.formatting import ansi2rich, format_size, recolor, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 import logging
 
@@ -45,6 +43,7 @@ class ProcessRow(Static):
         min-width: 0;
         height: 3;
         overflow: hidden;
+        text-wrap: nowrap;
         text-overflow: ellipsis;
     }
     ProcessRow .sigkill-btn {
@@ -191,16 +190,25 @@ class GPUWidget(MetricWidget):
         ("p", "show_plot", "GPU: plot"),
     ]
 
+    # Rows taken by the tab bar (tabs + underline) and the bar line under the plot;
+    # only used to estimate the plot region before the first layout pass.
+    CHROME_HEIGHT = 3
+
     DEFAULT_CSS = """
     GPUWidget {
         layout: vertical;
-        overflow-y: auto;
     }
     #gpu-tabbed {
         height: 1fr;
     }
     .gpu-plot-pane {
         height: 1fr;
+    }
+    GPUWidget #current-value {
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
     }
     .gpu-processes-pane {
         height: 1fr;
@@ -238,6 +246,8 @@ class GPUWidget(MetricWidget):
         self.border_title = title
         self.usage_is_available = True
         self._initial_tab = initial_tab if initial_tab in ("plot", "processes") else "plot"
+        self.max_val = 1
+        self._last_processes = None
 
     def compose(self) -> ComposeResult:
         with TabbedContent(initial=self._initial_tab, id="gpu-tabbed"):
@@ -247,26 +257,10 @@ class GPUWidget(MetricWidget):
             with TabPane("Processes", id="processes"):
                 yield GPUProcessList(id="gpu-processes", classes="gpu-processes-pane")
 
-    def on_resize(self, event: Message) -> None:
-        """Update plot dimensions; use smaller fallback height to leave room for the bar line."""
-        try:
-            plot_region = self.query_one(".metric-plot")
-            pw = getattr(plot_region.size, "width", 0) or 0
-            ph = getattr(plot_region.size, "height", 0) or 0
-            if pw > 0 and ph > 0:
-                self.plot_width = max(30, pw)
-                self.plot_height = max(8, ph)
-                self.virtual_size = Size(max(1, ph), pw)
-                self.refresh()
-                return
-        except NoMatches:
-            pass
-        w = max(0, event.size.width - 3)
-        h = max(0, event.size.height - 3)  # leave room for bar line
-        self.plot_width = max(30, w)
-        self.plot_height = max(8, h)
-        self.virtual_size = Size(max(1, event.size.height // 4), event.size.width)
-        self.refresh()
+    @on(TabbedContent.TabActivated, "#gpu-tabbed")
+    def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Re-draw for the newly revealed pane, whose region is only sized once active."""
+        self.call_after_refresh(self.rerender)
 
     def _set_tab(self, tab_id: str) -> None:
         """Programmatically switch between plot and processes tabs."""
@@ -287,64 +281,47 @@ class GPUWidget(MetricWidget):
         """Show the GPU processes tab."""
         self._set_tab("processes")
 
+    @staticmethod
+    def ram_color(warning: bool = False) -> str:
+        """Colour of the GPU-RAM series — used for both the plot line and the bar."""
+        if warning:
+            return get_rich_color("gpu_ram_warning", "#FF0000")
+        return get_rich_color("gpu_plot_ram", get_rich_color("gpu_ram", "#00FF00"))
+
+    @staticmethod
+    def usage_color() -> str:
+        """Colour of the GPU-usage series — used for both the plot line and the bar."""
+        return get_rich_color("gpu_plot_usage", get_rich_color("gpu_usage", "#00FFFF"))
+
     def create_center_bar(
         self, gpu_ram: float, gpu_usage: float, content_width: int
     ) -> str:
-        """Build the RAM | Usage bar, spanning content_width and centered."""
-        # Fixed label widths: 12 (ram) + 14 (usage) + 3 spaces/separator = 29
-        bar_total = max(10, content_width - 15)
-        half_width = bar_total // 2
+        """RAM | usage bar: one line, centre separator on the middle column.
 
-        gpu_ram_withunits = align(format_size(gpu_ram, in_gb=True), 6, "right")
-        gpu_usage_withunits = align(f"{gpu_usage:.1f} %", 14, "left")
-        gpu_ram_percent = min((gpu_ram / self.max_val) * 100, 100)
-        gpu_usage_percent = gpu_usage
-
-        ram_blocks = int((half_width * gpu_ram_percent) / 100)
-        usage_blocks = int((half_width * gpu_usage_percent) / 100)
-
-        gpu_ram_color = get_rich_color("gpu_ram", "#00FF00")
-        gpu_usage_color = get_rich_color("gpu_usage", "#00FFFF")
-        white_color = get_rich_color("white", "#FFFFFF")
-        left_bar = (
-            (
-                f"[{gpu_ram_color}]{'█' * (ram_blocks-1)}{''}[/][{white_color}]{'─' * (half_width - ram_blocks)}[/]"
-            )
-            if ram_blocks >= 1
-            else f"{'─' * half_width}"
-        )
-        right_bar = (
-            (
-                f"[{gpu_usage_color}]{'█' * (usage_blocks-3)}{''}[/]{'─' * (half_width - usage_blocks)}"
-            )
-            if usage_blocks >= 1
-            else f"{'─' * half_width}"
+        Sides use the same colours as the corresponding plot lines; RAM turns to the
+        warning colour past 90% of the card's memory.
+        """
+        max_val = self.max_val or 1
+        ram_fraction = gpu_ram / max_val
+        return self.build_split_bar(
+            content_width,
+            left_fraction=ram_fraction,
+            right_fraction=gpu_usage / 100,
+            left_color=self.ram_color(warning=ram_fraction >= 0.9),
+            right_color=self.usage_color(),
+            left_label=format_size(gpu_ram, in_gb=True),
+            right_label=f"{gpu_usage:.1f} %",
+            # RAM reads as a gauge filling from the left edge towards the centre.
+            left_from_centre=False,
         )
 
-        if gpu_ram_percent >= 90:
-            warning_color = get_rich_color("gpu_ram_warning", "#FF0000")
-            gpu_ram_withunits = f"[{warning_color}]{gpu_ram_withunits}[/]"
-            left_bar = left_bar.replace(f"[{gpu_ram_color}]", f"[{warning_color}]")
-
-        bar_content = f"{gpu_ram_withunits} {left_bar}│{right_bar} {gpu_usage_withunits}"
-        bar_display_len = 12 + 1 + half_width + 1 + half_width + 1 + 14
-        if content_width > bar_display_len:
-            pad_left = (content_width - bar_display_len) // 2
-            pad_right = content_width - bar_display_len - pad_left
-            return " " * pad_left + bar_content + " " * pad_right
-        return bar_content
-
-    def get_dual_plot(self) -> str:
+    def get_dual_plot(self, width: int, height: int) -> str:
         if not self.gpu_ram_history:
             return "No data yet..."
+        if not self.plot_fits(width, height):
+            return self.too_small_text(width, height)
 
-        # Validate plot dimensions
-        plot_height = max(1, getattr(self, "plot_height", 10))
-        plot_width = max(10, getattr(self, "plot_width", 40))
-        
-        if plot_height <= 0 or plot_width <= 0:
-            return "Initializing..."
-
+        plot_width, plot_height = width, height
         plt.clear_figure()
         plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
@@ -382,17 +359,34 @@ class GPUWidget(MetricWidget):
         if not self.usage_is_available:
             current_yticks = [-100, -75, -50, -25, 0]
             plt.yticks(current_yticks, [0, 25, 50, 75, 100])
-        gpu_ram_color = get_rich_color("gpu_plot_ram", "#00FF00")
-        gpu_usage_color = get_rich_color("gpu_plot_usage", "#00FFFF")
-        build = ansi2rich(plt.build())
-        build = build.replace("\x1b[0m", "")
-        build = build.replace("[blue]", f"[{gpu_usage_color}]")
-        build = build.replace("[green]", f"[{gpu_ram_color}]")
+        # Series order fixes the colours: usage is plotted first -> [blue], RAM -> [green].
+        build = recolor(
+            ansi2rich(plt.build()).replace("\x1b[0m", ""),
+            {"blue": self.usage_color(), "green": self.ram_color()},
+        )
         build = build.replace("-", " ")
         build = build.replace("──────┐", "─GB─%─┐")
         if len(self.gpu_ram_history) >= self.gpu_ram_history.maxlen:
             build = substitute_plot_timeframe(build, self.gpu_ram_history.maxlen)
-        return build
+        return self.finish_plot(build, plot_width, plot_height)
+
+    def rerender(self) -> None:
+        """Re-draw plot and bar from stored history at the current region sizes."""
+        if not self.gpu_ram_history:
+            return
+        plot_width, plot_height = self.plot_region(
+            "#history-plot", reserve_height=self.CHROME_HEIGHT
+        )
+        bar_width, _ = self.region_size("#current-value")
+        try:
+            self.query_one("#history-plot").update(self.get_dual_plot(plot_width, plot_height))
+            self.query_one("#current-value").update(
+                self.create_center_bar(
+                    self.gpu_ram_history[-1], self.gpu_usage_history[-1], bar_width
+                )
+            )
+        except NoMatches:
+            pass  # DOM not ready yet (e.g. after layout switch)
 
     def update_content(
         self, gpu_name, gpu_usage, mem_used, mem_total, processes=None
@@ -410,20 +404,10 @@ class GPUWidget(MetricWidget):
             "gpu_name: %s, gpu_usage: %.1f, mem_used_gb: %.2f, mem_total_gb: %.2f, processes_count: %d",
             gpu_name, gpu_usage, mem_used, mem_total, n_proc,
         )
-        # Use the bar container's width so the bar spans full width; fallback to widget size.
-        try:
-            bar_region = self.query_one("#current-value")
-            content_width = getattr(bar_region.size, "width", 0) or 0
-        except NoMatches:
-            content_width = 0
-        if content_width <= 0:
-            content_width = self.size.width or 0
-        try:
-            self.query_one("#history-plot").update(self.get_dual_plot())
-            self.query_one("#current-value").update(
-                self.create_center_bar(mem_used, gpu_usage, content_width)
-            )
-            if processes is not None:
+        self.rerender()
+        if processes is not None:
+            self._last_processes = processes
+            try:
                 self.query_one("#gpu-processes").update_processes(processes)
-        except NoMatches:
-            pass  # DOM not ready yet (e.g. after layout switch)
+            except NoMatches:
+                pass  # DOM not ready yet (e.g. after layout switch)

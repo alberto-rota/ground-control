@@ -39,6 +39,6 @@ No linter or formatter is configured.
 
 **Config**: persisted at `~/.config/ground-control/config.json` (via `platformdirs`). Stores widget visibility, layout, refresh rate, history size, and the full color palette. `get_default_config()` in `main.py` defines the schema.
 
-**Themes**: `ground_control/themes/*.json` (11 themes). Each JSON file defines per-widget color keys. `utils/colors.py` merges theme → config → hardcoded defaults. `gc theme --name` writes the theme colors into the config file; the app reads colors from config on next launch.
+**Themes**: `ground_control/themes/*.json` (20 themes). Each JSON file defines the same 54 per-widget color keys; the CLI flags (`gc theme --<name>`) and the Settings theme list are both built from the directory listing, so adding a JSON file is all that is needed for a new theme. `utils/colors.py` merges theme → config → hardcoded defaults. `gc theme --name` writes the theme colors into the config file; the app reads colors from config on next launch.
 
 **GPU support**: NVIDIA only, via nvitop for device enumeration and nvidia-ml-py for metrics. MiG devices are detected but utilization may be unavailable ("Usage UNAV").
