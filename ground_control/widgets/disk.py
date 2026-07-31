@@ -26,6 +26,19 @@ class DiskIOWidget(MetricWidget):
     # Rows used by the disk-usage block under the plot (labels + bar).
     USAGE_HEIGHT = 2
 
+    # Widths of the vertical read/write column, widest first. The labeled width fits
+    # the longest throughput label ("512 KB/s") plus a one-cell gutter that keeps it off
+    # the plot border; the narrower ones drop the labels so a cramped panel spends its
+    # cells on the plot instead.
+    BAR_WIDTH_LABELED = 9
+    BAR_WIDTH_TRACK = 3
+    BAR_WIDTH_MIN = 1
+    # Panel content widths at which those columns become affordable.
+    MIN_PANEL_FOR_LABELS = 32
+    MIN_PANEL_FOR_TRACK = 16
+    # Cells of solid block used for the bar itself inside the column.
+    BAR_BLOCK_WIDTH = 3
+
     DEFAULT_CSS = """
     DiskIOWidget {
         layout: vertical;
@@ -34,9 +47,9 @@ class DiskIOWidget(MetricWidget):
     DiskIOWidget > Horizontal {
         height: 1fr;
     }
-    /* One cell wide: the bar is rendered one character per line. */
+    /* Width is set from rerender(); the labels need more than one cell. */
     DiskIOWidget .metric-value-vertical {
-        width: 1;
+        width: 9;
         height: 1fr;
         text-wrap: nowrap;
         text-overflow: clip;
@@ -59,6 +72,7 @@ class DiskIOWidget(MetricWidget):
         self.disk_used = 0
         self.first = True
         self.title = title
+        self._bar_width_applied = self.BAR_WIDTH_LABELED  # matches DEFAULT_CSS
         self.border_title = title#f"{title} [magenta]MB/s[/]"
 
     def compose(self) -> ComposeResult:
@@ -78,54 +92,88 @@ class DiskIOWidget(MetricWidget):
         """Colour of the write series — used for both the plot line and the bar."""
         return get_rich_color("disk_plot_write", get_rich_color("disk_write", "#00FFFF"))
 
-    def create_readwrite_bar(
-        self, read_speed: float, write_speed: float, total_height: int
-    ) -> str:
-        """Build the vertical read/write bar: one character per line, exactly ``total_height`` lines.
+    def bar_width(self) -> int:
+        """Width of the read/write column for the panel's current size.
 
-        Colours are applied per line — markup cannot be rotated, so the bar is built
-        as (character, colour) cells and each cell becomes its own line.
+        Wide panels get a column that can hold horizontal value labels; narrow ones
+        fall back to a bare track so the plot keeps its cells.
+        """
+        own = self.content_size.width or 0
+        if own >= self.MIN_PANEL_FOR_LABELS:
+            return self.BAR_WIDTH_LABELED
+        if own >= self.MIN_PANEL_FOR_TRACK:
+            return self.BAR_WIDTH_TRACK
+        return self.BAR_WIDTH_MIN
+
+    @staticmethod
+    def _label_lines(label: str, width: int, gutter: str = "") -> list[str]:
+        """Lay a throughput label out horizontally, each line ``len(gutter) + width`` cells.
+
+        A label that does not fit on one line is split at the space between value and
+        unit ("1024 GB/s" -> "1024" / "GB/s") instead of being wrapped mid-value.
+        """
+        parts = [label] if len(label) <= width else [p for p in label.split(" ", 1) if p]
+        return [gutter + align(part, width, "center") for part in parts]
+
+    def create_readwrite_bar(
+        self, read_speed: float, write_speed: float, total_height: int, total_width: int
+    ) -> str:
+        """Build the vertical read/write bar: exactly ``total_height`` lines of
+        ``total_width`` cells.
+
+        Read grows upwards from the centre axis and write downwards, mirroring the plot.
+        The value labels are written horizontally (read on top, write at the bottom), so
+        the column has to be several cells wide — a one-cell column would wrap them.
         """
         try:
             read_speed = max(0.0, float(read_speed))
             write_speed = max(0.0, float(write_speed))
             n = max(1, int(total_height))
+            w = max(1, int(total_width))
 
             read_color = self.read_color()
             write_color = self.write_color()
 
-            read_label = format_throughput(read_speed)
-            write_label = format_throughput(write_speed)
-            # Labels (read on top, write at the bottom) only when a usable bar is left.
-            label_cells = len(read_label) + len(write_label) + 2
-            show_labels = n - label_cells >= 5
-            bar_len = n - label_cells if show_labels else n
+            # One-cell gutter on the labeled column so nothing abuts the plot border.
+            gutter = " " if w >= self.BAR_WIDTH_LABELED else ""
+            inner = w - len(gutter)
 
+            block = "█" * min(self.BAR_BLOCK_WIDTH, inner)
+            centered_block = gutter + align(block, inner, "center")
+            filled_read = f"[{read_color}]{centered_block}[/]"
+            filled_write = f"[{write_color}]{centered_block}[/]"
+            empty = gutter + align("│", inner, "center")
+            # The axis spans the whole column: it continues the plot's zero line.
+            axis = "─" * w
+
+            # Labels only when the panel is wide enough for them and a usable bar is left.
+            top: list[str] = []
+            bottom: list[str] = []
+            if w >= self.BAR_WIDTH_LABELED:
+                read_lines = self._label_lines(format_throughput(read_speed), inner, gutter)
+                write_lines = self._label_lines(format_throughput(write_speed), inner, gutter)
+                if n - len(read_lines) - len(write_lines) >= 5:
+                    top = [f"[{read_color}]{line}[/]" for line in read_lines]
+                    bottom = [f"[{write_color}]{line}[/]" for line in write_lines]
+
+            bar_len = n - len(top) - len(bottom)
             half = max(0, (bar_len - 1) // 2)
-            extra = max(0, bar_len - 1 - 2 * half)  # odd lengths: one cell to the write side
+            extra = max(0, bar_len - 1 - 2 * half)  # odd lengths: one row to the write side
 
-            max_io = max(1.0, self.max_io)
+            # Same scale as the plot's y-axis, which can be well below 1 MB/s when idle.
+            max_io = max(0.001, self.max_io)
             read_blocks = min(half, int(half * min(read_speed / max_io, 1.0)))
             write_blocks = min(half, int(half * min(write_speed / max_io, 1.0)))
 
-            cells: list[tuple[str, str | None]] = []
-            if show_labels:
-                cells += [(c, read_color) for c in read_label]
-                cells.append((" ", None))
-            # Read grows towards the centre separator, write away from it.
-            cells += [("─", None)] * (half - read_blocks)
-            cells += [("█", read_color)] * read_blocks
-            cells.append(("│", None))
-            cells += [("█", write_color)] * write_blocks
-            cells += [("─", None)] * (half - write_blocks + extra)
-            if show_labels:
-                cells.append((" ", None))
-                cells += [(c, write_color) for c in write_label]
+            lines: list[str] = list(top)
+            lines += [empty] * (half - read_blocks)
+            lines += [filled_read] * read_blocks
+            lines.append(axis)
+            lines += [filled_write] * write_blocks
+            lines += [empty] * (half - write_blocks + extra)
+            lines += bottom
 
-            cells = cells[:n]
-            return "\n".join(
-                ch if color is None else f"[{color}]{ch}[/]" for ch, color in cells
-            )
+            return "\n".join(lines[:n])
         except Exception:
             return ""
 
@@ -240,6 +288,9 @@ class DiskIOWidget(MetricWidget):
                 y_min, y_max = -0.5, 0.5
                 plt.ylim(y_min, y_max)
 
+            # The read/write bar shares the plot's scale, so both read the same.
+            self.max_io = max(0.001, y_max)
+
             # Create custom y-axis ticks with MB/s labels
             num_ticks = max(2, min(5, height - 1))
             tick_step = (y_max - y_min) / (num_ticks - 1) if num_ticks > 1 else 1
@@ -293,8 +344,9 @@ class DiskIOWidget(MetricWidget):
 
     def rerender(self) -> None:
         """Re-draw plot, read/write bar and usage bar at the current region sizes."""
+        bar_width = self.bar_width()
         plot_width, plot_height = self.plot_region(
-            "#history-plot", reserve_width=1, reserve_height=self.USAGE_HEIGHT
+            "#history-plot", reserve_width=bar_width, reserve_height=self.USAGE_HEIGHT
         )
         _, bar_height = self.region_size("#current-value", reserve_height=self.USAGE_HEIGHT)
         usage_width, _ = self.region_size("#disk-usage")
@@ -303,10 +355,18 @@ class DiskIOWidget(MetricWidget):
         except NoMatches:
             pass
         try:
+            bar = self.query_one("#current-value")
+            # Only touch the style when it changes: a width assignment triggers a layout
+            # pass (and another rerender through on_resize).
+            if self._bar_width_applied != bar_width:
+                bar.styles.width = bar_width
+                self._bar_width_applied = bar_width
             read = self.read_history[-1] if self.read_history else 0.0
             write = self.write_history[-1] if self.write_history else 0.0
-            self.query_one("#current-value").update(
-                self.create_readwrite_bar(read, write, total_height=bar_height)
+            bar.update(
+                self.create_readwrite_bar(
+                    read, write, total_height=bar_height, total_width=bar_width
+                )
             )
         except NoMatches:
             pass
