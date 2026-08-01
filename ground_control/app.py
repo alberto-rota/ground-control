@@ -17,7 +17,9 @@ from textual.widgets import (
     RadioSet,
     RichLog,
     Select,
+    OptionList,
 )
+from textual.widgets.option_list import Option
 from textual.widgets.selection_list import Selection
 from textual.reactive import reactive
 from textual.binding import Binding
@@ -34,6 +36,11 @@ from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
 from ground_control.widgets.temperature import TemperatureWidget
 from ground_control.widgets.slurm_jobs import SlurmJobsWidget
+from ground_control.widgets.color_picker import (
+    ColorPickerScreen,
+    build_color_options,
+    color_option_prompt,
+)
 from ground_control.utils.system_metrics import SystemMetrics
 from ground_control.utils import slurm as slurm_utils
 from ground_control.utils.colors import (
@@ -43,6 +50,15 @@ from ground_control.utils.colors import (
     apply_theme,
     get_available_themes,
     get_theme_tokens,
+    COLOR_KEYS,
+    DEFAULT_COLORS,
+    delete_theme,
+    get_active_theme,
+    is_user_theme,
+    normalize_hex,
+    save_theme,
+    set_color,
+    slugify_theme_name,
 )
 from platformdirs import user_config_dir  # Import for cross-platform config directory
 from textual.css.stylesheet import CssSource
@@ -99,7 +115,7 @@ class RichLogHandler(logging.Handler):
             self.handleError(record)
 
 
-def _build_theme_swatch(theme_name: str) -> str:
+def _build_theme_swatch(theme_name: str, colors: dict | None = None, modified: bool = False) -> str:
     """Build a Rich-markup label for a theme showing its name and a color swatch.
 
     Picks representative keys from the theme JSON and renders a row of colored
@@ -107,11 +123,16 @@ def _build_theme_swatch(theme_name: str) -> str:
 
     Args:
         theme_name: Name of the theme (without .json extension).
+        colors: Palette to draw the swatch from. Defaults to the theme's own
+            file; the live config is passed instead for the active theme so
+            single-colour edits show up in its swatch immediately.
+        modified: Mark the name with ``*`` (palette edited away from the file).
 
     Returns:
         A Rich markup string like ``monokai  ███████████████████``
     """
-    colors = load_theme(theme_name) or {}
+    if colors is None:
+        colors = load_theme(theme_name) or {}
     swatch_keys = [
         "background", "surface", "accent", "border",
         "cpu_bar", "memory_ram", "memory_swap", "gpu_ram", "gpu_usage",
@@ -124,8 +145,23 @@ def _build_theme_swatch(theme_name: str) -> str:
         hex_color = colors.get(key)
         if hex_color:
             blocks += f"[{hex_color}]██[/]"
-    label = f"{theme_name:<22s} {blocks}" if blocks else theme_name
+    name = f"{theme_name}*" if modified else theme_name
+    if is_user_theme(theme_name):
+        name = f"{name} (custom)"
+    label = f"{name:<22s} {blocks}" if blocks else name
     return label
+
+
+# Which metric widget a palette key belongs to, for the picker's live preview.
+# Order matters: "cpu_disk_used" is a CPU-widget colour, not a disk one.
+_PREVIEW_GROUP_PREFIXES = (
+    ("cpu_", "cpu"),
+    ("memory_", "memory"),
+    ("network_", "network"),
+    ("disk_", "disk"),
+    ("gpu_", "gpu"),
+    ("temp_", "temperature"),
+)
 
 
 # Predefined options for refresh rate (seconds) and history size (seconds)
@@ -363,6 +399,13 @@ class GroundControl(App):
         self._setup_lock: asyncio.Lock = asyncio.Lock()
         # Disk mount paths to hide: any mountpoint that starts with one of these (after normalizing) is skipped
         self.disk_ignore_prefixes: list[str] = list(DEFAULT_DISK_IGNORE_PREFIXES)
+        # Set while we drive the theme RadioSet from code, so the resulting
+        # Changed messages don't re-apply a theme we just applied.
+        self._suppress_theme_radio = False
+        # Metric widget currently mounted in the colour picker's preview pane,
+        # plus the last collected metrics so recolouring it costs no I/O.
+        self._color_preview_widget = None
+        self._last_metrics_by_type: dict = {}
 
     def _refresh_stylesheet(self) -> None:
         """Replace the app's CSS in the stylesheet with current self.CSS and re-apply to the DOM."""
@@ -565,7 +608,8 @@ class GroundControl(App):
         height: auto;
         overflow: hidden hidden;
     }}
-    #settings-columns.-stacked #theme-block, #settings-columns.-stacked #theme-radio-set {{
+    #settings-columns.-stacked #theme-block, #settings-columns.-stacked #theme-radio-set,
+    #settings-columns.-stacked #colors-block, #settings-columns.-stacked #color-key-list {{
         height: auto;
     }}
     #settings-col-left {{
@@ -606,6 +650,74 @@ class GroundControl(App):
         border: none;
         padding: 0;
         scrollbar-size-vertical: 1;
+    }}
+
+    /* Colour editor: the key list scrolls inside its block so the hex field
+       below it stays put while you page through 54 entries. */
+    #colors-block {{
+        height: 1fr;
+    }}
+    #color-key-list {{
+        width: 100%;
+        height: 1fr;
+        background: transparent;
+        color: {tok["text"]};
+        border: none;
+        padding: 0;
+        scrollbar-size-vertical: 1;
+    }}
+    #color-key-list:focus {{
+        border: none;
+    }}
+    #color-key-list > .option-list--option-highlighted {{
+        background: {tok["selection"]} 25%;
+        color: {tok["text"]};
+        text-style: bold;
+    }}
+    #color-key-list > .option-list--option-hover {{
+        background: {tok["selection"]} 15%;
+        color: {tok["text"]};
+    }}
+    #color-key-list > .option-list--option-disabled {{
+        color: {tok["text"]} 50%;
+        text-style: bold;
+    }}
+    #color-hex-input, #theme-name-input {{
+        width: 1fr;
+        height: 1;
+        background: transparent;
+        color: {tok["text"]};
+        padding: 0;
+    }}
+    #color-hex-row {{
+        width: 100%;
+        height: auto;
+    }}
+    #color-hex-label {{
+        width: auto;
+        height: 1;
+        margin: 0 1 0 0;
+        color: {tok["text"]} 60%;
+    }}
+    #theme-save-row {{
+        width: 100%;
+        height: auto;
+    }}
+    #theme-save-row > Button {{
+        height: 1;
+        min-width: 8;
+        margin: 0 0 0 1;
+        border: none;
+        padding: 0 1;
+        background: {tok["panel"]};
+        color: {tok["text"]};
+    }}
+    #theme-save-row > Button:hover {{
+        background: {tok["selection"]} 40%;
+    }}
+    #theme-save-row > #theme-save-btn {{
+        background: {tok["accent"]};
+        color: {tok["text_on_accent"]};
     }}
     /* Layout is a 3-option choice: one segmented row instead of a stacked list. */
     #layout-radio-set {{
@@ -691,6 +803,142 @@ class GroundControl(App):
         background: transparent;
         color: {tok["text"]};
         padding: 0;
+    }}
+
+    /* Colour picker modal: key list | palette + steppers | live widget preview. */
+    ColorPickerScreen {{
+        align: center middle;
+        background: {tok["bg"]} 88%;
+    }}
+    #picker-box {{
+        width: 98%;
+        height: 94%;
+        padding: 0 1;
+        border: round {tok["border"]};
+        background: {tok["bg"]};
+        border-title-color: {tok["text"]};
+        border-title-style: bold;
+    }}
+    #picker-cols {{
+        width: 100%;
+        height: 1fr;
+    }}
+    .picker-block {{
+        height: 1fr;
+        padding: 0 1;
+        margin: 0 1 0 0;
+        border: round {tok["border"]};
+        background: {tok["bg"]};
+        border-title-color: {tok["text"]};
+        border-title-style: bold;
+    }}
+    #picker-keys-block {{
+        /* Wide enough for "███ <22-char key> #RRGGBB" without wrapping. */
+        width: 40;
+    }}
+    #picker-mid {{
+        width: auto;
+        height: 1fr;
+    }}
+    #picker-palette-block, #picker-hsv-block {{
+        width: 40;
+        height: auto;
+    }}
+    #picker-preview-block {{
+        width: 1fr;
+        min-width: 40;
+    }}
+    /* Narrow terminals: the plots in the preview become unreadable long before
+       the pane itself stops fitting, so drop it instead of shrinking it. */
+    #picker-cols.-narrow > #picker-preview-block {{
+        display: none;
+    }}
+    #picker-keys {{
+        width: 100%;
+        height: 1fr;
+        background: transparent;
+        color: {tok["text"]};
+        border: none;
+        padding: 0;
+        scrollbar-size-vertical: 1;
+    }}
+    #picker-keys:focus {{
+        border: none;
+    }}
+    #picker-keys > .option-list--option-highlighted {{
+        background: {tok["selection"]} 25%;
+        color: {tok["text"]};
+        text-style: bold;
+    }}
+    #picker-keys > .option-list--option-hover {{
+        background: {tok["selection"]} 15%;
+        color: {tok["text"]};
+    }}
+    #picker-keys > .option-list--option-disabled {{
+        color: {tok["text"]} 50%;
+        text-style: bold;
+    }}
+    PaletteGrid, HsvSliders {{
+        width: 100%;
+        height: auto;
+        padding: 0;
+        background: transparent;
+        color: {tok["text"]};
+    }}
+    PaletteGrid:focus, HsvSliders:focus {{
+        /* Focus is shown by the block border, so the widget itself only needs
+           to mark that it is the active pane. */
+        text-style: none;
+    }}
+    #picker-palette-block:focus-within, #picker-hsv-block:focus-within,
+    #picker-keys-block:focus-within {{
+        border: round {tok["accent"]};
+    }}
+    #picker-hint {{
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+        color: {tok["text"]} 55%;
+    }}
+    .picker-preview-empty {{
+        width: 100%;
+        height: auto;
+        padding: 1;
+        color: {tok["text"]} 60%;
+    }}
+    #picker-footer {{
+        width: 100%;
+        height: 1;
+        margin: 0 0 0 1;
+    }}
+    #picker-hex-label {{
+        width: auto;
+        height: 1;
+        margin: 0 1 0 0;
+        color: {tok["text"]} 60%;
+    }}
+    #picker-hex {{
+        width: 32;
+        height: 1;
+        background: transparent;
+        color: {tok["text"]};
+        padding: 0;
+    }}
+    #picker-footer > Button {{
+        height: 1;
+        min-width: 9;
+        margin: 0 0 0 2;
+        border: none;
+        padding: 0 1;
+        background: {tok["panel"]};
+        color: {tok["text"]};
+    }}
+    #picker-footer > Button:hover {{
+        background: {tok["selection"]} 40%;
+    }}
+    #picker-footer > #picker-close {{
+        background: {tok["accent"]};
+        color: {tok["text_on_accent"]};
     }}
 
     #dashboard-pane {{
@@ -787,11 +1035,13 @@ class GroundControl(App):
         Extracts the theme name from the pressed RadioButton's id
         (``theme-<name>``) and applies it live.
         """
-        if self._is_initializing:
+        if self._is_initializing or self._suppress_theme_radio:
             return
         btn = event.pressed
         if btn and btn.id and btn.id.startswith("theme-"):
-            theme_name = btn.id.replace("theme-", "")
+            # removeprefix, not replace: a custom theme may itself be called
+            # something like "my-theme-dark".
+            theme_name = btn.id.removeprefix("theme-")
             self._apply_theme_from_ui(theme_name)
 
     @on(RadioSet.Changed, "#layout-radio-set")
@@ -859,28 +1109,28 @@ class GroundControl(App):
     def _select_current_theme_radio(self) -> None:
         """Pre-select the RadioButton corresponding to the active theme.
 
-        Reads the config file to determine which theme is currently active
-        and checks that theme against each RadioButton id.
+        The active theme is the name recorded in the config; an edited palette
+        still selects the theme it was derived from (marked ``*``).
         """
+        current_theme, _ = get_active_theme()
+        if current_theme:
+            self._select_theme_radio(current_theme)
+        self._update_theme_labels()
+
+    def _select_theme_radio(self, theme_name: str) -> None:
+        """Check the RadioButton for ``theme_name`` without re-applying the theme."""
         try:
-            current_theme = None
-            if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, "r") as f:
-                    config = json.load(f)
-                current_colors = config.get("colors", {})
-                # Compare against each available theme to find a match
-                for name in get_available_themes():
-                    theme_colors = load_theme(name) or {}
-                    if theme_colors == current_colors:
-                        current_theme = name
-                        break
-            if current_theme:
-                radio_set = self.query_one("#theme-radio-set", RadioSet)
+            radio_set = self.query_one("#theme-radio-set", RadioSet)
+            self._suppress_theme_radio = True
+            try:
                 for idx, btn in enumerate(radio_set.query(RadioButton)):
-                    if btn.id == f"theme-{current_theme}":
+                    if btn.id == f"theme-{theme_name}":
                         radio_set._selected = idx
                         btn.value = True
-                        break
+                    else:
+                        btn.value = False
+            finally:
+                self._suppress_theme_radio = False
         except Exception:
             if self._debug_mode:
                 raise
@@ -988,6 +1238,351 @@ class GroundControl(App):
         self._generate_css()
         # Apply the new CSS immediately: update the stylesheet source and re-apply to the DOM.
         self._refresh_stylesheet()
+        self._refresh_color_options()
+        # Keep the radio set in step for callers that aren't the radio set
+        # itself (the `t` binding, save/delete); suppressed, so no re-entry.
+        self._select_theme_radio(theme_name)
+        self._update_theme_labels()
+        self._set_theme_name_input(theme_name)
+
+    # ------------------------------------------------------- colour editing
+
+    def _build_color_options(self) -> list[Option]:
+        """Rows for the colour editor: a disabled header per group, then its keys."""
+        return build_color_options(self._color_config or DEFAULT_COLORS)
+
+    def _refresh_color_options(self) -> None:
+        """Re-render every colour row from the current palette (after a theme change)."""
+        try:
+            option_list = self.query_one("#color-key-list", OptionList)
+        except Exception:
+            return
+        colors = self._color_config or DEFAULT_COLORS
+        for key in COLOR_KEYS:
+            hex_color = colors.get(key, DEFAULT_COLORS.get(key, "#000000"))
+            try:
+                option_list.replace_option_prompt(
+                    f"colorkey-{key}", color_option_prompt(key, hex_color)
+                )
+            except Exception:
+                pass
+
+    def _highlighted_color_key(self) -> str | None:
+        """The palette key currently highlighted in the colour list, if any."""
+        try:
+            option_list = self.query_one("#color-key-list", OptionList)
+            index = option_list.highlighted
+            if index is None:
+                return None
+            option_id = option_list.get_option_at_index(index).id or ""
+        except Exception:
+            return None
+        if option_id.startswith("colorkey-"):
+            return option_id.removeprefix("colorkey-")
+        return None
+
+    @on(OptionList.OptionHighlighted, "#color-key-list")
+    def _on_color_key_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Load the highlighted key's current value into the hex field."""
+        option_id = event.option.id or ""
+        if not option_id.startswith("colorkey-"):
+            return
+        key = option_id.removeprefix("colorkey-")
+        colors = self._color_config or DEFAULT_COLORS
+        try:
+            hex_input = self.query_one("#color-hex-input", Input)
+        except Exception:
+            return
+        with hex_input.prevent(Input.Changed):
+            hex_input.value = colors.get(key, DEFAULT_COLORS.get(key, "#000000"))
+
+    @on(OptionList.OptionSelected, "#color-key-list")
+    def _on_color_key_selected(self, event: OptionList.OptionSelected) -> None:
+        """Enter on a colour row opens the picker on that key."""
+        option_id = event.option.id or ""
+        if option_id.startswith("colorkey-"):
+            self._open_color_picker(option_id.removeprefix("colorkey-"))
+
+    def _open_color_picker(self, key: str) -> None:
+        """Open the modal picker, refreshing the Settings rows when it closes."""
+        def _on_dismiss(_result) -> None:
+            self._refresh_color_options()
+            self._update_theme_labels()
+
+        self.push_screen(ColorPickerScreen(key), _on_dismiss)
+
+    def apply_color_live(self, key: str, hex_value: str) -> bool:
+        """Persist one palette colour and apply it to the running app.
+
+        Shared by the Settings hex field and the picker screen. Plots re-read
+        the config on their next tick; chrome needs the stylesheet rebuilt now.
+
+        Returns:
+            True if the colour was written, False on bad input or write failure.
+        """
+        normalized = normalize_hex(hex_value)
+        if normalized is None or not set_color(key, normalized):
+            return False
+
+        self._color_config = load_colors()
+        self._generate_css()
+        self._refresh_stylesheet()
+        try:
+            self.query_one("#color-key-list", OptionList).replace_option_prompt(
+                f"colorkey-{key}", color_option_prompt(key, normalized)
+            )
+        except Exception:
+            pass
+        self._update_theme_labels()
+        return True
+
+    @on(Input.Submitted, "#color-hex-input")
+    def _on_color_hex_submitted(self, event: Input.Submitted) -> None:
+        """Apply a typed hex value to the highlighted colour key, live."""
+        key = self._highlighted_color_key()
+        if key is None:
+            self.notify("Pick a colour in the list first", title="Colors", severity="warning")
+            return
+
+        if not self.apply_color_live(key, event.value):
+            self.notify(
+                f"{event.value!r} is not a hex colour (expected #RRGGBB)",
+                title="Colors",
+                severity="error",
+            )
+            return
+
+        try:
+            self.query_one("#color-hex-input", Input).value = normalize_hex(event.value)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------- picker preview
+
+    def preview_group_for_key(self, key: str) -> str:
+        """Metric type whose widget illustrates ``key``.
+
+        Keys that aren't specific to one widget (base, chrome, general) fall
+        back to the CPU widget, where borders, text and bar colours all show.
+        """
+        for prefix, group in _PREVIEW_GROUP_PREFIXES:
+            if key.startswith(prefix):
+                return group
+        return "cpu"
+
+    def _build_preview_widget(self, group: str):
+        """A standalone metric widget for the preview pane, or None if unavailable.
+
+        Titles and ids must match what ``_dispatch_widget_update`` looks for:
+        disk widgets are matched by title, GPU widgets by ``gpu_<index>`` id.
+        """
+        try:
+            if group == "memory":
+                return MemoryWidget("Memory")
+            if group == "network":
+                return NetworkIOWidget("Network")
+            if group == "disk":
+                disks = self.system_metrics.get_disk_metrics()["disks"]
+                visible = [d for d in disks if not self._disk_mount_ignored(d["mountpoint"])]
+                if not visible:
+                    return None
+                return DiskIOWidget(f"Disk @ {visible[0]['mountpoint']}")
+            if group == "gpu":
+                gpus = self.system_metrics.get_gpu_metrics()
+                if self.gpu_indices is not None:
+                    gpus = [gpus[i] for i in self.gpu_indices if 0 <= i < len(gpus)]
+                if not gpus:
+                    return None
+                return GPUWidget(f"GPU @ {gpus[0]['gpu_name']}", id="gpu_0")
+            if group == "temperature":
+                if not self.system_metrics.get_temperature_metrics():
+                    return None
+                return TemperatureWidget("Temperature")
+            cpu_metrics = self.system_metrics.get_cpu_metrics()
+            return CPUWidget(str(cpu_metrics["cpu_name"]))
+        except Exception:
+            logger.error("Could not build preview widget for %s", group, exc_info=True)
+            if self._debug_mode:
+                raise
+            return None
+
+    async def mount_color_preview(self, key: str, container) -> None:
+        """Mount (or swap) the preview widget for ``key`` inside ``container``."""
+        group = self.preview_group_for_key(key)
+        await container.remove_children()
+        self._color_preview_widget = None
+
+        widget = self._build_preview_widget(group)
+        if widget is None:
+            await container.mount(
+                Static(f"No {group} data on this machine.", classes="picker-preview-empty")
+            )
+            return
+
+        await container.mount(widget)
+        self._color_preview_widget = widget
+        self.refresh_color_preview()
+
+    def clear_color_preview(self) -> None:
+        """Stop feeding the preview (the picker screen is closing)."""
+        self._color_preview_widget = None
+
+    def refresh_color_preview(self) -> None:
+        """Re-render the preview widget so a colour change shows immediately.
+
+        Reuses the metrics from the last tick where possible: this runs on every
+        arrow-key press in the picker, and re-collecting GPU or disk stats that
+        often would make the palette feel sluggish.
+        """
+        widget = self._color_preview_widget
+        if widget is None or not widget.is_mounted:
+            return
+        needed = self._get_required_metric_types(widget)
+        collectors = {
+            "cpu": self.system_metrics.get_cpu_metrics,
+            "disk": self.system_metrics.get_disk_metrics,
+            "memory": self.system_metrics.get_memory_metrics,
+            "network": self.system_metrics.get_network_metrics,
+            "gpu": self.system_metrics.get_gpu_metrics,
+            "temperature": self.system_metrics.get_temperature_metrics,
+        }
+        metrics = {}
+        try:
+            for metric_type in needed:
+                cached = self._last_metrics_by_type.get(metric_type)
+                if cached is None and metric_type in collectors:
+                    cached = collectors[metric_type]()
+                    self._last_metrics_by_type[metric_type] = cached
+                metrics[metric_type] = cached
+        except Exception:
+            logger.error("Preview metric collection failed", exc_info=True)
+            if self._debug_mode:
+                raise
+            return
+        self._update_color_preview(metrics)
+
+    def _update_color_preview(self, metrics_by_type: dict) -> None:
+        """Dispatch a metrics update to the preview widget, ignoring failures.
+
+        A broken preview must never disable the real widget of the same type,
+        so this deliberately does not touch ``_failed_widget_titles``.
+        """
+        widget = self._color_preview_widget
+        if widget is None or not widget.is_mounted:
+            return
+        needed = self._get_required_metric_types(widget)
+        if any(metrics_by_type.get(t) is None for t in needed):
+            return
+        try:
+            asyncio.create_task(self._dispatch_widget_update(widget, metrics_by_type))
+        except Exception:
+            logger.error("Preview update failed", exc_info=True)
+            if self._debug_mode:
+                raise
+
+    # ---------------------------------------------------- custom theme files
+
+    def _set_theme_name_input(self, name: str | None) -> None:
+        """Pre-fill the save field with the active theme's name."""
+        try:
+            self.query_one("#theme-name-input", Input).value = name or ""
+        except Exception:
+            pass
+
+    def _update_theme_labels(self) -> None:
+        """Redraw theme labels so the active one shows its live (possibly edited) palette."""
+        active, modified = get_active_theme()
+        try:
+            radio_set = self.query_one("#theme-radio-set", RadioSet)
+        except Exception:
+            return
+        for btn in radio_set.query(RadioButton):
+            if not btn.id:
+                continue
+            name = btn.id.removeprefix("theme-")
+            if name == active:
+                btn.label = _build_theme_swatch(name, self._color_config, modified)
+            else:
+                btn.label = _build_theme_swatch(name)
+
+    async def _rebuild_theme_radio_set(self) -> None:
+        """Rebuild the theme list after a custom theme is added or removed."""
+        try:
+            radio_set = self.query_one("#theme-radio-set", RadioSet)
+        except Exception:
+            return
+        active, _ = get_active_theme()
+        self._suppress_theme_radio = True
+        try:
+            # Await the removal: the old buttons stay in the node list until it
+            # completes, and remounting the same ids on top raises DuplicateIds.
+            radio_set._selected = None
+            radio_set._pressed_button = None
+            await radio_set.remove_children()
+            await radio_set.mount_all([
+                RadioButton(_build_theme_swatch(name), id=f"theme-{name}")
+                for name in get_available_themes()
+            ])
+            if active:
+                self._select_theme_radio(active)
+        finally:
+            self._suppress_theme_radio = False
+        self._update_theme_labels()
+
+    @on(Input.Submitted, "#theme-name-input")
+    async def _on_theme_name_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the name field saves, same as the Save button."""
+        await self._save_current_palette_as_theme()
+
+    @on(Button.Pressed, "#theme-save-btn")
+    async def _on_theme_save_pressed(self, event: Button.Pressed) -> None:
+        await self._save_current_palette_as_theme()
+
+    @on(Button.Pressed, "#theme-delete-btn")
+    async def _on_theme_delete_pressed(self, event: Button.Pressed) -> None:
+        await self._delete_named_theme()
+
+    async def _save_current_palette_as_theme(self) -> None:
+        """Write the live palette to ``~/.config/ground-control/themes/<name>.json``."""
+        try:
+            name = self.query_one("#theme-name-input", Input).value
+        except Exception:
+            return
+
+        overwrote = is_user_theme(slugify_theme_name(name))
+        ok, result = save_theme(name, self._color_config or DEFAULT_COLORS)
+        if not ok:
+            self.notify(result, title="Save theme", severity="error")
+            return
+
+        # The saved file is now the active theme, so the palette is no longer
+        # "modified" relative to anything.
+        apply_theme(result)
+        self._color_config = load_colors()
+        await self._rebuild_theme_radio_set()
+        self._set_theme_name_input(result)
+        verb = "Updated" if overwrote else "Saved"
+        self.notify(f"{verb} theme '{result}'", title="Save theme", severity="information")
+        logger.info("%s custom theme %s", verb, result)
+
+    async def _delete_named_theme(self) -> None:
+        """Delete the custom theme named in the field. Builtins are refused."""
+        try:
+            name = self.query_one("#theme-name-input", Input).value.strip()
+        except Exception:
+            return
+
+        ok, result = delete_theme(name)
+        if not ok:
+            self.notify(result, title="Delete theme", severity="error")
+            return
+
+        # The deleted theme may have been the active one; its colours stay in
+        # the config, now unnamed, so nothing visually changes.
+        active, _ = get_active_theme()
+        await self._rebuild_theme_radio_set()
+        self._set_theme_name_input(active)
+        self.notify(f"Deleted theme '{result}'", title="Delete theme", severity="information")
 
     def load_selection(self):
         if os.path.exists(CONFIG_FILE):
@@ -1069,7 +1664,16 @@ class GroundControl(App):
         lines.append("\n[bold]Layout[/]")
         lines += [row("g", "Grid"), row("h", "Horizontal"), row("v", "Vertical"), row("space", "Cycle layout")]
         lines.append("\n[bold]Refresh & theme[/]")
-        lines += [row("r", "Refresh now"), row("+ / -", "Faster / slower"), row("t", "Cycle theme")]
+        lines += [
+            row("r", "Refresh now"),
+            row("+ / -", "Faster / slower"),
+            row("t", "Cycle theme"),
+        ]
+        lines.append("  [dim]In Settings → Colors:[/]")
+        lines += [
+            row("enter", "Open the colour picker (palette, HSV, live preview)"),
+            row("ctrl+z", "Revert the colour being edited"),
+        ]
         lines.append("\n[bold]Dashboard panels[/]")
         lines += [
             row("] / [", "Focus next / previous panel"),
@@ -1165,6 +1769,33 @@ class GroundControl(App):
                                             _build_theme_swatch(name),
                                             id=f"theme-{name}",
                                         )
+                            # Per-colour editing: pick a key, type a hex value.
+                            # Applies live, to the config only — naming it as a
+                            # theme is the separate, explicit step below.
+                            with Vertical(classes="settings-block", id="colors-block") as block:
+                                block.border_title = "Colors (enter to apply)"
+                                yield OptionList(
+                                    *self._build_color_options(),
+                                    id="color-key-list",
+                                    compact=True,
+                                )
+                                with Horizontal(id="color-hex-row"):
+                                    yield Static("hex", id="color-hex-label")
+                                    yield Input(
+                                        id="color-hex-input",
+                                        placeholder="#RRGGBB",
+                                        compact=True,
+                                    )
+                            with Vertical(classes="settings-block", id="theme-save-block") as block:
+                                block.border_title = "Save as custom theme"
+                                with Horizontal(id="theme-save-row"):
+                                    yield Input(
+                                        id="theme-name-input",
+                                        placeholder="my-theme",
+                                        compact=True,
+                                    )
+                                    yield Button("Save", id="theme-save-btn", compact=True)
+                                    yield Button("Delete", id="theme-delete-btn", compact=True)
 
 
             # Logs tab: streaming app logs in a scrollable RichLog.
@@ -1200,6 +1831,7 @@ class GroundControl(App):
         self._select_history_option(self.history_size)
         self._select_layout_radio(self.current_layout)
         self._select_current_theme_radio()
+        self._set_theme_name_input(self._detect_current_theme())
         try:
             self.query_one("#disk-ignore-prefixes", Input).value = ", ".join(self.disk_ignore_prefixes)
         except Exception:
@@ -1356,8 +1988,6 @@ class GroundControl(App):
         for widget in self.grid.children:
             if hasattr(widget, "title"):
                 selection_dict[widget.title] = True
-        # Ensure colors section exists in config
-        ensure_colors_in_config()
         default_config = {
             "selected": selection_dict,
             "layout": "grid",
@@ -1368,6 +1998,9 @@ class GroundControl(App):
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, "w") as f:
             json.dump(default_config, f, indent=4)
+        # After the write, not before: this call writes the colors section, and
+        # dumping default_config over it would drop it again.
+        ensure_colors_in_config()
 
                 
     def create_selection_list(self) -> None:
@@ -1511,13 +2144,20 @@ class GroundControl(App):
                 and w.styles.display != "none"
                 and w.title not in self._failed_widget_titles
             ]
-            if not active_widgets:
+            # The colour picker's preview is a real widget outside the grid; it
+            # keeps ticking so the preview stays live while colours are edited.
+            preview_widget = self._color_preview_widget
+            if preview_widget is not None and not preview_widget.is_mounted:
+                preview_widget = self._color_preview_widget = None
+            if not active_widgets and preview_widget is None:
                 return
 
             # Required metric types = union over active widgets
             required_types = set()
             for w in active_widgets:
                 required_types |= self._get_required_metric_types(w)
+            if preview_widget is not None:
+                required_types |= self._get_required_metric_types(preview_widget)
 
             # Run only required collectors in executor
             loop = asyncio.get_event_loop()
@@ -1541,6 +2181,11 @@ class GroundControl(App):
                     collector_errors[t] = r
                 else:
                     metrics_by_type[t] = r
+
+            # Cache successful collections for the picker preview to reuse.
+            self._last_metrics_by_type.update(
+                {t: m for t, m in metrics_by_type.items() if m is not None}
+            )
 
             # In debug mode, any collector exception should kill the app
             if self._debug_mode and collector_errors:
@@ -1597,6 +2242,8 @@ class GroundControl(App):
                     else:
                         # Normal mode: hide failed widgets to avoid a broken dashboard view
                         widget.styles.display = "none"
+
+            self._update_color_preview(metrics_by_type)
         except Exception as e:
             logger.error("Error in update_metrics: %s", e, exc_info=True)
             if self._debug_mode:
@@ -1894,18 +2541,11 @@ class GroundControl(App):
                         title="Widget hidden", severity="information")
 
     def _detect_current_theme(self) -> str | None:
-        """Return the name of the theme whose palette matches the current config."""
+        """Return the name of the active theme, edited palette or not."""
         try:
-            if not os.path.exists(CONFIG_FILE):
-                return None
-            with open(CONFIG_FILE, "r") as f:
-                current_colors = json.load(f).get("colors", {})
-            for name in get_available_themes():
-                if (load_theme(name) or {}) == current_colors:
-                    return name
+            return get_active_theme()[0]
         except Exception:
-            pass
-        return None
+            return None
 
     def action_cycle_theme(self) -> None:
         """Cycle to the next available theme and apply it live (single-key)."""
@@ -1917,16 +2557,7 @@ class GroundControl(App):
         name = themes[idx]
         self._apply_theme_from_ui(name)
         # Reflect the change in the Settings radio set.
-        try:
-            radio_set = self.query_one("#theme-radio-set", RadioSet)
-            for i, btn in enumerate(radio_set.query(RadioButton)):
-                if btn.id == f"theme-{name}":
-                    radio_set._selected = i
-                    btn.value = True
-                else:
-                    btn.value = False
-        except Exception:
-            pass
+        self._select_theme_radio(name)
         if not self._is_initializing:
             self.notify(f"Theme: {name}", title="Theme", severity="information")
 

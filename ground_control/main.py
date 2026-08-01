@@ -7,7 +7,16 @@ from pathlib import Path
 import click
 from platformdirs import user_config_dir
 from .app import DEFAULT_DISK_IGNORE_PREFIXES, GroundControl
-from .utils.colors import DEFAULT_COLORS, apply_theme, get_available_themes
+from .utils.colors import (
+    DEFAULT_COLORS,
+    USER_THEMES_DIR,
+    apply_theme,
+    delete_theme,
+    get_available_themes,
+    get_user_themes,
+    load_colors,
+    save_theme,
+)
 
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
@@ -237,10 +246,17 @@ def config(reset, path):
 available_themes_at_init = get_available_themes()
 
 # Build the theme command decorator dynamically
-theme_options = [click.option('--list', 'list_themes', is_flag=True, help='List all available themes')]
+theme_options = [
+    click.option('--list', 'list_themes', is_flag=True, help='List all available themes'),
+    click.option('--save-as', 'save_as', metavar='NAME',
+                 help='Save the current colors as a custom theme'),
+    click.option('--delete', 'delete_name', metavar='NAME',
+                 help='Delete a custom theme'),
+    click.argument('theme_arg', required=False),
+]
 for theme_name in available_themes_at_init:
     theme_options.append(
-        click.option(f'--{theme_name}', f'{theme_name.replace("-", "_")}_flag', 
+        click.option(f'--{theme_name}', f'{theme_name.replace("-", "_")}_flag',
                     is_flag=True, help=f'Apply {theme_name.capitalize()} theme')
     )
 
@@ -252,37 +268,63 @@ def apply_theme_decorators(func):
 
 @cli.command()
 @apply_theme_decorators
-def theme(list_themes, **kwargs):
+def theme(list_themes, save_as, delete_name, theme_arg, **kwargs):
     """Manage color themes.
-    
-    Apply a theme to change the color scheme of Ground Control.
-    
+
+    Apply a theme to change the color scheme of Ground Control. Custom themes
+    live in the user config directory and can be created here or edited
+    interactively in the Settings tab.
+
     Examples:
-        gc theme --list              # List all available themes
-        gc theme --monokai           # Apply monokai theme
-        gc theme --classic            # Apply classic theme
+        gc theme --list                 # List all available themes
+        gc theme --monokai              # Apply monokai theme
+        gc theme my-theme               # Apply a theme by name
+        gc theme --save-as my-theme     # Save current colors as a custom theme
+        gc theme --delete my-theme      # Delete a custom theme
     """
     available_themes = get_available_themes()
-    
+
     if list_themes:
+        user_themes = set(get_user_themes())
         click.echo("Available themes:")
         for name in available_themes:
-            click.echo(f"  - {name}")
+            suffix = "  (custom)" if name in user_themes else ""
+            click.echo(f"  - {name}{suffix}")
+        if user_themes:
+            click.echo(f"\nCustom themes directory: {USER_THEMES_DIR}")
         return
-    
-    # Find which theme flag was set
-    theme_name = None
+
+    if save_as:
+        ok, result = save_theme(save_as, load_colors())
+        if not ok:
+            click.echo(f"Error: {result}", err=True)
+            raise SystemExit(1)
+        apply_theme(result)
+        click.echo(f"Saved current colors as theme '{result}'.")
+        click.echo(f"Theme file: {USER_THEMES_DIR / (result + '.json')}")
+        return
+
+    if delete_name:
+        ok, result = delete_theme(delete_name)
+        if not ok:
+            click.echo(f"Error: {result}", err=True)
+            raise SystemExit(1)
+        click.echo(f"Deleted custom theme '{result}'.")
+        return
+
+    # Find which theme flag was set; a positional name works too.
+    theme_name = theme_arg
     for key, value in kwargs.items():
         if key.endswith('_flag') and value:
             theme_name = key[:-5].replace('_', '-')  # Remove '_flag' suffix and convert _ to -
             break
-    
+
     if not theme_name:
         click.echo("No theme specified. Use --list to see available themes.")
-        click.echo("Usage: gc theme --<theme-name>")
-        click.echo(f"Example: gc theme --{available_themes[0] if available_themes else 'monokai'}")
+        click.echo("Usage: gc theme <theme-name>")
+        click.echo(f"Example: gc theme {available_themes[0] if available_themes else 'monokai'}")
         return
-    
+
     if theme_name in available_themes:
         if apply_theme(theme_name):
             click.echo(f"Theme '{theme_name}' applied successfully!")
