@@ -43,6 +43,13 @@ from ground_control.widgets.color_picker import (
 )
 from ground_control.utils.system_metrics import SystemMetrics
 from ground_control.utils import slurm as slurm_utils
+from ground_control.utils.alerts import (
+    CRIT as ALERT_CRIT,
+    OK as ALERT_OK,
+    WARN as ALERT_WARN,
+    evaluate_snapshot,
+    merge_thresholds,
+)
 from ground_control.utils.colors import (
     load_colors,
     load_theme,
@@ -406,6 +413,12 @@ class GroundControl(App):
         # plus the last collected metrics so recolouring it costs no I/O.
         self._color_preview_widget = None
         self._last_metrics_by_type: dict = {}
+        # Threshold alerting. Populated properly from the config in load_config;
+        # defaults here so the app is usable if the config is missing or corrupt.
+        self.alerts_enabled: bool = True
+        self.alert_sticky_seconds: float = 30.0
+        self.thresholds: dict = merge_thresholds(None)
+        self._active_breaches: list = []
 
     def _refresh_stylesheet(self) -> None:
         """Replace the app's CSS in the stylesheet with current self.CSS and re-apply to the DOM."""
@@ -985,6 +998,7 @@ class GroundControl(App):
         Binding("minus", "slower_refresh", "Slower"),
         # Theme
         Binding("t", "cycle_theme", "Theme", show=False),
+        Binding("a", "toggle_alerts", "Alerts", show=False),
         # Focus a dashboard panel (then use its local keys)
         Binding("right_square_bracket", "focus_next_widget", "Next panel", show=False),
         Binding("left_square_bracket", "focus_prev_widget", "Prev panel", show=False),
@@ -1163,6 +1177,13 @@ class GroundControl(App):
                     elif self.disk_ignore_prefixes == _LEGACY_DISK_IGNORE_PREFIXES:
                         # Untouched old default: adopt the current one (adds /snap).
                         self.disk_ignore_prefixes = list(DEFAULT_DISK_IGNORE_PREFIXES)
+                    self.alerts_enabled = bool(config.get("alerts_enabled", True))
+                    try:
+                        self.alert_sticky_seconds = max(
+                            0.0, float(config.get("alert_sticky_seconds", 30.0)))
+                    except (TypeError, ValueError):
+                        self.alert_sticky_seconds = 30.0
+                    self.thresholds = merge_thresholds(config.get("thresholds"))
                     raw_selected = config.get("selected", {})
                     if not isinstance(raw_selected, dict):
                         return {}
@@ -1207,6 +1228,9 @@ class GroundControl(App):
                 "layout": getattr(self, "current_layout", "grid"),
                 "widget_tabs": self._widget_tab_states,
                 "disk_ignore_prefixes": ", ".join(self.disk_ignore_prefixes),
+                "alerts_enabled": self.alerts_enabled,
+                "alert_sticky_seconds": self.alert_sticky_seconds,
+                "thresholds": self.thresholds,
             })
 
             os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
@@ -1668,6 +1692,7 @@ class GroundControl(App):
             row("r", "Refresh now"),
             row("+ / -", "Faster / slower"),
             row("t", "Cycle theme"),
+            row("a", "Toggle threshold alerts"),
         ]
         lines.append("  [dim]In Settings → Colors:[/]")
         lines += [
@@ -2243,6 +2268,7 @@ class GroundControl(App):
                         # Normal mode: hide failed widgets to avoid a broken dashboard view
                         widget.styles.display = "none"
 
+            self._apply_alerts(active_widgets, metrics_by_type)
             self._update_color_preview(metrics_by_type)
         except Exception as e:
             logger.error("Error in update_metrics: %s", e, exc_info=True)
@@ -2251,6 +2277,64 @@ class GroundControl(App):
                 raise
         finally:
             self._update_in_progress = False
+
+    def _alert_target_key(self, widget, metrics_by_type: dict):
+        """
+        Map a panel to the key ``evaluate_snapshot`` reports it under.
+
+        Disk panels are identified by mountpoint (parsed back out of the title,
+        the same way ``_dispatch_widget_update`` matches them) and GPU panels by
+        index, so per-mount and per-device alerts land on the right panel.
+        """
+        if isinstance(widget, CPUWidget):
+            return ("cpu", None)
+        if isinstance(widget, MemoryWidget):
+            return ("memory", None)
+        if isinstance(widget, NetworkIOWidget):
+            return ("network", None)
+        if isinstance(widget, TemperatureWidget):
+            return ("temperature", None)
+        if isinstance(widget, DiskIOWidget):
+            title = widget.title or ""
+            if title.startswith("Disk @ "):
+                return ("disk", title[len("Disk @ "):])
+            return None
+        if isinstance(widget, GPUWidget):
+            if widget.id and str(widget.id).startswith("gpu_"):
+                try:
+                    return ("gpu", int(str(widget.id).split("_", 1)[1]))
+                except (ValueError, IndexError):
+                    return None
+            try:
+                return ("gpu", self.gpu_widgets.index(widget))
+            except ValueError:
+                return None
+        return None
+
+    def _apply_alerts(self, active_widgets, metrics_by_type: dict) -> None:
+        """Evaluate thresholds for this tick and restyle any breaching panels."""
+        if not self.alerts_enabled:
+            return
+        try:
+            targets, breaches = evaluate_snapshot(metrics_by_type, self.thresholds)
+        except Exception as e:  # noqa: BLE001 - alerting must never break the loop
+            logger.error("Alert evaluation failed: %s", e, exc_info=True)
+            return
+
+        self._active_breaches = breaches
+        sticky = self.alert_sticky_seconds
+        for widget in active_widgets:
+            key = self._alert_target_key(widget, metrics_by_type)
+            if key is None:
+                continue
+            # A panel whose metric family failed to collect this tick keeps its
+            # previous state rather than being silently cleared to OK.
+            if key[0] not in metrics_by_type:
+                continue
+            try:
+                widget.set_alert(targets.get(key, ALERT_OK), sticky_seconds=sticky)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _dispatch_widget_update(self, widget, metrics_by_type: dict):
         """Call the appropriate _update_* for widget using metrics_by_type. Caller must ensure required metrics are present."""
@@ -2354,6 +2438,23 @@ class GroundControl(App):
     async def _update_temperature_widget(self, widget, temperature_metrics):
         """Update Temperature widget (plot operations on main thread due to plotext)."""
         widget.update_content(temperature_metrics)
+
+    def action_toggle_alerts(self) -> None:
+        """Toggle threshold alerting, clearing every panel's state when off."""
+        self.alerts_enabled = not self.alerts_enabled
+        if not self.alerts_enabled:
+            self._active_breaches = []
+            for widget in self.grid.children if self.grid else []:
+                if hasattr(widget, "set_alert"):
+                    try:
+                        widget.set_alert(ALERT_OK)
+                    except Exception:  # noqa: BLE001
+                        pass
+        self.save_config()
+        try:
+            self.notify(f"Alerts {'enabled' if self.alerts_enabled else 'disabled'}")
+        except Exception:  # noqa: BLE001
+            pass
 
     def action_toggle_auto(self) -> None:
         # self.auto_layout = not self.auto_layout

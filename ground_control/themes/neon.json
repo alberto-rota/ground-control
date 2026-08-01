@@ -52,5 +52,7 @@
   "footer_key_bg": "#ff00ff",
   "footer_key_fg": "#0a0a0f",
   "selection_highlight": "#00f5ff",
-  "text_on_accent": "#0a0a0f"
+  "text_on_accent": "#0a0a0f",
+  "alert_warn": "#ffff00",
+  "alert_crit": "#ff0844"
 }

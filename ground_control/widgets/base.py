@@ -1,10 +1,12 @@
+import time
 from collections import deque
 from textual.widgets import Static
 from textual.message import Message
 from textual.css.query import NoMatches
 import plotext as plt
 from ..utils.formatting import align, ansi2rich, fit_lines
-from ..utils.colors import get_rich_color, load_colors
+from ..utils.colors import get_color, get_rich_color, load_colors
+from ..utils.alerts import CRIT as ALERT_CRIT, OK as ALERT_OK, WARN as ALERT_WARN, LEVEL_ORDER
 class MetricWidget(Static):
     """Base widget for system metrics with plot."""
 
@@ -75,6 +77,13 @@ class MetricWidget(Static):
     def __init__(self, title: str, id: str, color: str = "blue", history_size: int = 120):
         super().__init__(id=id)
         self.title = title
+        # Threshold state, driven by the app each tick. `_alert_level` is the
+        # current reading; `_alert_sticky` remembers the worst level seen inside
+        # the sticky window, so a spike that happened while the user was looking
+        # at another tab is still visible when they come back.
+        self._alert_level = ALERT_OK
+        self._alert_sticky = ALERT_OK
+        self._alert_sticky_until = 0.0
         # If color is a hex value or color name, use it; otherwise use default
         # Note: We use _color_config to avoid conflict with Textual's colors attribute
         if color.startswith("#"):
@@ -85,6 +94,70 @@ class MetricWidget(Static):
         self.history = deque(maxlen=history_size)
         self.plot_width = 0
         self.plot_height = 0
+
+    # -------------------------------------------------------------------- alerts
+
+    # Marker prefixed to the panel title. Chosen over colour alone so the state
+    # survives a monochrome terminal and colour-blind viewers.
+    ALERT_MARKERS = {ALERT_OK: "", ALERT_WARN: "▲ ", ALERT_CRIT: "■ "}
+
+    def set_alert(self, level: str, sticky_seconds: float = 0.0) -> None:
+        """
+        Set this panel's alert level and restyle its border.
+
+        Args:
+            level: One of ``ok`` / ``warn`` / ``crit``.
+            sticky_seconds: Keep showing a breach for this long after the value
+                recovers. 0 disables stickiness.
+        """
+        level = level if level in LEVEL_ORDER else ALERT_OK
+        now = time.monotonic()
+
+        if level != ALERT_OK:
+            if sticky_seconds > 0:
+                # Escalate immediately; never downgrade inside the window.
+                if LEVEL_ORDER[level] >= LEVEL_ORDER.get(self._alert_sticky, 0) \
+                        or now >= self._alert_sticky_until:
+                    self._alert_sticky = level
+                self._alert_sticky_until = now + sticky_seconds
+        elif now >= self._alert_sticky_until:
+            self._alert_sticky = ALERT_OK
+
+        effective = level
+        if sticky_seconds > 0 and now < self._alert_sticky_until \
+                and LEVEL_ORDER.get(self._alert_sticky, 0) > LEVEL_ORDER[level]:
+            effective = self._alert_sticky
+
+        if effective == self._alert_level:
+            return
+        self._alert_level = effective
+        self._apply_alert_style()
+
+    @property
+    def alert_level(self) -> str:
+        """The level currently being displayed (may be sticky, not live)."""
+        return self._alert_level
+
+    def _apply_alert_style(self) -> None:
+        """Repaint border and title to match ``_alert_level``."""
+        level = self._alert_level
+        try:
+            if level == ALERT_OK:
+                # Textual stores `border` as four per-edge rules, so clearing
+                # "border" itself is a no-op and would strand the alert colour.
+                for edge in ("border_top", "border_right",
+                             "border_bottom", "border_left"):
+                    self.styles.clear_rule(edge)
+            else:
+                key = "alert_crit" if level == ALERT_CRIT else "alert_warn"
+                self.styles.border = ("heavy", get_color(key))
+        except Exception:  # noqa: BLE001 - styling must never break a panel
+            pass
+        try:
+            marker = self.ALERT_MARKERS.get(level, "")
+            self.border_title = f"{marker}{self.title}"
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ geometry
 

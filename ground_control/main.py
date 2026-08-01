@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 from platformdirs import user_config_dir
 from .app import DEFAULT_DISK_IGNORE_PREFIXES, GroundControl
+from .utils.alerts import DEFAULT_THRESHOLDS, merge_thresholds
 from .utils.colors import (
     DEFAULT_COLORS,
     USER_THEMES_DIR,
@@ -129,6 +130,66 @@ def _parse_gpu_indices(value):
     return indices
 
 
+def _load_threshold_config():
+    """Read just the alert settings out of the config file, tolerating absence."""
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    raw = config.get("disk_ignore_prefixes", ", ".join(DEFAULT_DISK_IGNORE_PREFIXES))
+    if isinstance(raw, list):
+        prefixes = [str(p).strip() for p in raw if str(p).strip()]
+    else:
+        prefixes = [p.strip() for p in str(raw).split(",") if p.strip()]
+    return (merge_thresholds(config.get("thresholds")),
+            config.get("alerts_enabled", True),
+            prefixes)
+
+
+def run_once(as_json: bool, check: bool, interval: float, all_gpus: bool,
+             debug: bool, all_mounts: bool = False) -> int:
+    """
+    Collect one snapshot, print it, and return the process exit code.
+
+    Runs entirely outside Textual so it is safe in cron, CI and health checks.
+    Errors go to stderr and produce exit code 3, leaving stdout either valid
+    JSON or empty -- a consumer piping into `jq` never sees a half-written
+    document.
+    """
+    # Imported lazily: starting a TUI-less snapshot should not pay for the
+    # widget/plotting imports the app pulls in.
+    from .utils.snapshot import build_snapshot, exit_code_for, render_text, sample_twice
+    from .utils.system_metrics import SystemMetrics
+
+    try:
+        thresholds, alerts_enabled, ignore_prefixes = _load_threshold_config()
+        system_metrics = SystemMetrics(all_gpus=all_gpus)
+        sample_twice(system_metrics, interval=interval)
+        snapshot = build_snapshot(
+            system_metrics, thresholds=thresholds,
+            disk_ignore_prefixes=[] if all_mounts else ignore_prefixes)
+
+        if not alerts_enabled:
+            # Alerting is off for this user: report the readings without verdicts.
+            snapshot["alerts"] = []
+            snapshot["status"] = "ok"
+
+        if as_json:
+            click.echo(json.dumps(snapshot, indent=2, default=str))
+        else:
+            click.echo(render_text(snapshot))
+
+        return exit_code_for(snapshot.get("status", "ok")) if check else 0
+    except Exception as e:  # noqa: BLE001 - a snapshot must not dump a traceback
+        if debug:
+            raise
+        click.echo(f"Error: could not collect metrics: {e}", err=True)
+        return 3
+
+
 @click.group(invoke_without_command=True)
 @click.option('--log', is_flag=True, help='Also save log file in current working directory')
 @click.option('--debug', is_flag=True, help='Run in debug mode (do not catch errors).')
@@ -144,10 +205,26 @@ def _parse_gpu_indices(value):
 @click.option('--disk', '-d', is_flag=True, help='Show Disk widgets')
 @click.option('--net', '-n', is_flag=True, help='Show Network widgets')
 @click.option('--temp', '-t', is_flag=True, help='Show Temperature widgets')
+@click.option('--once', is_flag=True,
+             help='Print one metrics snapshot and exit, instead of running the TUI.')
+@click.option('--json', 'as_json', is_flag=True,
+             help='With --once, emit JSON instead of a human-readable summary.')
+@click.option('--check', is_flag=True,
+             help='With --once, exit 1 on a warning and 2 on a critical threshold breach.')
+@click.option('--interval', type=float, default=0.5, metavar='SECONDS',
+             help='With --once, gap between the priming and reported sample (default 0.5).')
+@click.option('--all-mounts', is_flag=True,
+             help='With --once, include mounts normally hidden (snap, /boot/efi).')
 @click.pass_context
-def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, temp):
+def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, temp,
+        once, as_json, check, interval, all_mounts):
     """Ground Control - Terminal System Monitor"""
     if ctx.invoked_subcommand is None:
+        if once or as_json or check:
+            raise SystemExit(run_once(as_json=as_json, check=check, interval=interval,
+                                      all_gpus=all_gpus, debug=debug,
+                                      all_mounts=all_mounts))
+
         # No subcommand specified, run the app
         setup_logging(also_log_to_cwd=log)
 
@@ -193,6 +270,9 @@ def get_default_config():
         "history_size": 120,
         "widget_tabs": {},
         "disk_ignore_prefixes": ", ".join(DEFAULT_DISK_IGNORE_PREFIXES),
+        "alerts_enabled": True,
+        "alert_sticky_seconds": 30.0,
+        "thresholds": {k: dict(v) for k, v in DEFAULT_THRESHOLDS.items()},
         "colors": DEFAULT_COLORS.copy(),
     }
 

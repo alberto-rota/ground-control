@@ -111,6 +111,10 @@ _FALLBACK_DEFAULT_COLORS = {
     "temp_warning_line": "#FF0000",  # red (80°C)
     "temp_caution_line": "#FF8C00",  # orange1 (60°C)
     
+    # Alerts (panel border + title marker when a threshold is breached)
+    "alert_warn": "#FFA500",  # orange
+    "alert_crit": "#FF0000",  # red
+
     # General
     "high_value": "#FF0000",  # bright_red for high values
     "white": "#FFFFFF",  # white
@@ -170,6 +174,7 @@ COLOR_GROUPS: List[Tuple[str, Tuple[str, ...]]] = [
         "header_bg", "footer_bg", "footer_fg", "footer_key_bg", "footer_key_fg",
         "selection_highlight", "text_on_accent",
     )),
+    ("Alerts", ("alert_warn", "alert_crit")),
     ("General", ("high_value", "white")),
 ]
 
