@@ -332,9 +332,11 @@ def theme(list_themes, save_as, delete_name, theme_arg, **kwargs):
             click.echo("Restart Ground Control to see the changes.")
         else:
             click.echo(f"Error: Failed to apply theme '{theme_name}'.", err=True)
+            raise SystemExit(1)
     else:
         click.echo(f"Error: Theme '{theme_name}' not found.", err=True)
-        click.echo(f"Available themes: {', '.join(available_themes)}")
+        click.echo(f"Available themes: {', '.join(available_themes)}", err=True)
+        raise SystemExit(1)
 
 def entry():
     cli()
