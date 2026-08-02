@@ -73,7 +73,7 @@ class CPUWidget(MetricWidget):
         """Return list of CPU indices allowed for the current process, or None if unavailable."""
         try:
             return psutil.Process(os.getpid()).cpu_affinity()
-        except (AttributeError, PermissionError):
+        except (AttributeError, psutil.Error):
             return None
 
     def _get_user_cpus(self, n_cores: int):
@@ -83,7 +83,7 @@ class CPUWidget(MetricWidget):
         """
         try:
             current_user = psutil.Process(os.getpid()).username()
-        except (AttributeError, PermissionError):
+        except (AttributeError, psutil.Error):
             return None
         user_cpus = set()
         for proc in psutil.process_iter(attrs=["username"]):
@@ -93,7 +93,11 @@ class CPUWidget(MetricWidget):
                 cpu_num = proc.cpu_num()
                 if 0 <= cpu_num < n_cores:
                     user_cpus.add(cpu_num)
-            except (AttributeError, PermissionError, KeyError):
+            # psutil.Error covers NoSuchProcess/ZombieProcess/AccessDenied. A
+            # process exiting between process_iter() and cpu_num() is a race we
+            # lose constantly on a busy box, and it is not an error: skip it.
+            # Letting it escape used to disable the whole CPU panel.
+            except (AttributeError, KeyError, psutil.Error):
                 continue
         return sorted(user_cpus) if user_cpus else None
 

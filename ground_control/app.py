@@ -368,6 +368,10 @@ class GroundControl(App):
 
     CSS_PATH: list[str] = []  # Do not load any Textual theme; all styling comes from _generate_css() and our theme JSONs
 
+    # Consecutive failed renders before a panel is disabled. Above 1 so a
+    # transient collector/psutil race costs a frame, not the whole panel.
+    WIDGET_FAILURE_LIMIT = 3
+
     def __init__(self, allowed_types: set[str] | None = None, gpu_indices: list[int] | None = None,
                  debug: bool = False, all_gpus: bool = False, squeue: bool = False):
         super().__init__()
@@ -397,6 +401,11 @@ class GroundControl(App):
         self.allowed_types = allowed_types
         self.gpu_indices = gpu_indices  # None = all GPUs; [0, 1] = only those indices
         self._failed_widget_titles = set()  # Widgets disabled due to error; stay hidden and are not updated
+        # Consecutive render failures per widget title. A panel is only
+        # disabled once it fails WIDGET_FAILURE_LIMIT ticks in a row, so a
+        # one-off race (a process exiting mid-scan, a device blinking out)
+        # no longer makes a panel vanish for the rest of the session.
+        self._widget_failure_streaks: dict[str, int] = {}
         self._widget_tab_states: dict[str, str] = {}  # Maps widget title -> active tab pane id
         # Internal debug flag (avoid clashing with Textual's App.debug property)
         self._debug_mode = debug
@@ -2243,8 +2252,19 @@ class GroundControl(App):
                     continue
                 try:
                     await self._dispatch_widget_update(widget, metrics_by_type)
+                    # A tick that renders clears the strike count: only a
+                    # persistently broken widget should be taken out.
+                    self._widget_failure_streaks.pop(widget.title, None)
                 except Exception as e:
-                    logger.error("Widget %s failed: %s", widget.title, e, exc_info=True)
+                    streak = self._widget_failure_streaks.get(widget.title, 0) + 1
+                    self._widget_failure_streaks[widget.title] = streak
+                    logger.error("Widget %s failed (%d/%d): %s", widget.title, streak,
+                                 self.WIDGET_FAILURE_LIMIT, e, exc_info=True)
+                    if streak < self.WIDGET_FAILURE_LIMIT and not self._debug_mode:
+                        # Transient: a metric source can race with a process
+                        # exiting or a device disappearing for one tick. Keep
+                        # the last good frame on screen and try again.
+                        continue
                     # Mark widget as failed so it is skipped on future updates
                     self._failed_widget_titles.add(widget.title)
                     if self._debug_mode:
