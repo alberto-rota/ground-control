@@ -210,10 +210,60 @@ class MetricWidget(Static):
     # Powerline tips drawn at the growing end of a bar (one cell each).
     ARROW_LEFT = ""
     ARROW_RIGHT = ""
+    # The one bar vocabulary every panel draws with: a solid body, a powerline
+    # tip on the growing end, and a rule for the unfilled track. Anything that
+    # renders a horizontal bar goes through build_gauge_bar, so the dashboard
+    # reads as one instrument rather than six.
+    BAR_BODY = "█"
+    BAR_TRACK = "─"
+
     # Width of the value labels flanking a split bar, and the smallest bar worth
     # keeping them for (below it the bar spans the whole width instead).
     SPLIT_LABEL_WIDTH = 9
     SPLIT_MIN_BAR = 6
+
+    def build_gauge_bar(
+        self,
+        width: int,
+        fraction: float,
+        color: str,
+        grow: str = "right",
+        track_color: str = None,
+    ) -> str:
+        """A single-colour gauge occupying exactly ``width`` cells.
+
+        The filled run ends in the powerline tip -- the tip *replaces* the final
+        filled cell rather than being appended, so the total stays ``width`` and
+        a completely full bar still reads as full.
+
+        Args:
+            width: Total cells, including the unfilled track.
+            fraction: Fill ratio, clamped to 0..1.
+            color: Rich colour for the filled run.
+            grow: ``"right"`` fills from the left edge; ``"left"`` mirrors it so
+                the bar grows from the right edge (for halves that meet at a
+                centre separator).
+            track_color: Optional colour for the unfilled track; plain when None.
+        """
+        width = int(width)
+        if width <= 0:
+            return ""
+        fraction = min(max(float(fraction), 0.0), 1.0)
+        filled = min(width, int(width * fraction))
+
+        def track(n: int) -> str:
+            if n <= 0:
+                return ""
+            run = self.BAR_TRACK * n
+            return f"[{track_color}]{run}[/]" if track_color else run
+
+        if filled <= 0:
+            return track(width)
+        if grow == "left":
+            body = f"[{color}]{self.ARROW_LEFT}{self.BAR_BODY * (filled - 1)}[/]"
+            return f"{track(width - filled)}{body}"
+        body = f"[{color}]{self.BAR_BODY * (filled - 1)}{self.ARROW_RIGHT}[/]"
+        return f"{body}{track(width - filled)}"
 
     def build_split_bar(
         self,
@@ -256,26 +306,19 @@ class MetricWidget(Static):
         left_blocks = min(left_half, int(left_half * min(max(left_fraction, 0.0), 1.0)))
         right_blocks = min(right_half, int(right_half * min(max(right_fraction, 0.0), 1.0)))
 
-        if left_blocks >= 1:
-            if left_from_centre:
-                left_bar = (
-                    f"{'─' * (left_half - left_blocks)}"
-                    f"[{left_color}]{self.ARROW_LEFT}{'█' * (left_blocks - 1)}[/]"
-                )
-            else:
-                left_bar = (
-                    f"[{left_color}]{'█' * (left_blocks - 1)}{self.ARROW_RIGHT}[/]"
-                    f"{'─' * (left_half - left_blocks)}"
-                )
-        else:
-            left_bar = "─" * left_half
-        if right_blocks >= 1:
-            right_bar = (
-                f"[{right_color}]{'█' * (right_blocks - 1)}{self.ARROW_RIGHT}[/]"
-                f"{'─' * (right_half - right_blocks)}"
-            )
-        else:
-            right_bar = "─" * right_half
+        # Fractions are re-derived from the block counts already clamped above, so
+        # the two halves keep their exact widths.
+        left_bar = self.build_gauge_bar(
+            left_half,
+            left_blocks / left_half if left_half else 0.0,
+            left_color,
+            grow="left" if left_from_centre else "right",
+        )
+        right_bar = self.build_gauge_bar(
+            right_half,
+            right_blocks / right_half if right_half else 0.0,
+            right_color,
+        )
 
         if not label_w:
             return f"{left_bar}│{right_bar}"
@@ -329,24 +372,11 @@ class MetricWidget(Static):
         return self.finish_plot(build, width, height)
 
     def create_gradient_bar(self, value: float, width: int = 20, color: str = None) -> str:
-        """Creates a gradient bar with custom base color."""
-        filled = int((width * value) / 100)
-        if filled > width * 0.8:
+        """Percentage gauge in the shared bar style; turns red past 80%."""
+        if int((width * value) / 100) > width * 0.8:
             color = get_rich_color("high_value", "#FF0000")
-        empty = width - filled
-
-        if filled == 0:
-            return "─" * width
-
         bar_color = self.color if color is None else color
-
-        if value < 20:
-            return f"[{bar_color}]{'█' * filled}[/]{'─' * empty}"
-
-        bar = (f"[{bar_color}]{'█' * filled}[/]"
-               f"{'─' * empty}")
-
-        return bar
+        return self.build_gauge_bar(width, value / 100.0, bar_color)
 
     def format_metric_line(self, label: str, value: float, suffix: str = "%") -> str:
         """Creates a consistent metric line with label, bar, and value."""

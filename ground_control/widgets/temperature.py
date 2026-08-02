@@ -121,13 +121,9 @@ class TemperatureWidget(MetricWidget):
         max_temp = max(1.0, float(self.max_temp))
         bars = []
         for i, (sensor_name, temp) in enumerate(ordered[: min(total_height, self.MAX_PLOT_SENSORS)]):
-            temp_percent = min(temp / max_temp, 1.0)
-            filled_blocks = int(bar_width * temp_percent)
-            empty_blocks = bar_width - filled_blocks
-
             # Same colour as this sensor's line in the plot (series order == this order).
             color = palette[i % len(palette)]
-            temp_bar = f"[{color}]{'█' * filled_blocks}[/]{'░' * empty_blocks}"
+            temp_bar = self.build_gauge_bar(bar_width, temp / max_temp, color)
             temp_str = align(f"{temp:.1f}°C", temp_field, "right")
 
             if name_width:
@@ -187,13 +183,13 @@ class TemperatureWidget(MetricWidget):
 
         plt.ylim(min_temp, max_temp)
 
-        # Draw the most important sensors, in the same order the bars list them
+        # Draw the most important sensors, in the same order the bars list them.
+        # No plotext label: the bars below name every sensor in its plot colour,
+        # so a legend would repeat them while eating plot rows.
         for sensor_name in self._plotted_sensors(temperatures):
             history = self.temperature_histories.get(sensor_name)
             if history:
-                # Short label for the legend
-                short_name = sensor_name.replace("_", "").replace(" ", "")
-                plt.plot(list(history), marker="braille", label=short_name)
+                plt.plot(list(history), marker="braille")
 
         # Set temperature-specific y-axis labels
         num_ticks = min(5, plot_height - 1)

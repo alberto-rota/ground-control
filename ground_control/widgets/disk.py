@@ -194,11 +194,11 @@ class DiskIOWidget(MetricWidget):
             disk_used_color = get_rich_color("disk_used", "#FF00FF")
             disk_free_color = get_rich_color("disk_free", "#00FFFF")
 
-            used_blocks = int((total_width * usage_percent) / 100)
-            free_blocks = total_width - used_blocks
-            usage_bar = (
-                f"[{disk_used_color}]{'█' * used_blocks}[/]"
-                f"[{disk_free_color}]{'█' * free_blocks}[/]"
+            # Used fills from the left and tips into the free track, which keeps
+            # its own colour -- same convention as the memory bar.
+            usage_bar = self.build_gauge_bar(
+                total_width, usage_percent / 100.0, disk_used_color,
+                track_color=disk_free_color,
             )
 
             # Label line: used on the left, free on the right, exactly total_width wide.

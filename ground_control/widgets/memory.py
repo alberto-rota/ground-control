@@ -74,19 +74,20 @@ class MemoryWidget(MetricWidget):
         # Block counts add up to total_width by construction (RAM half | SWAP half).
         ram_blocks = total_width // 2
         swap_blocks = total_width - ram_blocks
-        ram_used_blocks = int(ram_blocks * ram_used_percent)
-        ram_free_blocks = ram_blocks - ram_used_blocks
-        swap_used_blocks = int(swap_blocks * swap_used_percent)
-        swap_free_blocks = swap_blocks - swap_used_blocks
 
         ram_color = get_rich_color("memory_ram_used", "#FF8C00")
         swap_color = get_rich_color("memory_swap", "#00FFFF")
 
-        ram_free_bar = f"[{ram_color}]{'─' * ram_free_blocks}[/]"
-        ram_used_bar = f"[{ram_color}]{'█' * ram_used_blocks}[/]"
-        swap_used_bar = f"[{swap_color}]{'█' * swap_used_blocks}[/]"
-        swap_free_bar = f"[{swap_color}]{'─' * swap_free_blocks}[/]"
-        bar = f"{ram_free_bar}{ram_used_bar}{swap_used_bar}{swap_free_bar}"
+        # Both halves meet at the centre: RAM fills leftwards from it, SWAP
+        # rightwards, so each tip points the way its half grows.
+        ram_bar = self.build_gauge_bar(
+            ram_blocks, ram_used_percent, ram_color,
+            grow="left", track_color=ram_color,
+        )
+        swap_bar = self.build_gauge_bar(
+            swap_blocks, swap_used_percent, swap_color, track_color=swap_color,
+        )
+        bar = f"{ram_bar}{swap_bar}"
 
         # Label line: " " + L1 + " " + L2 + " " + L3 + " " + L4 -> 4 spaces + 4*label_w,
         # padded to total_width so it lines up with the bar quarters below it.
@@ -146,11 +147,11 @@ class MemoryWidget(MetricWidget):
 
         plt.yticks(y_ticks, y_labels)
 
-        # Plot RAM usage (positive values)
-        plt.plot(positive_ram, marker="braille", label="RAM")
-
-        # Plot SWAP usage (negative values)
-        plt.plot(negative_swap, marker="braille", label="SWAP")
+        # No plotext labels: the bar below already names RAM and SWAP in the same
+        # colours, and plotext's legend renderer raises IndexError at some panel
+        # geometries, which used to disable the whole widget.
+        plt.plot(positive_ram, marker="braille")
+        plt.plot(negative_swap, marker="braille")
 
         # Add a zero line
         plt.hline(0.00)
