@@ -8,65 +8,182 @@ from textual import on
 from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, format_size, recolor, substitute_plot_timeframe
+from ..utils.formatting import align, ansi2rich, format_size, recolor, substitute_plot_timeframe
 from ..utils.colors import get_rich_color
 import logging
 
 logger = logging.getLogger("ground-control.gpu")
 
 
-# Process text layout: bold labels, table-style fixed column widths so values align across rows.
-# Column value widths (labels are bold in markup; spacing between columns = 2 spaces).
-VAL_U_W, VAL_P_W, VAL_N_W, VAL_G_W, VAL_C_W, VAL_M_W = 10, 6, 14, 7, 6, 8
-CMD_WRAP = 50
-# Display widths for indent (label + space + value; Rich bold tags don't affect layout width).
-W_N_COL = 3 + VAL_N_W   # "N: " + name
-W_CMD_PREFIX = 5        # "Cmd: "
-CMD_INDENT = 2 + W_N_COL + W_CMD_PREFIX  # spaces between cols + N column + "Cmd: "
+# --------------------------------------------------------------- process rows
+#
+# One process is one row, buttons included. Columns are fixed-width so values
+# line up down the list and can be scanned as a table; the command takes
+# whatever is left. When the panel is too narrow for everything, columns are
+# dropped by priority rather than letting the line wrap or truncate blindly.
+#
+# (key, header, width, align, priority) -- lower priority drops first.
+# PID and GPU memory have no priority: they are never dropped, since a row you
+# cannot identify and whose memory cost you cannot see is not worth a row.
+PROC_COLUMNS = (
+    ("username",    "USER",   10, "left",  3),
+    ("pid",         "PID",     7, "right", None),
+    ("gpu_memory",  "GPU MEM", 8, "right", None),
+    ("cpu_percent", "CPU",     6, "right", 1),
+    ("memory",      "HOST",    8, "right", 2),
+)
+COL_GAP = 1
+# Narrower than this and the command is unreadable, so it is dropped instead.
+CMD_MIN_WIDTH = 8
+# One cell of label plus a margin, three times over: the strip the buttons
+# occupy, which the header must reserve so its columns line up with the rows.
+SIG_BUTTON_WIDTH = 3
+SIG_BUTTON_STRIP = 3 * (SIG_BUTTON_WIDTH + 1)
+
+
+def _proc_value(process: dict, key: str) -> str:
+    """Display string for one column of a process row."""
+    if key == "pid":
+        return str(process.get("pid", ""))
+    if key == "gpu_memory":
+        return str(process.get("gpu_memory") or "-")
+    if key == "cpu_percent":
+        return str(process.get("cpu_percent") or "-")
+    if key == "memory":
+        return str(process.get("memory") or "-")
+    if key == "username":
+        return str(process.get("username") or "-")
+    return ""
+
+
+def _proc_command(process: dict) -> str:
+    """The most informative one-line description of what the process is."""
+    return str(
+        process.get("script")
+        or process.get("command")
+        or process.get("name")
+        or "?"
+    )
+
+
+def format_process_line(process: dict, width: int, header: bool = False) -> str:
+    """Render one process (or the header) as exactly ``width`` cells of markup.
+
+    Columns are dropped lowest-priority-first until the row fits, so a narrow
+    panel still shows who owns the process, its PID and how much GPU memory it
+    is holding -- the three facts needed to decide whether to kill it.
+    """
+    width = int(width)
+    if width <= 0:
+        return ""
+
+    def fixed_width(cols):
+        return sum(w for _, _, w, _, _ in cols) + COL_GAP * len(cols)
+
+    columns = list(PROC_COLUMNS)
+    # 1. Drop optional columns, cheapest first, until the command has room.
+    while fixed_width(columns) + CMD_MIN_WIDTH > width:
+        droppable = [c for c in columns if c[4] is not None]
+        if not droppable:
+            break
+        columns.remove(min(droppable, key=lambda c: c[4]))
+
+    # 2. On a very narrow panel even PID + GPU MEM overflow. Squeeze them from
+    #    the right before giving up, so the row never bleeds into the buttons.
+    overflow = fixed_width(columns) - width
+    index = len(columns) - 1
+    while overflow > 0 and index >= 0:
+        key, label, col_width, alignment, priority = columns[index]
+        take = min(overflow, max(0, col_width - 3))
+        if take:
+            columns[index] = (key, label, col_width - take, alignment, priority)
+            overflow -= take
+        index -= 1
+    # 3. Still too narrow: drop from the right, PID last.
+    while columns and fixed_width(columns) > width:
+        columns.pop()
+
+    cmd_width = width - fixed_width(columns)
+    if cmd_width < CMD_MIN_WIDTH:
+        cmd_width = 0
+
+    user_color = get_rich_color("gpu_usage", "#00FFFF")
+    mem_color = get_rich_color("gpu_ram", "#00FF00")
+
+    parts = []
+    for key, label, col_width, alignment, _ in columns:
+        text = label if header else _proc_value(process, key)
+        text = align(text[:col_width], col_width, alignment)
+        if header:
+            parts.append(f"[bold]{text}[/]")
+        elif key == "username":
+            parts.append(f"[{user_color}]{text}[/]")
+        elif key == "gpu_memory":
+            parts.append(f"[{mem_color}]{text}[/]")
+        elif key in ("cpu_percent", "memory"):
+            parts.append(f"[dim]{text}[/]")
+        else:
+            parts.append(text)
+
+    if cmd_width:
+        raw = "COMMAND" if header else _proc_command(process)
+        if len(raw) > cmd_width:
+            raw = raw[: max(0, cmd_width - 1)] + "…"
+        raw = align(raw, cmd_width, "left")
+        parts.append(f"[bold]{raw}[/]" if header else raw)
+
+    line = (" " * COL_GAP).join(parts)
+    # Pad rather than trust the caller: the row sits next to fixed-width
+    # buttons, so a short line would let the background show through.
+    plain_len = 0
+    if parts:
+        plain_len = (sum(w for _, _, w, _, _ in columns) + cmd_width
+                     + COL_GAP * (len(parts) - 1))
+    if plain_len < width:
+        line += " " * (width - plain_len)
+    return line
 
 
 class ProcessRow(Static):
-    """One process row: 3-line process details (USER, PID, NAME, GPU MEM, COMMAND) + Kill / Term / Int buttons."""
+    """One process on one row: table columns plus its Kill / Term / Int buttons.
+
+    The buttons are real ``Button`` widgets squeezed to a single cell high, so
+    they keep focus, hover and keyboard activation; the full signal name lives
+    in each one's tooltip, and the header row above spells out the columns.
+    """
 
     DEFAULT_CSS = """
     ProcessRow {
-        height: 3;
-        min-height: 3;
+        height: 1;
+        min-height: 1;
         padding: 0 1;
     }
     ProcessRow Horizontal {
-        height: 3;
-        align: center middle;
+        height: 1;
     }
     ProcessRow .process-info {
         width: 1fr;
         min-width: 0;
-        height: 3;
-        overflow: hidden;
+        height: 1;
+        overflow: hidden hidden;
         text-wrap: nowrap;
         text-overflow: ellipsis;
     }
-    ProcessRow .sigkill-btn {
-        min-width: 5;
-        height: 3;
-        padding: 0 1;
-        background: #c00;
-        color: white;
+    /* Buttons default to a 3-row bordered box; strip all of it so the whole
+       row is one cell high. */
+    ProcessRow .sig-btn {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0;
+        margin: 0 0 0 1;
+        text-style: bold;
     }
-    ProcessRow .sigterm-btn {
-        min-width: 5;
-        height: 3;
-        padding: 0 1;
-        background: #e85d00;
-        color: white;
-    }
-    ProcessRow .sigint-btn {
-        min-width: 4;
-        height: 3;
-        padding: 0 1;
-        background: #bb0;
-        color: black;
-    }
+    ProcessRow .sigkill-btn { background: #c00; color: white; }
+    ProcessRow .sigterm-btn { background: #e85d00; color: white; }
+    ProcessRow .sigint-btn  { background: #bb0; color: black; }
     """
 
     def __init__(self, process: dict, **kwargs):
@@ -74,38 +191,33 @@ class ProcessRow(Static):
         self._process = process
 
     def compose(self) -> ComposeResult:
-        user = (self._process.get("username") or "-")[:VAL_U_W].ljust(VAL_U_W)
-        pid = str(self._process.get("pid", ""))[:VAL_P_W].rjust(VAL_P_W)
-        name = (self._process.get("name") or "?")[:VAL_N_W].ljust(VAL_N_W)
-        gpu_mem = (self._process.get("gpu_memory") or "N/A")[:VAL_G_W].rjust(VAL_G_W)
-        cpu = (self._process.get("cpu_percent") or "N/A")[:VAL_C_W].rjust(VAL_C_W)
-        mem = (self._process.get("memory") or "N/A")[:VAL_M_W].rjust(VAL_M_W)
-        full_cmd = self._process.get("script") or self._process.get("command") or ""
-        # Table-style: bold labels, fixed-width values, 2 spaces between columns
-        # Line 1: U: user  P: pid  GPU: gpu_mem  CPU: cpu%  MEM: mem
-        line1 = (
-            f"[bold]U:[/]  {user}  "
-            f"[bold]P:[/]  {pid}  "
-            f"[bold]GPU:[/] {gpu_mem}  "
-            f"[bold]CPU:[/] {cpu}  "
-            f"[bold]MEM:[/] {mem}"
-        )
-        # Line 2: N: name  Cmd: <first part of command>
-        name_part = f"[bold]N:[/]  {name}  [bold]Cmd:[/] "
-        cmd_part = full_cmd[:CMD_WRAP] + ("…" if len(full_cmd) > CMD_WRAP else "")
-        line2 = name_part + cmd_part
-        # Line 3: indented command continuation (align under command text)
-        if len(full_cmd) <= CMD_WRAP:
-            line3 = ""
-        else:
-            rest = full_cmd[CMD_WRAP : 2 * CMD_WRAP]
-            line3 = " " * CMD_INDENT + rest + ("…" if len(full_cmd) > 2 * CMD_WRAP else "")
-        row_text = line1 + "\n" + line2 + ("\n" + line3 if line3 else "")
+        pid = self._process.get("pid", "?")
         with Horizontal():
-            yield Static(row_text.strip(), classes="process-info")
-            yield Button("Kill", classes="sigkill-btn")
-            yield Button("Term", classes="sigterm-btn")
-            yield Button("Int", classes="sigint-btn")
+            yield Static("", classes="process-info")
+            for label, cls, signal_name, number in (
+                ("K", "sigkill-btn", "SIGKILL", 9),
+                ("T", "sigterm-btn", "SIGTERM", 15),
+                ("I", "sigint-btn", "SIGINT", 2),
+            ):
+                button = Button(label, classes=f"sig-btn {cls}")
+                button.tooltip = f"Send {signal_name} ({number}) to PID {pid}"
+                yield button
+
+    def on_mount(self) -> None:
+        self._render_info()
+
+    def on_resize(self, event) -> None:
+        # Column set depends on the width available, so re-render on every
+        # resize rather than formatting once at compose time.
+        self._render_info()
+
+    def _render_info(self) -> None:
+        try:
+            info = self.query_one(".process-info", Static)
+        except NoMatches:
+            return
+        width = info.content_size.width or (self.content_size.width - SIG_BUTTON_STRIP)
+        info.update(format_process_line(self._process, max(0, width)))
 
     @on(Button.Pressed, ".sigkill-btn")
     def _send_kill(self) -> None:
@@ -144,7 +256,7 @@ def _process_list_signature(processes: list) -> tuple:
 
 
 class GPUProcessList(Static):
-    """Scrollable list of process rows; each row has its own K/T/I buttons."""
+    """Scrollable table of processes, one row each, with per-row K/T/I buttons."""
 
     DEFAULT_CSS = """
     GPUProcessList {
@@ -154,6 +266,29 @@ class GPUProcessList(Static):
     GPUProcessList #gpu-process-rows {
         height: auto;
     }
+    GPUProcessList #gpu-process-header {
+        height: 1;
+        padding: 0 1;
+    }
+    GPUProcessList #gpu-process-header Horizontal {
+        height: 1;
+    }
+    GPUProcessList .header-cols {
+        width: 1fr;
+        min-width: 0;
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
+    }
+    /* Same width as a row's button strip, so headers sit over their columns
+       and the K/T/I letters get labelled. */
+    GPUProcessList .header-buttons {
+        width: 12;
+        min-width: 12;
+        height: 1;
+        text-align: right;
+    }
     """
 
     def __init__(self, **kwargs):
@@ -161,7 +296,26 @@ class GPUProcessList(Static):
         self._last_sig = None
 
     def compose(self) -> ComposeResult:
+        with Static(id="gpu-process-header"):
+            with Horizontal():
+                yield Static("", classes="header-cols")
+                yield Static("[bold] K  T  I[/]", classes="header-buttons")
         yield Vertical(id="gpu-process-rows")
+
+    def on_mount(self) -> None:
+        self._render_header()
+
+    def on_resize(self, event) -> None:
+        self._render_header()
+
+    def _render_header(self) -> None:
+        """Draw the column headings at the same widths the rows will use."""
+        try:
+            header = self.query_one(".header-cols", Static)
+        except NoMatches:
+            return
+        width = header.content_size.width or (self.content_size.width - SIG_BUTTON_STRIP - 2)
+        header.update(format_process_line({}, max(0, width), header=True))
 
     def update_processes(self, processes: list) -> None:
         """Replace contents only when the process list (PIDs/names) has changed to avoid flicker."""
