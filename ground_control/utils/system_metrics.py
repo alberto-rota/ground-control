@@ -704,6 +704,77 @@ class SystemMetrics:
         except Exception:  # noqa: BLE001
             return default
 
+    @staticmethod
+    def _num(fn, scale: float = 1.0):
+        """Numeric device accessor -> float (scaled) or None when unavailable.
+
+        NVML reports plenty of fields as the NA sentinel rather than raising --
+        consumer cards have no power limit, Grace-Blackwell has no discrete
+        memory clock, and so on. Callers get None and decide what to show.
+        """
+        try:
+            val = fn()
+            if val is None or val is NA:
+                return None
+            return float(val) * scale
+        except Exception:  # noqa: BLE001
+            return None
+
+    # NVML clock-throttle bits worth surfacing, most severe first. GpuIdle is
+    # deliberately excluded: an idle GPU is not a throttled one, and flagging it
+    # would make the common case look like a fault.
+    _THROTTLE_BITS = (
+        ("HwThermalSlowdown", "thermal", True),
+        ("SwThermalSlowdown", "thermal (sw)", True),
+        ("HwPowerBrakeSlowdown", "power brake", True),
+        ("HwSlowdown", "hw slowdown", True),
+        ("SwPowerCap", "power cap", False),
+        ("SyncBoost", "sync boost", False),
+        ("ApplicationsClocksSetting", "app clocks", False),
+        ("DisplayClockSetting", "display clocks", False),
+    )
+
+    def _throttle_reasons(self, device):
+        """Active clock-throttle reasons for a device.
+
+        Returns ``(labels, severe)`` -- short human labels, and whether any of
+        them indicates hardware distress (thermal or power-brake slowdown)
+        rather than ordinary governed behaviour. A card sitting at its software
+        power cap under load is normal; a card in hardware thermal slowdown is
+        losing throughput and wants attention.
+
+        Empty list when the driver does not implement the query, which is not
+        the same as "not throttled" -- callers must not infer health from it.
+        """
+        try:
+            import pynvml
+        except ImportError:
+            return [], False
+        handle = getattr(device, "handle", None)
+        if handle is None:
+            return [], False
+
+        # Renamed in newer NVML; keep working against both spellings.
+        getter = (getattr(pynvml, "nvmlDeviceGetCurrentClocksThrottleReasons", None)
+                  or getattr(pynvml, "nvmlDeviceGetCurrentClocksEventReasons", None))
+        if getter is None:
+            return [], False
+        try:
+            mask = int(getter(handle))
+        except Exception:  # noqa: BLE001
+            return [], False
+        if not mask:
+            return [], False
+
+        labels, severe = [], False
+        for suffix, label, is_severe in self._THROTTLE_BITS:
+            bit = (getattr(pynvml, f"nvmlClocksThrottleReason{suffix}", None)
+                   or getattr(pynvml, f"nvmlClocksEventReason{suffix}", None))
+            if bit is not None and mask & int(bit):
+                labels.append(label)
+                severe = severe or is_severe
+        return labels, severe
+
     def get_gpu_metrics(self):
         """Return per-GPU metrics including running processes on each device.
 
@@ -809,12 +880,31 @@ class SystemMetrics:
                 util = self._safe_metric(device.gpu_utilization, -1)
                 mem_used = self._safe_metric(device.memory_used, None)
                 mem_total = self._safe_metric(device.memory_total, None)
+                throttle_labels, throttle_severe = self._throttle_reasons(device)
                 return {
                     'gpu_name': f"{idx_label} {name}",
                     'gpu_util': util if util is not None else -1,
                     'mem_used': mem_used / (1000**3) if mem_used is not None else -1,
                     'mem_total': mem_total / (1000**3) if mem_total is not None else -1,
                     'processes': processes,
+                    # Telemetry below is best-effort: every field is None when the
+                    # driver or the card does not expose it, and the widget drops
+                    # whatever is missing rather than printing "N/A" noise.
+                    'power_w': self._num(device.power_draw, 1e-3),
+                    'power_limit_w': self._num(device.power_limit, 1e-3),
+                    'temperature_c': self._num(device.temperature),
+                    'fan_percent': self._num(device.fan_speed),
+                    'sm_clock_mhz': self._num(device.sm_clock),
+                    'max_sm_clock_mhz': self._num(device.max_sm_clock),
+                    # Fraction of time the memory interface was busy -- NOT how
+                    # full the VRAM is. Read next to gpu_util it separates "doing
+                    # work" from "a kernel is resident but starved".
+                    'mem_bw_percent': self._num(device.memory_utilization),
+                    'enc_percent': self._num(device.encoder_utilization),
+                    'dec_percent': self._num(device.decoder_utilization),
+                    'perf_state': self._safe_metric(device.performance_state, None),
+                    'throttle_reasons': throttle_labels,
+                    'throttle_severe': throttle_severe,
                 }
 
     def get_memory_metrics(self):

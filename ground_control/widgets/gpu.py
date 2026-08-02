@@ -190,9 +190,13 @@ class GPUWidget(MetricWidget):
         ("p", "show_plot", "GPU: plot"),
     ]
 
-    # Rows taken by the tab bar (tabs + underline) and the bar line under the plot;
-    # only used to estimate the plot region before the first layout pass.
-    CHROME_HEIGHT = 3
+    # Rows taken by the tab bar (tabs + underline), the split bar and the
+    # telemetry line; only used to estimate the plot region before the first
+    # layout pass.
+    CHROME_HEIGHT = 4
+    # Below this panel height the telemetry line is hidden: the plot needs the
+    # row more than the reader needs the clock speed.
+    TELEMETRY_MIN_PANEL_HEIGHT = 9
 
     DEFAULT_CSS = """
     GPUWidget {
@@ -205,6 +209,12 @@ class GPUWidget(MetricWidget):
         height: 1fr;
     }
     GPUWidget #current-value {
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: clip;
+        overflow: hidden hidden;
+    }
+    GPUWidget #gpu-telemetry {
         height: 1;
         text-wrap: nowrap;
         text-overflow: clip;
@@ -248,12 +258,17 @@ class GPUWidget(MetricWidget):
         self._initial_tab = initial_tab if initial_tab in ("plot", "processes") else "plot"
         self.max_val = 1
         self._last_processes = None
+        # Raw per-GPU metric dict for the telemetry line, and whether that line
+        # currently has a row (short panels give it back to the plot).
+        self._telemetry: dict = {}
+        self._telemetry_shown = True
 
     def compose(self) -> ComposeResult:
         with TabbedContent(initial=self._initial_tab, id="gpu-tabbed"):
             with TabPane("Plot", id="plot"):
                 yield Static("", id="history-plot", classes="metric-plot gpu-plot-pane")
                 yield Static("", id="current-value", classes="metric-value")
+                yield Static("", id="gpu-telemetry", classes="metric-value")
             with TabPane("Processes", id="processes"):
                 yield GPUProcessList(id="gpu-processes", classes="gpu-processes-pane")
 
@@ -292,6 +307,102 @@ class GPUWidget(MetricWidget):
     def usage_color() -> str:
         """Colour of the GPU-usage series — used for both the plot line and the bar."""
         return get_rich_color("gpu_plot_usage", get_rich_color("gpu_usage", "#00FFFF"))
+
+    @staticmethod
+    def temp_color(celsius: float) -> str:
+        """Colour a GPU temperature on the same scale the temperature panel uses."""
+        if celsius >= 85:
+            return get_rich_color("temp_critical", "#FF0000")
+        if celsius >= 75:
+            return get_rich_color("temp_hot", "#FF8C00")
+        if celsius >= 60:
+            return get_rich_color("temp_warm", "#FFFF00")
+        return get_rich_color("temp_normal", "#00FF00")
+
+    def _telemetry_segments(self, t: dict) -> list:
+        """(text, markup) pairs for the telemetry line, most important first.
+
+        Everything unavailable on this card is omitted rather than rendered as
+        "N/A": a line of placeholders costs the same width as real data and
+        tells the reader nothing.
+        """
+        segments = []
+
+        reasons = t.get("throttle_reasons") or []
+        if reasons:
+            # The single most actionable GPU fact: the card is being held back,
+            # and by what. Severe reasons (thermal, power brake) mean lost
+            # throughput now; a software power cap is normal under load.
+            severe = t.get("throttle_severe")
+            color = (get_rich_color("alert_crit", "#FF0000") if severe
+                     else get_rich_color("alert_warn", "#FFA500"))
+            marker = "■" if severe else "▲"
+            text = f"{marker} {', '.join(reasons)}"
+            segments.append((text, f"[{color}]{text}[/]"))
+
+        power, limit = t.get("power_w"), t.get("power_limit_w")
+        if power is not None:
+            if limit:
+                # Percent of cap is the honest "is this card working" number:
+                # a GPU at 100% utilisation drawing 15% of its limit is stalled.
+                text = f"{power:.0f}/{limit:.0f}W {power / limit * 100:.0f}%"
+            else:
+                text = f"{power:.0f}W"
+            segments.append((text, f"[{self.usage_color()}]{text}[/]"))
+
+        temp = t.get("temperature_c")
+        if temp is not None:
+            text = f"{temp:.0f}°C"
+            segments.append((text, f"[{self.temp_color(temp)}]{text}[/]"))
+
+        clock, max_clock = t.get("sm_clock_mhz"), t.get("max_sm_clock_mhz")
+        if clock is not None:
+            text = f"{clock:.0f}/{max_clock:.0f}MHz" if max_clock else f"{clock:.0f}MHz"
+            segments.append((text, text))
+
+        bandwidth = t.get("mem_bw_percent")
+        if bandwidth is not None:
+            # Memory-interface busy time, not VRAM occupancy. High SM
+            # utilisation with near-zero bandwidth is the classic input-starved
+            # training loop.
+            text = f"BW {bandwidth:.0f}%"
+            segments.append((text, f"[{self.ram_color()}]{text}[/]"))
+
+        state = t.get("perf_state")
+        if state:
+            segments.append((str(state), f"[dim]{state}[/]"))
+
+        codec = [(label, value) for label, value in
+                 (("ENC", t.get("enc_percent")), ("DEC", t.get("dec_percent")))
+                 if value]
+        for label, value in codec:
+            text = f"{label} {value:.0f}%"
+            segments.append((text, f"[dim]{text}[/]"))
+
+        return segments
+
+    def create_telemetry_line(self, telemetry: dict, width: int) -> str:
+        """Power/clock/thermal line, trimmed to ``width`` by dropping segments.
+
+        Segments are dropped from the least important end, so a narrow panel
+        keeps the throttle state and power draw rather than an arbitrary prefix.
+        """
+        width = int(width)
+        if width <= 0 or not telemetry:
+            return ""
+        segments = self._telemetry_segments(telemetry)
+        if not segments:
+            return ""
+
+        separator = "  "
+        while segments:
+            plain_len = sum(len(text) for text, _ in segments) \
+                + len(separator) * (len(segments) - 1)
+            if plain_len <= width:
+                line = separator.join(markup for _, markup in segments)
+                return line + " " * (width - plain_len)
+            segments.pop()
+        return " " * width
 
     def create_center_bar(
         self, gpu_ram: float, gpu_usage: float, content_width: int
@@ -379,19 +490,47 @@ class GPUWidget(MetricWidget):
         )
         bar_width, _ = self.region_size("#current-value")
         try:
+            telemetry_line = self.query_one("#gpu-telemetry")
+        except NoMatches:
+            telemetry_line = None
+
+        # Give the row back to the plot on short panels, and re-measure once the
+        # new split has been laid out.
+        show_telemetry = bool(
+            self._telemetry
+            and self.content_size.height >= self.TELEMETRY_MIN_PANEL_HEIGHT
+        )
+        if telemetry_line is not None and show_telemetry != self._telemetry_shown:
+            self._telemetry_shown = show_telemetry
+            telemetry_line.display = show_telemetry
+            self.call_after_refresh(self.rerender)
+
+        try:
             self.query_one("#history-plot").update(self.get_dual_plot(plot_width, plot_height))
             self.query_one("#current-value").update(
                 self.create_center_bar(
                     self.gpu_ram_history[-1], self.gpu_usage_history[-1], bar_width
                 )
             )
+            if telemetry_line is not None and show_telemetry:
+                width, _ = self.region_size("#gpu-telemetry")
+                telemetry_line.update(
+                    self.create_telemetry_line(self._telemetry, width)
+                )
         except NoMatches:
             pass  # DOM not ready yet (e.g. after layout switch)
 
     def update_content(
-        self, gpu_name, gpu_usage, mem_used, mem_total, processes=None
+        self, gpu_name, gpu_usage, mem_used, mem_total, processes=None,
+        telemetry=None,
     ):
-        """Update plot/bar and optionally the processes list. processes: list of dicts with pid, name, gpu_memory, username, command, script."""
+        """Update plot/bar and optionally the processes list. processes: list of dicts with pid, name, gpu_memory, username, command, script.
+
+        ``telemetry`` is the raw per-GPU metric dict; the power/clock/thermal
+        keys in it are optional and the line renders whatever is present.
+        """
+        if telemetry is not None:
+            self._telemetry = telemetry
         if self.first:
             self.first = False
             return

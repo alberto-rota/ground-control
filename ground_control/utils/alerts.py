@@ -250,6 +250,11 @@ def evaluate_snapshot(metrics_by_type: Dict, thresholds: Dict[str, Dict]
                                          thresholds, "% vram", name, breaches))
             except (TypeError, ValueError):
                 pass
+            # The device's own thermal sensor, so a hot card lights up its own
+            # panel instead of only the shared temperature panel.
+            if gpu.get("temperature_c") is not None:
+                levels.append(_check("gpu_temperature_c", gpu["temperature_c"],
+                                     thresholds, "°C", name, breaches))
             targets[("gpu", index)] = worst(levels)
 
     temps = metrics_by_type.get("temperature")

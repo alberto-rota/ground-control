@@ -2433,6 +2433,7 @@ class GroundControl(App):
             gpu_metric['mem_used'],
             gpu_metric['mem_total'],
             gpu_metric.get('processes'),
+            telemetry=gpu_metric,
         )
 
     async def _update_temperature_widget(self, widget, temperature_metrics):

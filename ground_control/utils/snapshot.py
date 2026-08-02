@@ -153,6 +153,11 @@ def _gpu_section(gpus) -> List[Dict]:
         total = None if total is None or total < 0 else round(float(total), 3)
         util = gpu.get("gpu_util")
         util = None if util is None or util < 0 else util
+        def rounded(key, digits=1):
+            value = gpu.get(key)
+            return None if value is None else round(float(value), digits)
+
+        power, limit = gpu.get("power_w"), gpu.get("power_limit_w")
         section.append({
             "index": index,
             "name": gpu.get("gpu_name"),
@@ -162,6 +167,20 @@ def _gpu_section(gpus) -> List[Dict]:
             "memory_percent": (round(used / total * 100.0, 1)
                                if used is not None and total else None),
             "process_count": len(gpu.get("processes") or []),
+            "power_w": rounded("power_w"),
+            "power_limit_w": rounded("power_limit_w"),
+            "power_percent": (round(power / limit * 100.0, 1)
+                              if power is not None and limit else None),
+            "temperature_c": rounded("temperature_c"),
+            "fan_percent": rounded("fan_percent", 0),
+            "sm_clock_mhz": rounded("sm_clock_mhz", 0),
+            "max_sm_clock_mhz": rounded("max_sm_clock_mhz", 0),
+            "memory_bandwidth_percent": rounded("mem_bw_percent", 0),
+            "performance_state": gpu.get("perf_state"),
+            # Empty list means "not throttled OR not reported" -- see
+            # SystemMetrics._throttle_reasons; do not read health from it alone.
+            "throttle_reasons": list(gpu.get("throttle_reasons") or []),
+            "throttle_severe": bool(gpu.get("throttle_severe")),
         })
     return section
 
@@ -270,6 +289,26 @@ def render_text(snapshot: Dict) -> str:
             line += (f"  {gpu.get('memory_used_gb')}/{gpu.get('memory_total_gb')} GB"
                      f"  {gpu.get('name') or ''}")
         lines.append(line.rstrip())
+        # Second line only when the card actually reports telemetry, so this
+        # stays quiet on hardware that exposes nothing.
+        detail = []
+        if gpu.get("power_w") is not None:
+            detail.append(f"{gpu['power_w']:.0f}W"
+                          + (f"/{gpu['power_limit_w']:.0f}W ({gpu['power_percent']:.0f}%)"
+                             if gpu.get("power_limit_w") else ""))
+        if gpu.get("temperature_c") is not None:
+            detail.append(f"{gpu['temperature_c']:.0f}C")
+        if gpu.get("sm_clock_mhz") is not None:
+            detail.append(f"{gpu['sm_clock_mhz']:.0f}"
+                          + (f"/{gpu['max_sm_clock_mhz']:.0f}" if gpu.get("max_sm_clock_mhz") else "")
+                          + " MHz")
+        if gpu.get("memory_bandwidth_percent") is not None:
+            detail.append(f"BW {gpu['memory_bandwidth_percent']:.0f}%")
+        if gpu.get("throttle_reasons"):
+            marker = "!!" if gpu.get("throttle_severe") else "!"
+            detail.append(f"{marker} throttled: {', '.join(gpu['throttle_reasons'])}")
+        if detail:
+            lines.append("         " + "  ".join(detail))
 
     temperatures = metrics.get("temperature_c") or {}
     for sensor, value in temperatures.items():
