@@ -7,7 +7,7 @@ import subprocess
 import random
 import math
 import logging
-from typing import List, Union, Dict, Optional
+from typing import List, Tuple, Union, Dict, Optional
 
 logger = logging.getLogger("ground-control.metrics")
 
@@ -36,6 +36,142 @@ except Exception as _nvitop_err:  # noqa: BLE001
     logger.info("nvitop unavailable, GPU metrics disabled: %s", _nvitop_err)
 
 import multiprocessing
+
+
+# --------------------------------------------------------------------- CPU telemetry
+#
+# Everything below is Linux procfs/sysfs and entirely best-effort: on macOS,
+# Windows, or a kernel built without PSI these files simply are not there. Each
+# reader returns None rather than raising, and the widget omits what is missing
+# — the same contract the GPU telemetry uses for NVML's NA sentinel.
+
+CGROUP_ROOT = "/sys/fs/cgroup"
+
+
+def _read_text(path: str) -> Optional[str]:
+    """File contents, or None if it does not exist / cannot be read."""
+    try:
+        with open(path, "r") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_psi_cpu() -> Optional[float]:
+    """``some avg10`` from /proc/pressure/cpu — % of wall time tasks stalled.
+
+    Strictly more informative than load average: it measures the time runnable
+    tasks spent *waiting* for a CPU, so it is a saturation signal rather than a
+    queue-length proxy. Requires a PSI-enabled kernel (most distro kernels
+    since 4.20); None everywhere else.
+    """
+    text = _read_text("/proc/pressure/cpu")
+    if not text:
+        return None
+    for line in text.splitlines():
+        if not line.startswith("some "):
+            continue
+        for field in line.split():
+            if field.startswith("avg10="):
+                try:
+                    return float(field.split("=", 1)[1])
+                except ValueError:
+                    return None
+    return None
+
+
+def _read_proc_counts() -> Tuple[Optional[int], Optional[int]]:
+    """(runnable, total) task counts from the 4th field of /proc/loadavg."""
+    text = _read_text("/proc/loadavg")
+    if not text:
+        return None, None
+    fields = text.split()
+    if len(fields) < 4 or "/" not in fields[3]:
+        return None, None
+    running, _, total = fields[3].partition("/")
+    try:
+        return int(running), int(total)
+    except ValueError:
+        return None, None
+
+
+def _cgroup_dirs() -> List[str]:
+    """Candidate cgroup directories for this process, most specific first.
+
+    Inside a container with its own cgroup namespace the controller files sit
+    directly at /sys/fs/cgroup; on a host they live under the path named in
+    /proc/self/cgroup. Try both rather than guessing which world we are in.
+    """
+    dirs = []
+    text = _read_text("/proc/self/cgroup") or ""
+    for line in text.splitlines():
+        parts = line.split(":", 2)
+        # v2 lines look like "0::/user.slice/...".
+        if len(parts) == 3 and parts[0] == "0" and parts[2].startswith("/"):
+            rel = parts[2].strip()
+            if rel != "/":
+                dirs.append(os.path.join(CGROUP_ROOT, rel.lstrip("/")))
+    dirs.append(CGROUP_ROOT)
+    return dirs
+
+
+def _read_cgroup_cpu() -> Dict[str, Optional[float]]:
+    """CFS quota and throttling counters for this process's cgroup.
+
+    Returns ``quota_cores`` (the CPU budget in whole cores, None when
+    unlimited) plus the cumulative ``nr_periods``/``nr_throttled`` counters.
+    A container held at its quota is the classic "40% CPU but everything is
+    slow" report, and nothing else in the dashboard would show it.
+    """
+    result: Dict[str, Optional[float]] = {
+        "quota_cores": None, "nr_periods": None, "nr_throttled": None,
+    }
+    for base in _cgroup_dirs():
+        # cgroup v2: "cpu.max" holds "<quota|max> <period>".
+        raw = _read_text(os.path.join(base, "cpu.max"))
+        stat = _read_text(os.path.join(base, "cpu.stat"))
+        if raw is None and stat is None:
+            continue
+        if raw:
+            fields = raw.split()
+            if len(fields) == 2 and fields[0] != "max":
+                try:
+                    quota, period = float(fields[0]), float(fields[1])
+                    if period > 0:
+                        result["quota_cores"] = quota / period
+                except ValueError:
+                    pass
+        if stat:
+            for line in stat.splitlines():
+                key, _, value = line.partition(" ")
+                if key in ("nr_periods", "nr_throttled"):
+                    try:
+                        result[key] = float(value)
+                    except ValueError:
+                        pass
+        if result["quota_cores"] is not None or result["nr_periods"] is not None:
+            return result
+
+    # cgroup v1 fallback: still the default on older Kubernetes nodes.
+    quota = _read_text(os.path.join(CGROUP_ROOT, "cpu", "cpu.cfs_quota_us"))
+    period = _read_text(os.path.join(CGROUP_ROOT, "cpu", "cpu.cfs_period_us"))
+    if quota and period:
+        try:
+            quota_v, period_v = float(quota.strip()), float(period.strip())
+            if quota_v > 0 and period_v > 0:
+                result["quota_cores"] = quota_v / period_v
+        except ValueError:
+            pass
+    stat = _read_text(os.path.join(CGROUP_ROOT, "cpu", "cpu.stat"))
+    if stat:
+        for line in stat.splitlines():
+            key, _, value = line.partition(" ")
+            if key in ("nr_periods", "nr_throttled"):
+                try:
+                    result[key] = float(value)
+                except ValueError:
+                    pass
+    return result
 
 
 def _parse_visible_gpu_spec(spec: Optional[str]) -> Optional[object]:
@@ -104,6 +240,12 @@ class SystemMetrics:
         self.prev_disk_time = time.time()
         self.prev_net_time = time.time()
         self.prev_disk_io = {}  # Store previous disk IO counters per disk
+        # CPU rate counters. Context switches, interrupts and CFS-throttle
+        # counts are cumulative since boot, so only their delta over a tick
+        # says anything; keep the previous reading the way disk/net do.
+        self.prev_cpu_stats = None
+        self.prev_cpu_stats_time = time.time()
+        self.prev_cgroup_cpu = None
         self._initialize_counters()
         self.devices = self._get_all_gpu_devices() if (NVML_AVAILABLE and NVITOP_AVAILABLE) else []
         
@@ -498,6 +640,88 @@ class SystemMetrics:
         return f"{', '.join(cpu_models)} [{core_label}]"
 
 
+    def get_cpu_telemetry(self, cpu_freqs, n_cores: int) -> Dict[str, Optional[float]]:
+        """Saturation and stall figures that raw utilisation percentages hide.
+
+        Utilisation alone lies in the same way it does for a GPU: a box can sit
+        at 40% and still be unable to make progress because it is waiting on
+        I/O, being descheduled by a hypervisor, or held at a CFS quota. Every
+        field is optional -- callers render what is present and omit the rest.
+        """
+        t: Dict[str, Optional[float]] = {}
+
+        # Where the time actually went. psutil compares against its own
+        # previous call, so this is the breakdown over the last tick.
+        try:
+            times = psutil.cpu_times_percent()
+            t["user_percent"] = float(times.user)
+            t["system_percent"] = float(times.system)
+            # iowait/steal only exist on Linux; getattr keeps this portable.
+            for key, attr in (("iowait_percent", "iowait"), ("steal_percent", "steal")):
+                value = getattr(times, attr, None)
+                t[key] = float(value) if value is not None else None
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            load1, load5, load15 = psutil.getloadavg()
+            t["load_1"], t["load_5"], t["load_15"] = load1, load5, load15
+            # Per-core is the portable reading: >1.0 means the run queue is
+            # longer than the machine is wide, whatever the machine's size.
+            t["load_per_core"] = load1 / n_cores if n_cores else None
+        except (OSError, AttributeError, ValueError):
+            pass
+
+        t["psi_some_avg10"] = _read_psi_cpu()
+        running, total = _read_proc_counts()
+        t["procs_running"], t["procs_total"] = running, total
+
+        # Clock as a fraction of maximum: the CPU-side counterpart of the GPU's
+        # SM clock, and the first place a thermally-limited box shows itself.
+        # Heterogeneous machines (P/E cores, big.LITTLE) have per-core maxima,
+        # so average the current clocks and take the highest ceiling.
+        currents = [f.current for f in (cpu_freqs or []) if getattr(f, "current", 0)]
+        maxima = [f.max for f in (cpu_freqs or []) if getattr(f, "max", 0)]
+        t["freq_mhz"] = sum(currents) / len(currents) if currents else None
+        t["freq_max_mhz"] = max(maxima) if maxima else None
+
+        now = time.time()
+        elapsed = max(now - self.prev_cpu_stats_time, 1e-6)
+        try:
+            stats = psutil.cpu_stats()
+            if self.prev_cpu_stats is not None:
+                # A context-switch rate far above the core count is the
+                # signature of thread oversubscription -- the classic
+                # OMP_NUM_THREADS x dataloader-workers blow-up.
+                t["ctx_switches_per_s"] = max(
+                    0.0, (stats.ctx_switches - self.prev_cpu_stats.ctx_switches) / elapsed
+                )
+                t["interrupts_per_s"] = max(
+                    0.0, (stats.interrupts - self.prev_cpu_stats.interrupts) / elapsed
+                )
+            self.prev_cpu_stats = stats
+            self.prev_cpu_stats_time = now
+        except Exception:  # noqa: BLE001
+            pass
+
+        cgroup = _read_cgroup_cpu()
+        t["cgroup_quota_cores"] = cgroup.get("quota_cores")
+        periods, throttled = cgroup.get("nr_periods"), cgroup.get("nr_throttled")
+        if periods is not None and throttled is not None:
+            prev = self.prev_cgroup_cpu
+            if prev is not None:
+                d_periods = periods - (prev.get("nr_periods") or 0)
+                d_throttled = throttled - (prev.get("nr_throttled") or 0)
+                # Share of scheduling periods in which the cgroup ran out of
+                # quota. The cumulative counter only ever grows, so a rate is
+                # the only form of this number that means anything live.
+                if d_periods > 0:
+                    t["cgroup_throttled_percent"] = max(
+                        0.0, min(100.0, d_throttled / d_periods * 100.0)
+                    )
+            self.prev_cgroup_cpu = cgroup
+        return t
+
     def get_cpu_metrics(self):
         try:
             cpu_percentages = psutil.cpu_percent(percpu=True)
@@ -515,11 +739,19 @@ class SystemMetrics:
             mem_percent = psutil.virtual_memory().percent
         except Exception:  # noqa: BLE001
             mem_percent = 0.0
+        # Telemetry is decoration on top of the core percentages: a failure
+        # here must never cost the panel its bar chart.
+        try:
+            telemetry = self.get_cpu_telemetry(cpu_freqs, len(cpu_percentages))
+        except Exception as err:  # noqa: BLE001
+            logger.debug("CPU telemetry unavailable: %s", err)
+            telemetry = {}
         return {
             'cpu_percentages': cpu_percentages,
             'cpu_freqs': cpu_freqs,
             'mem_percent': mem_percent,
             'cpu_name': self.get_cpu_info(),
+            'cpu_telemetry': telemetry,
         }
 
     def get_disk_metrics(self):

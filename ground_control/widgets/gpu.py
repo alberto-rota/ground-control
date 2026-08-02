@@ -541,22 +541,9 @@ class GPUWidget(MetricWidget):
         Segments are dropped from the least important end, so a narrow panel
         keeps the throttle state and power draw rather than an arbitrary prefix.
         """
-        width = int(width)
-        if width <= 0 or not telemetry:
+        if not telemetry:
             return ""
-        segments = self._telemetry_segments(telemetry)
-        if not segments:
-            return ""
-
-        separator = "  "
-        while segments:
-            plain_len = sum(len(text) for text, _ in segments) \
-                + len(separator) * (len(segments) - 1)
-            if plain_len <= width:
-                line = separator.join(markup for _, markup in segments)
-                return line + " " * (width - plain_len)
-            segments.pop()
-        return " " * width
+        return self.build_telemetry_line(self._telemetry_segments(telemetry), width)
 
     def create_center_bar(
         self, gpu_ram: float, gpu_usage: float, content_width: int

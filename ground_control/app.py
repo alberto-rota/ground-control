@@ -1941,7 +1941,8 @@ class GroundControl(App):
             # Always create new widgets when setup_widgets is called
             # Resolve saved tab state for CPU widget (cpu_title already set above)
             cpu_initial_tab = self._widget_tab_states.get(cpu_title, "all")
-            cpu_widget = CPUWidget(cpu_title, initial_tab=cpu_initial_tab)
+            cpu_widget = CPUWidget(cpu_title, initial_tab=cpu_initial_tab,
+                                   history_size=int(self.history_size))
             memory_widget = MemoryWidget("Memory")
             self.disk_widgets = []
             self.gpu_widgets = []
@@ -2416,6 +2417,7 @@ class GroundControl(App):
             cpu_metrics['cpu_percentages'],
             cpu_metrics['cpu_freqs'],
             cpu_metrics['mem_percent'],
+            telemetry=cpu_metrics.get('cpu_telemetry'),
         )
 
     async def _update_memory_widget(self, widget, memory_metrics):
@@ -2794,6 +2796,10 @@ class GroundControl(App):
             cpu_widget = self.query_one(CPUWidget)
             if hasattr(cpu_widget, 'history'):
                 cpu_widget.history = cpu_widget.history.__class__(maxlen=new_size)
+            # The stall series is plotted alongside `history`; resizing only one
+            # would leave the two plot lines covering different time spans.
+            if hasattr(cpu_widget, 'stall_history'):
+                cpu_widget.stall_history = cpu_widget.stall_history.__class__(maxlen=new_size)
         except Exception:
             if self._debug_mode:
                 raise

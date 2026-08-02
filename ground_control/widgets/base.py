@@ -330,6 +330,34 @@ class MetricWidget(Static):
             f"[{right_color}]{right_text}[/]"
         )
 
+    # --------------------------------------------------------------- telemetry line
+
+    def build_telemetry_line(
+        self, segments: list, width: int, separator: str = "  "
+    ) -> str:
+        """Join ``(text, markup)`` segments into exactly ``width`` cells.
+
+        Segments must be ordered most-important first: when the line does not
+        fit, they are dropped from the least-important end, so a narrow panel
+        keeps the headline facts rather than an arbitrary prefix. ``text`` is
+        the markup-free form, used for measuring only.
+
+        Callers build the segment list; this owns the fitting rule, so every
+        telemetry row in the dashboard truncates the same way.
+        """
+        width = int(width)
+        if width <= 0 or not segments:
+            return ""
+        segments = list(segments)
+        while segments:
+            plain_len = sum(len(text) for text, _ in segments) \
+                + len(separator) * (len(segments) - 1)
+            if plain_len <= width:
+                line = separator.join(markup for _, markup in segments)
+                return line + " " * (width - plain_len)
+            segments.pop()
+        return " " * width
+
     def finish_plot(self, build: str, width: int, height: int) -> str:
         """Trim a built plot so it can never exceed its region.
 
