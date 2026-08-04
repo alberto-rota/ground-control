@@ -1,6 +1,6 @@
 # 🚀 Ground Control - The Ultimate Terminal System Monitor
 
-![Ground Control Banner](https://github.com/alberto-rota/ground-control/blob/main/assets/horiz.png?raw=true)
+![Ground Control Banner](https://github.com/alberto-rota/ground-control/blob/main/assets/dashboard.gif?raw=true)
 
 [![PyPI version](https://badge.fury.io/py/groundcontrol.svg)](https://badge.fury.io/py/groundcontrol)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -65,16 +65,16 @@ gc
 ### 🔹 Available Layouts
 
 ### Grid Layout
-A structured layout displaying all widgets neatly in a grid. When you first launch **Ground Control**, it will show this layout.
-![Grid Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/grid.png?raw=true)
+A structured layout displaying all widgets neatly in a grid. When you first launch **Ground Control**, it will show this layout. The recording below is `gc` running inside a Slurm job with four GPUs.
+![Grid Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/dashboard.gif?raw=true)
 
 ### Horizontal Layout
 All widgets aligned in a single row. If you like working with wide shell spaces, split a TMUX session horizontally and use this layout!
-![Horizontal Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/horiz.png?raw=true)
+![Horizontal Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/horizontal.gif?raw=true)
 
 #### Vertical Layout
 A column-based layout, ideal for narrow shell spaces. If you like working with tall shell spaces, split a TMUX session verticall and use this layout!
-![Vertical Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/tmux.png?raw=true)
+![Vertical Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/vertical.gif?raw=true)
 
 ### 🖥️ Widget Breakdown
 Each panel in Ground Control represents a different system metric:
@@ -84,14 +84,14 @@ Each panel in Ground Control represents a different system metric:
 - Displays each core's utilization in a compact bar chart format
 - Updates in real-time with color-coded bars showing load intensity
 
-<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/cpus.png?raw=true" alt="CPU_widget" width="600">
+![CPU widget](https://github.com/alberto-rota/ground-control/blob/main/assets/cpu.gif?raw=true)
 
 ### 🔹 **Memory Utilization**
 - Dual plot showing RAM (positive axis) and SWAP (negative axis) usage in GB
 - Center bar with color-coded sections showing used/free RAM and SWAP
 - Title displays total RAM and SWAP capacity in GB
 
-<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/ram.png?raw=true" alt="RAM_widget" width="600">
+![Memory widget](https://github.com/alberto-rota/ground-control/blob/main/assets/memory.gif?raw=true)
 
 ### 🔹 **Temperature Monitoring**
 - Multi-line plot tracking temperature over time in °C for up to 4 key sensors
@@ -99,7 +99,7 @@ Each panel in Ground Control represents a different system metric:
 - Right panel shows current temperatures with dynamic color bars based on heat levels
 - Prioritizes CPU, GPU, and motherboard sensors
 
-<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/temperature.png?raw=true" alt="Temperature_widget" width="600">
+![Temperature widget](https://github.com/alberto-rota/ground-control/blob/main/assets/temperature.gif?raw=true)
 
 ### 🔹 **Disk I/O**
 - Dual plot showing read (positive axis) and write (negative axis) speeds for each mounted disk/partition
@@ -108,31 +108,34 @@ Each panel in Ground Control represents a different system metric:
 - Each mounted disk/partition gets its own widget (except boot/EFI partitions)
 - Automatically detects and displays all mounted disks and partitions
 
-<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/disk.png?raw=true" alt="Disk_widget" width="600">
+![Disk widget](https://github.com/alberto-rota/ground-control/blob/main/assets/disk.gif?raw=true)
 
 ### 🔹 **Network Traffic**
 - Dual plot showing upload (positive axis) and download (negative axis) speeds
 - Shows current transfer rates with color-coded indicators
 - Tracks cumulative data transfer amounts
 
-<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/network.png?raw=true" alt="Network_widget" width="600">
+![Network widget](https://github.com/alberto-rota/ground-control/blob/main/assets/network.gif?raw=true)
 
 ### 🔹 **GPU Metrics (NVIDIA Only)**
 - Dual plot showing GPU usage % (positive axis) and memory usage GB (negative axis)
 - Center bar displays current GPU memory usage (GB) and utilization (%)
+- A telemetry line underneath reports power draw against its limit, temperature, SM clock, memory-bandwidth utilization and any clock-throttle reason
 - Shows "Usage UNAV" when GPU utilization cannot be detected
 
-<img src="https://github.com/alberto-rota/ground-control/blob/main/assets/gpu.png?raw=true" alt="GPU_widget" width="600">
+![GPU widget](https://github.com/alberto-rota/ground-control/blob/main/assets/gpu.gif?raw=true)
 
 ## 🛠️ Configuring Ground Control
 Ground Control offers extensive customization options to tailor your monitoring experience. You might not want to see all the widgets all at once, or you may want to focus on specific system metrics.
 
-### 🔹 **Widget Selection Panel**
-The configuration panel can be accessed by pressing `c` or clicking the `Configure` button. This opens a panel that allows you to:
+### 🔹 **Settings Tab**
+The settings panel can be accessed by pressing `s` or clicking the `Settings` tab. It lets you:
 
-- **Toggle widgets**: Enable/disable individual widgets (CPU, Memory, Temperature, Disk, Network, GPU) by clicking their checkboxes
-- **Refresh rate**: Choose update intervals from 500ms to 1 minute using the refresh rate buttons
-- **History size**: Set the data history length from 30 seconds to 10 minutes using the history buttons
+- **Toggle widgets**: Enable/disable individual widgets (CPU, Memory, Temperature, each Disk, Network, each GPU) by clicking their checkboxes
+- **Refresh rate**: Choose update intervals from 500ms to 1 minute
+- **History window**: Set the data history length from 30 seconds to 10 minutes
+- **Hide mounts**: Keep uninteresting filesystems out of the dashboard with the disk ignore prefixes
+- **Pick a theme**: Choose one of the built-in palettes, edit any individual color, and save the result as your own theme
 - **Save preferences**: All settings are automatically saved to `~/.config/ground-control/config.json`
 
 The config file stores:
@@ -147,7 +150,7 @@ You can switch between different layouts instantly:
 - Press `h` or click `Horizontal Layout` for single-row alignment
 - Press `v` or click `Vertical Layout` for column-based display
 
-![Config_widget](https://github.com/alberto-rota/ground-control/blob/main/assets/config.png?raw=true)
+![Settings tab](https://github.com/alberto-rota/ground-control/blob/main/assets/settings.gif?raw=true)
 
 ### 🔹 **Persistent Configuration**
 All your customizations are automatically saved when you quit Ground Control. When you launch it again, you'll see the same layout and widget configuration you previously selected, ensuring a consistent monitoring experience.
@@ -159,8 +162,15 @@ All available keyboard shortcuts are listed here:
 | `h`  | Switch to Horizontal Layout |
 | `v`  | Switch to Vertical Layout |
 | `g`  | Switch to Grid Layout |
-| `c`  | Show/Hide the configuration panel |
+| `d`  | Show the Dashboard |
+| `s`  | Show the Settings tab |
+| `l`  | Show the Logs tab |
+| `r`  | Refresh now |
+| `+` / `-` | Refresh faster / slower |
+| `?`  | List every shortcut, including the ones not in the footer |
 | `q`  | Quit Ground Control |
+
+The footer of the app always shows the keys available in the current context, and `?` opens the full list.
 
 ---
 
@@ -190,6 +200,8 @@ Pull requests and contributions are welcome! To contribute:
 3. Submit a PR with your changes.
 
 Visit the [Issue Section](https://github.com/alberto-rota/ground-control/issues) to start!
+
+Every animation in this README is generated from a [vhs](https://github.com/charmbracelet/vhs) tape in [`tapes/`](tapes) — one tape per asset, re-recordable with `vhs tapes/<name>.tape`. See [`tapes/README.md`](tapes/README.md) if you change the UI and need to refresh them.
 
 ## 📜 License
 This project is licensed under the **GNU General Public License v3.0**. See the [LICENSE](LICENSE) file for details.
