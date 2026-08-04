@@ -205,6 +205,11 @@ class MemoryWidget(MetricWidget):
             ram_used_gb, self.total_ram, swap_used_gb, self.total_swap,
         )
 
-        self.border_title = f"RAM [{format_size(self.total_ram, in_gb=True)}] SWAP [{format_size(self.total_swap, in_gb=True)}]"
+        # Via set_display_title, not border_title: assigning the border directly
+        # would wipe the alert marker and the job-focus suffix on every render.
+        self.set_display_title(
+            f"RAM [{format_size(self.total_ram, in_gb=True)}] "
+            f"SWAP [{format_size(self.total_swap, in_gb=True)}]"
+        )
 
         self.rerender()

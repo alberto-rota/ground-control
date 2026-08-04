@@ -13,6 +13,12 @@ gc                           # launch TUI
 gc --cpu --ram --net         # show only specific widgets
 gc -g --gpu-index 0,1        # show GPU widgets for GPU 0 and 1
 gc --debug                   # surface exceptions instead of catching them
+gc --squeue                  # add the Slurm panel and pick jobs at startup
+
+# Scripting / collectors
+gc --once --json             # one snapshot, then exit
+gc --once --check            # Nagios-style exit codes
+gc --stream                  # one JSON snapshot per line, forever (see Job focus)
 
 # Config and themes
 gc config                    # open config in $EDITOR
@@ -20,12 +26,14 @@ gc config --reset            # reset to defaults
 gc theme --list              # list themes
 gc theme --monokai           # apply theme (requires restart)
 
+# Tests
+pytest tests                 # pure parsers, formatters, and headless pilot tests
+
 # Build for distribution
 python -m build              # produces dist/ via setuptools
 ```
 
-No automated test suite — manual testing with `gc` and `gc --debug`.  
-No linter or formatter is configured.
+No linter or formatter is configured. `gc --debug` surfaces exceptions instead of catching them.
 
 ## Architecture
 
@@ -55,6 +63,33 @@ No linter or formatter is configured.
 
 **Snapshot / scripting** (`utils/snapshot.py`): `gc --once` renders one sample outside Textual — `--json` for the machine-readable form, `--check` for Nagios-style exit codes (0/1/2, and 3 on collector failure), `--interval` for the priming gap. Rate metrics are deltas, so `sample_twice()` primes the counters first or throughput reads as 0. The JSON shape is built field by field against `SCHEMA_VERSION` rather than dumping collector output, so internal metric changes cannot silently alter the published contract. `mount_ignored()`/`filter_disk_metrics()` are shared with the TUI's `disk_ignore_prefixes` — without them a snapshot reports every read-only squashfs under `/snap` as 100% full and critically out of space (`--all-mounts` opts back in).
 
+`gc --stream` is the same snapshot repeated: `iter_snapshots()` primes once and then yields one compact JSON object per line, flushed immediately, so a reader can consume it with `readline`. It is the collector half of job focus (below) and is why a remote sample costs a line of JSON instead of a job step. Termination is deliberately over-determined because it usually runs inside somebody's allocation: SIGTERM/SIGINT/SIGHUP exit cleanly, a closed stdout exits cleanly, and `--stream-max-seconds` expires the process even if no signal ever arrives.
+
+**Slurm** (`utils/slurm.py`, `widgets/slurm_jobs.py`): every command is best-effort — Slurm may be absent, `slurmctld` slow, a job gone between two calls — so nothing here raises to the caller; failures degrade to `None`/empty and the TUI keeps running. The parsers (`parse_squeue`, `parse_scontrol_job`, `parse_sstat`) are pure and unit-tested without a cluster. `SlurmMonitor` throttles its own polling (`min_interval`), so it is safe to call from every refresh tick.
+
+`J` lists your **running** jobs only — a queued job holds no resources, so there is nothing to sample or focus on yet (`get_running_user_jobs`; `COMPLETING` is excluded too, since its cgroup is already being torn down). The picker offers two different things, because they answer different questions: `enter` lists the *checked* jobs in the `SlurmJobsWidget` panel (metadata, allocation, `sstat` usage), while `f` **focuses** the *highlighted* one.
+
+**Job focus** — the important thing to understand is that `gc` normally runs on a **login node** while the job runs on a compute node, so job-scoped monitoring cannot be done by filtering local readings: psutil and NVML would describe the wrong machine, and a login node typically reports zero GPUs. Instead the collector is *moved into the job*: `JobFocusSampler` starts `srun --overlap --jobid=N <python> -m ground_control --stream` (`_stream_command`) and the login node only reads the NDJSON lines it writes. `--overlap` joins the *existing* allocation, so that process lands inside the job's cgroup and inherits its `CUDA_VISIBLE_DEVICES` — which means the CPU/memory/GPU scoping `SystemMetrics` already does for its own environment becomes exactly the scoping we want, with no extra filtering. `metrics_from_snapshot()` (`utils/snapshot.py`) is the inverse of `build_snapshot` and turns each line back into the `metrics_by_type` shape, so remote data flows through the same widgets *and* the same `evaluate_snapshot` alerting as local data.
+
+Why streaming rather than one `--once` per sample: the expensive part was never the metrics, it was **creating a job step and booting an interpreter** — measured at 5.5s per sample on this cluster, against a dashboard that ticks once a second. A resident collector pays that once (first line in ~1.4s, then one line per `--interval`), and the login node's share of the work drops to `json.loads`. That is what makes focus usable from a loaded login node at all.
+
+Details that are easy to get wrong:
+
+- The stream is not assumed to be permanent. It ends when the remote lifetime cap (`--stream-max-seconds`, an hour) expires or the node hiccups, and the sampler quietly re-arms; a stream that produced samples and ended is **not** a failure and must not be counted as one. Sampling still happens off the UI thread, and the UI reads the last completed sample plus its **age**, shown in the panel title (`(starting…)`, `(stale Ns)`) rather than passing an old reading off as live. `_job_sample_stale_after()` derives that threshold from the sampler's cadence and mode, since the one-shot fallback is legitimately slower.
+- `JobFocusSampler.stop()` must not block: it is called from the UI thread while the reader thread sits in `readline`, so terminating `srun` (which is what actually ends the remote step) is handed to a throwaway thread. Blocking there froze the whole app on unfocus.
+- stderr is folded into stdout deliberately. A separate stderr pipe can fill and deadlock the remote process, every line is validated as JSON anyway, and srun's diagnostics are worth keeping — `diagnostics()` feeds them back into the "could not start" message, because "Access/permission denied" is fixable and "see Logs" is not.
+- A remote `gc` too old to know `--stream` falls back to one-shot `--once` probing (`_probe_command`), but only when the failure *reads* like a rejected flag (`_looks_unsupported`). A step that could not be created is retried as a stream instead of being permanently downgraded.
+- The panel *set* depends on the job's hardware, which is unknown until the first sample returns — hence `_layout_metrics()` and the rebuild in `_rebuild_when_sample_arrives()`. Only `border_title` is retitled with the job/node; `widget.title` is an identity key (disk panels are matched by it, failure streaks tracked by it) and renaming it breaks dispatch.
+- GPU process pids belong to the **compute node**. `os.kill` on them locally would signal whatever unrelated login-node process holds that number, so the K/T/I buttons are disabled in focus mode *and* `ProcessRow._send_signal` refuses outright — a disabled button alone is not a safety guarantee.
+
+The remote command is addressed as `sys.executable -m ground_control`, not `gc`: a non-interactive remote shell inherits none of the user's PATH, so the console script usually is not found. `PYTHONPATH` is passed via srun's own `--export` rather than an `env` prefix, because the remote PATH is the user's and a shadowing (or broken) `env` earlier on it is what would actually execute. Focus ends automatically if the job stops running (confirmed off-thread, since the check is a subprocess), and the extra detail fields the rebuild needs (`telemetry`, `meminfo`, per-GPU `processes`) are additive — an older remote `gc` degrades to fewer rows instead of raising.
+
+**Slurm jobs panel** (`widgets/slurm_jobs.py`): one job is one row, buttons included — the same shape as the GPU process list, and laid out the same way (`format_job_line`, `JOB_COLUMNS`, columns dropped lowest-priority-first, always exactly `width` cells). Job id and state are never dropped; the `TIME` column offers a shorter form rather than being truncated mid-number. A second `dim` line per job (`format_job_detail`) carries the time-limit gauge and `sstat` usage — the gauge is drawn for **time** because that is the one quantity here with an unambiguous denominator and the one whose exhaustion kills the job, and it is omitted entirely for a job that has not started (an empty "0% used" would suggest it had). Bars go through the module-level `gauge_bar()` in `widgets/base.py`, which `MetricWidget.build_gauge_bar` now delegates to, so a non-`MetricWidget` panel draws with the same vocabulary.
+
+Rows are updated **in place**; only a changed job *set* remounts them. A refresh tick that rebuilt the rows would drop keyboard focus and the half-armed Cancel button with it.
+
+`F` on a row focuses that job; `C` cancels it, but **arms first** — one press turns the button red, a second within `JobRow.ARM_SECONDS` calls `scancel`, and it auto-disarms because an armed destructive button left sitting there is a trap. A stray click on a signal button costs one process; a stray click here throws away a queued allocation and everything the job had computed. `scancel_job()` is the one Slurm helper that reports failure instead of swallowing it (the user needs to know *whether their job is gone*), and it runs off the UI thread. Both row buttons set `active_effect_duration = 0`: Textual ignores a click while the press animation runs, which would otherwise swallow the second half of the confirmation.
+
 **GPU support**: NVIDIA only, via nvitop for device enumeration and nvidia-ml-py for metrics. MiG devices are detected but utilization may be unavailable ("Usage UNAV").
 
 **GPU telemetry**: `_collect_one_gpu` returns power, temperature, fan, SM clock vs max clock, memory-*bandwidth* utilization, encoder/decoder, performance state and clock-throttle reasons alongside the core util/VRAM figures. Every one of these is best-effort — `SystemMetrics._num()` normalizes NVML's `NA` sentinel to `None` (consumer cards report no power limit, Grace-Blackwell no discrete memory clock), and both the widget and the JSON simply omit or null what is missing rather than printing `N/A` noise.
@@ -73,4 +108,4 @@ Per-device temperature also feeds `evaluate_snapshot`, so a hot card lights up i
 
 Metric panels do **not** use plotext legends: the bars underneath already name each series in its plot colour, so a legend would duplicate them while eating plot rows. It is also a correctness matter — plotext's legend renderer raises `IndexError` at some panel geometries, which previously disabled `MemoryWidget` outright.
 
-**Testing**: no suite in-repo. Headless testing works via Textual's `app.run_test()` pilot, and `XDG_CONFIG_HOME` redirects config/themes/logs away from the real `~/.config/ground-control` — always set it, since `load_colors()` writes the config as a side effect of reading it. When asserting bar geometry, strip markup with `rich.text.Text.from_markup(...).plain` before measuring: the powerline tips are single cells that a raw `len()` on the markup string will not count correctly.
+**Testing**: `pytest tests` (pytest only, no pytest-asyncio — the pilot tests drive their own loop via a local `_run` helper that restores the thread's event loop afterwards, or the widget constructors in later modules fail). `tests/conftest.py` redirects `XDG_CONFIG_HOME` at *import* time, not in a fixture, because test modules import ground_control before fixtures run and `load_colors()` writes the config as a side effect of reading it. Headless UI testing works via Textual's `app.run_test()` pilot. When asserting bar geometry, strip markup with `rich.text.Text.from_markup(...).plain` before measuring: the powerline tips are single cells that a raw `len()` on the markup string will not count correctly.

@@ -7,6 +7,57 @@ import plotext as plt
 from ..utils.formatting import align, ansi2rich, fit_lines
 from ..utils.colors import get_color, get_rich_color, load_colors
 from ..utils.alerts import CRIT as ALERT_CRIT, OK as ALERT_OK, WARN as ALERT_WARN, LEVEL_ORDER
+
+# Powerline tips drawn at the growing end of a bar (one cell each).
+ARROW_LEFT = ""
+ARROW_RIGHT = ""
+# The one bar vocabulary every panel draws with: a solid body, a powerline tip on
+# the growing end, and a rule for the unfilled track.
+BAR_BODY = "█"
+BAR_TRACK = "─"
+
+
+def gauge_bar(width: int, fraction: float, color: str, grow: str = "right",
+              track_color: str = None) -> str:
+    """A single-colour gauge occupying exactly ``width`` cells.
+
+    Module-level so panels that are not :class:`MetricWidget` subclasses (the
+    Slurm job list) draw bars from the same code as the metric panels do, rather
+    than hand-rolling block strings that drift out of step with the rest.
+
+    The filled run ends in the powerline tip -- the tip *replaces* the final
+    filled cell rather than being appended, so the total stays ``width`` and a
+    completely full bar still reads as full.
+
+    Args:
+        width: Total cells, including the unfilled track.
+        fraction: Fill ratio, clamped to 0..1.
+        color: Rich colour for the filled run.
+        grow: ``"right"`` fills from the left edge; ``"left"`` mirrors it so the
+            bar grows from the right edge (for halves meeting at a separator).
+        track_color: Optional colour for the unfilled track; plain when None.
+    """
+    width = int(width)
+    if width <= 0:
+        return ""
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    filled = min(width, int(width * fraction))
+
+    def track(n: int) -> str:
+        if n <= 0:
+            return ""
+        run = BAR_TRACK * n
+        return f"[{track_color}]{run}[/]" if track_color else run
+
+    if filled <= 0:
+        return track(width)
+    if grow == "left":
+        body = f"[{color}]{ARROW_LEFT}{BAR_BODY * (filled - 1)}[/]"
+        return f"{track(width - filled)}{body}"
+    body = f"[{color}]{BAR_BODY * (filled - 1)}{ARROW_RIGHT}[/]"
+    return f"{body}{track(width - filled)}"
+
+
 class MetricWidget(Static):
     """Base widget for system metrics with plot."""
 
@@ -84,6 +135,16 @@ class MetricWidget(Static):
         self._alert_level = ALERT_OK
         self._alert_sticky = ALERT_OK
         self._alert_sticky_until = 0.0
+        # Appended to the border title after the alert marker — used to name the
+        # machine a panel is showing when it is not this one (Slurm job focus).
+        # Kept separate from `title`, which is an identity key the app matches
+        # panels on, and composed in `_refresh_border_title` so an alert marker
+        # and a suffix cannot overwrite each other.
+        self._title_suffix = ""
+        # Optional prettier text shown in place of `title` (e.g. the memory panel
+        # displays live RAM/SWAP sizes). Also kept separate from `title` for the
+        # same reason: the app looks panels up by it.
+        self._display_title: str | None = None
         # If color is a hex value or color name, use it; otherwise use default
         # Note: We use _color_config to avoid conflict with Textual's colors attribute
         if color.startswith("#"):
@@ -153,11 +214,37 @@ class MetricWidget(Static):
                 self.styles.border = ("heavy", get_color(key))
         except Exception:  # noqa: BLE001 - styling must never break a panel
             pass
+        self._refresh_border_title()
+
+    def _refresh_border_title(self) -> None:
+        """Rebuild the border title from marker + display title + suffix."""
         try:
-            marker = self.ALERT_MARKERS.get(level, "")
-            self.border_title = f"{marker}{self.title}"
+            marker = self.ALERT_MARKERS.get(self._alert_level, "")
+            shown = self._display_title if self._display_title is not None else self.title
+            self.border_title = f"{marker}{shown}{self._title_suffix}"
         except Exception:  # noqa: BLE001
             pass
+
+    def set_title_suffix(self, suffix: str) -> None:
+        """Annotate the panel title without disturbing its alert marker."""
+        suffix = suffix or ""
+        if suffix == self._title_suffix:
+            return
+        self._title_suffix = suffix
+        self._refresh_border_title()
+
+    def set_display_title(self, text: str) -> None:
+        """Show ``text`` in place of ``title``, keeping marker and suffix.
+
+        Panels that put live values in their border (memory's RAM/SWAP sizes)
+        must go through this rather than assigning ``border_title``, which would
+        drop whatever annotation the app had put there — including the alert
+        marker, on every single render.
+        """
+        if text == self._display_title:
+            return
+        self._display_title = text
+        self._refresh_border_title()
 
     # ------------------------------------------------------------------ geometry
 
@@ -207,15 +294,12 @@ class MetricWidget(Static):
 
     # ------------------------------------------------------------------ split bars
 
-    # Powerline tips drawn at the growing end of a bar (one cell each).
-    ARROW_LEFT = ""
-    ARROW_RIGHT = ""
-    # The one bar vocabulary every panel draws with: a solid body, a powerline
-    # tip on the growing end, and a rule for the unfilled track. Anything that
-    # renders a horizontal bar goes through build_gauge_bar, so the dashboard
-    # reads as one instrument rather than six.
-    BAR_BODY = "█"
-    BAR_TRACK = "─"
+    # Bar vocabulary, mirrored from the module-level constants so the many
+    # existing references through ``self`` keep working.
+    ARROW_LEFT = ARROW_LEFT
+    ARROW_RIGHT = ARROW_RIGHT
+    BAR_BODY = BAR_BODY
+    BAR_TRACK = BAR_TRACK
 
     # Width of the value labels flanking a split bar, and the smallest bar worth
     # keeping them for (below it the bar spans the whole width instead).
@@ -232,38 +316,11 @@ class MetricWidget(Static):
     ) -> str:
         """A single-colour gauge occupying exactly ``width`` cells.
 
-        The filled run ends in the powerline tip -- the tip *replaces* the final
-        filled cell rather than being appended, so the total stays ``width`` and
-        a completely full bar still reads as full.
-
-        Args:
-            width: Total cells, including the unfilled track.
-            fraction: Fill ratio, clamped to 0..1.
-            color: Rich colour for the filled run.
-            grow: ``"right"`` fills from the left edge; ``"left"`` mirrors it so
-                the bar grows from the right edge (for halves that meet at a
-                centre separator).
-            track_color: Optional colour for the unfilled track; plain when None.
+        Thin delegate to the module-level :func:`gauge_bar`, which is the one
+        implementation every bar in the app -- metric panels and the Slurm job
+        list alike -- goes through.
         """
-        width = int(width)
-        if width <= 0:
-            return ""
-        fraction = min(max(float(fraction), 0.0), 1.0)
-        filled = min(width, int(width * fraction))
-
-        def track(n: int) -> str:
-            if n <= 0:
-                return ""
-            run = self.BAR_TRACK * n
-            return f"[{track_color}]{run}[/]" if track_color else run
-
-        if filled <= 0:
-            return track(width)
-        if grow == "left":
-            body = f"[{color}]{self.ARROW_LEFT}{self.BAR_BODY * (filled - 1)}[/]"
-            return f"{track(width - filled)}{body}"
-        body = f"[{color}]{self.BAR_BODY * (filled - 1)}{self.ARROW_RIGHT}[/]"
-        return f"{body}{track(width - filled)}"
+        return gauge_bar(width, fraction, color, grow=grow, track_color=track_color)
 
     def build_split_bar(
         self,

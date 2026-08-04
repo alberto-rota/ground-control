@@ -28,6 +28,7 @@ import math
 import os
 import json
 import logging
+import time
 import traceback
 from ground_control.widgets.cpu import CPUWidget
 from ground_control.widgets.disk import DiskIOWidget
@@ -35,7 +36,7 @@ from ground_control.widgets.network import NetworkIOWidget
 from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
 from ground_control.widgets.temperature import TemperatureWidget
-from ground_control.widgets.slurm_jobs import SlurmJobsWidget
+from ground_control.widgets.slurm_jobs import JobRow, SlurmJobsWidget
 from ground_control.widgets.color_picker import (
     ColorPickerScreen,
     build_color_options,
@@ -43,6 +44,7 @@ from ground_control.widgets.color_picker import (
 )
 from ground_control.utils.system_metrics import SystemMetrics
 from ground_control.utils import slurm as slurm_utils
+from ground_control.utils.snapshot import metrics_from_snapshot
 from ground_control.utils.alerts import (
     CRIT as ALERT_CRIT,
     OK as ALERT_OK,
@@ -242,25 +244,40 @@ def _job_option_label(job: dict) -> str:
     part = job.get("partition") or ""
     nodes = job.get("nodes") or ""
     elapsed = job.get("elapsed") or ""
+    nodelist = job.get("nodelist") or ""
     state_color = {
         "RUNNING": "green", "PENDING": "yellow", "COMPLETING": "cyan",
         "SUSPENDED": "magenta",
     }.get(state, "white")
     return (
-        f"[bold]{jid:<10}[/] [{state_color}]{state:<10}[/] "
-        f"{name:<26} [dim]{part:<10} {nodes:>2}n  {elapsed}[/]"
+        f"[bold]{jid:<10}[/] [{state_color}]{state:<8}[/] "
+        f"{name:<22} [dim]{part:<10} {nodes:>2}n {nodelist:<12} {elapsed}[/]"
     )
 
 
 class JobSelectScreen(ModalScreen):
-    """Modal to pick which Slurm jobs to monitor (multi-select, keyboard-first).
+    """Modal to pick Slurm jobs, keyboard-first.
 
-    Dismisses with the list of selected job ids, or ``None`` if cancelled.
+    Two distinct outcomes, because there are two distinct questions a job list
+    raises:
+
+    * *Monitor* (checkboxes, multi-select) — "what is the queue doing with my
+      jobs?" Lists them in the Slurm panel with state, allocation and time used.
+      Costs one squeue/scontrol call every few seconds and nothing else; the rest
+      of the dashboard keeps showing this host.
+    * *Focus* (the highlighted row, single) — "what is my job doing *inside*?"
+      Points every panel at that one job by running a Ground Control collector
+      inside its allocation, so CPU/memory/GPU/process panels describe the
+      compute node's view of the job rather than this login node.
+
+    Dismisses with a dict describing which was chosen, or ``None`` if cancelled.
     """
 
     BINDINGS = [
         ("escape", "cancel", "Cancel"),
         ("a", "toggle_all", "All/none"),
+        Binding("f", "focus_job", "Focus", priority=True),
+        Binding("u", "unfocus_job", "Unfocus"),
         Binding("enter", "confirm", "Monitor", priority=True),
     ]
 
@@ -289,7 +306,9 @@ class JobSelectScreen(ModalScreen):
         border: none;
     }
     #job-select-hint {
-        height: 1;
+        /* auto, not 1: the hint is two lines, and a fixed height clipped the
+           second one (which is where 'enter' was explained). */
+        height: auto;
         margin-top: 1;
     }
     #job-select-buttons {
@@ -302,17 +321,21 @@ class JobSelectScreen(ModalScreen):
     }
     """
 
-    def __init__(self, jobs: list, preselected: set | None = None, **kwargs):
+    def __init__(self, jobs: list, preselected: set | None = None,
+                 focused_jobid: str | None = None, **kwargs):
         super().__init__(**kwargs)
         self._jobs = jobs or []
         self._preselected = preselected or set()
+        self._focused_jobid = focused_jobid
 
     def compose(self) -> ComposeResult:
         with Vertical(id="job-select-box"):
-            yield Static("Select Slurm jobs to monitor", id="job-select-title")
+            yield Static("Your running Slurm jobs", id="job-select-title")
             if not self._jobs:
                 yield Static(
-                    "[dim]No jobs found in your queue.[/]\n\n"
+                    "[dim]You have no running jobs.[/]\n\n"
+                    "[dim]Only running jobs are listed — a queued job has no\n"
+                    "resources to monitor yet.[/]\n\n"
                     "[dim]Press Escape to close.[/]",
                     id="job-select-empty",
                 )
@@ -327,19 +350,44 @@ class JobSelectScreen(ModalScreen):
                 ]
                 yield SelectionList[str](*options, id="job-select-list")
                 yield Static(
-                    "[dim]space: toggle · a: all/none · enter: monitor · esc: cancel[/]",
+                    "[dim]enter: list the [bold]checked[/] jobs in the Slurm panel"
+                    "   ·   f: run the whole dashboard [bold]inside[/] the "
+                    "highlighted job\nspace: check · a: all/none · "
+                    "u: back to this host · esc: cancel[/]",
                     id="job-select-hint",
                 )
                 with Horizontal(id="job-select-buttons"):
+                    yield Button("Focus", variant="primary", id="job-focus")
                     yield Button("Monitor", variant="success", id="job-confirm")
                     yield Button("Cancel", id="job-cancel")
+
+    def _highlighted_job(self) -> dict | None:
+        """The job under the cursor, which is what Focus acts on."""
+        try:
+            sl = self.query_one("#job-select-list", SelectionList)
+            index = sl.highlighted
+        except Exception:
+            return None
+        if index is None or not (0 <= index < len(self._jobs)):
+            return None
+        return self._jobs[index]
 
     def action_confirm(self) -> None:
         try:
             sl = self.query_one("#job-select-list", SelectionList)
-            self.dismiss(list(sl.selected))
+            self.dismiss({"action": "monitor", "jobids": list(sl.selected)})
         except Exception:
             self.dismiss(None)
+
+    def action_focus_job(self) -> None:
+        job = self._highlighted_job()
+        if job is None:
+            self.dismiss(None)
+            return
+        self.dismiss({"action": "focus", "job": job})
+
+    def action_unfocus_job(self) -> None:
+        self.dismiss({"action": "unfocus"})
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -353,6 +401,10 @@ class JobSelectScreen(ModalScreen):
             sl.deselect_all()
         else:
             sl.select_all()
+
+    @on(Button.Pressed, "#job-focus")
+    def _focus_btn(self) -> None:
+        self.action_focus_job()
 
     @on(Button.Pressed, "#job-confirm")
     def _confirm_btn(self) -> None:
@@ -386,6 +438,14 @@ class GroundControl(App):
         self.slurm_jobs_widget = None
         self._slurm_monitor = slurm_utils.SlurmMonitor()
         self._monitored_jobids: list[str] = []
+        # Job-focus mode: when set, every panel is fed from a sample taken
+        # *inside* this job's allocation on its compute node instead of from
+        # local collectors. See _enter_job_focus.
+        self._focused_job: dict | None = None
+        self._job_sampler: slurm_utils.JobFocusSampler | None = None
+        # Streak of failed probes, used to notice a job that has ended and drop
+        # focus rather than leaving the dashboard frozen on a dead sample.
+        self._job_focus_probe_failures = 0
         self.gpu_widgets = []
         self.disk_widgets = []
         self.temperature_widget = None
@@ -1013,6 +1073,7 @@ class GroundControl(App):
         Binding("left_square_bracket", "focus_prev_widget", "Prev panel", show=False),
         # Slurm
         Binding("J", "select_jobs", "Jobs"),
+        Binding("F", "toggle_job_focus", "Focus job"),
         # Help / quit
         Binding("question_mark", "show_shortcuts", "Help"),
         Binding("q", "quit", "Quit"),
@@ -1028,6 +1089,11 @@ class GroundControl(App):
         self._update_timer = self.set_interval(new_rate, self._update_metrics_sync)
         self.save_config()
         self._select_refresh_option(new_rate)
+        # A focused job's collector runs remotely at a cadence baked into its
+        # command line, so a new rate only reaches it on the next stream.
+        sampler = getattr(self, "_job_sampler", None)  # may not exist yet at init
+        if sampler is not None:
+            sampler.interval = max(float(new_rate), 0.5)
 
     def watch_history_size(self, new_size: int) -> None:
         """React to changes in history size."""
@@ -1720,7 +1786,20 @@ class GroundControl(App):
             row("1 2 / p", "GPU: Plot / Processes"),
         ]
         lines.append("\n[bold]Slurm[/]")
-        lines += [row("J", "Select jobs to monitor (--squeue)")]
+        lines += [
+            row("J", "Pick jobs — opens the list of your running jobs"),
+            row("  enter", "…[bold]list[/] the checked jobs in the Slurm panel (queue view)"),
+            row("  f", "…[bold]focus[/] the whole dashboard inside the highlighted job"),
+            row("F", "Focus a job / return to this host"),
+        ]
+        lines.append("  [dim]Listing shows what the queue says about a job "
+                     "(state, allocation, time).[/]")
+        lines.append("  [dim]Focusing runs a collector inside the job, so every "
+                     "panel shows the job's[/]")
+        lines.append("  [dim]own CPU, memory, GPUs and processes instead of this "
+                     "host's.[/]")
+        lines.append("  [dim]In the Slurm panel: [bold]F[/] focuses that job, "
+                     "[bold]C[/] cancels it (press twice).[/]")
         lines.append("\n[bold]Other[/]")
         lines += [row("?", "This help"), row("q", "Quit")]
         lines.append("\n[dim]Press q or Escape to close[/]")
@@ -1913,17 +1992,23 @@ class GroundControl(App):
         cannot interleave and accidentally create duplicate widgets.
         """
         async with self._setup_lock:
-            self.grid.remove_children()
-            gpu_metrics = self.system_metrics.get_gpu_metrics()
-            cpu_metrics = self.system_metrics.get_cpu_metrics()
-            disk_metrics = self.system_metrics.get_disk_metrics()
-            memory_metrics = self.system_metrics.get_memory_metrics()
-            temperature_metrics = self.system_metrics.get_temperature_metrics()
+            # Awaited (the other remove_children call sites do too): mounting the
+            # new panels while the old ones are still being removed races the
+            # DOM, and with many panels the rebuild could stop part-way through.
+            await self.grid.remove_children()
+            # Which panels exist follows the machine being monitored -- this
+            # host normally, the focused job's compute node in focus mode.
+            _layout = self._layout_metrics()
+            gpu_metrics = _layout.get("gpu") or []
+            cpu_metrics = _layout.get("cpu") or {}
+            disk_metrics = _layout.get("disk") or {"disks": []}
+            memory_metrics = _layout.get("memory") or {}
+            temperature_metrics = _layout.get("temperature")
             # Build widget titles in same order as mounting to compute visible count from saved config
             _gpu_for_layout = gpu_metrics if self.gpu_indices is None else [gpu_metrics[i] for i in self.gpu_indices if 0 <= i < len(gpu_metrics)]
-            _disk_titles = [f"Disk @ {d['mountpoint']}" for d in disk_metrics["disks"] if not self._disk_mount_ignored(d["mountpoint"])]
+            _disk_titles = [f"Disk @ {d['mountpoint']}" for d in disk_metrics.get("disks", []) if not self._disk_mount_ignored(d["mountpoint"])]
             _gpu_titles = [f"GPU @ {g['gpu_name']}" for g in _gpu_for_layout]
-            cpu_title = f"{cpu_metrics['cpu_name']}"
+            cpu_title = f"{cpu_metrics.get('cpu_name') or 'CPU'}"
             _visible = 0
             _visible += 1 if bool(self.selected_widgets.get(cpu_title, True)) else 0
             _visible += 1 if bool(self.selected_widgets.get("Memory", True)) else 0
@@ -1953,7 +2038,8 @@ class GroundControl(App):
             await self.grid.mount(memory_widget)
             
             # Create temperature widget only if temperature data is available
-            temperature_metrics = self.system_metrics.get_temperature_metrics()
+            # (temperature_metrics comes from _layout_metrics above, so a
+            # focused job's sensors decide this, not the login node's).
             logger.info("Setup: temperature metrics: %s", temperature_metrics)
             if temperature_metrics:
                 self.temperature_widget = TemperatureWidget("Temperature", history_size=int(self.history_size))
@@ -1971,7 +2057,7 @@ class GroundControl(App):
                 return mountpoint.replace("/", "_").strip("_") or "root"
 
             disk_index = 0
-            for disk in disk_metrics["disks"]:
+            for disk in disk_metrics.get("disks", []):
                 if self._disk_mount_ignored(disk["mountpoint"]):
                     logger.info("Setup: skipping disk mountpoint %s (matches ignore prefix)", disk["mountpoint"])
                     continue
@@ -1994,6 +2080,9 @@ class GroundControl(App):
                     gpu_title,
                     id=f"gpu_{len(self.gpu_widgets)}",
                     initial_tab=gpu_initial_tab,
+                    # In job focus the process rows come from a compute node, so
+                    # local signalling must stay off across rebuilds too.
+                    signals_enabled=not self.job_focus_active,
                 )
                 self.gpu_widgets.append(gpu_widget)
                 await self.grid.mount(gpu_widget)
@@ -2205,17 +2294,33 @@ class GroundControl(App):
                 "temperature": self.system_metrics.get_temperature_metrics,
                 "slurm": self._slurm_monitor.poll,
             }
-            tasks = [loop.run_in_executor(None, collectors[t]) for t in required_types]
+            # In job-focus mode the resource families come from the focused
+            # job's compute node instead of this host. Reading them is a cheap
+            # cache lookup -- the probe itself runs on the sampler's own thread,
+            # because it takes seconds and must not gate the UI tick.
+            focus_metrics = self._job_focus_metrics() if self.job_focus_active else {}
+            # 'slurm' describes the queue, so it stays local either way.
+            local_types = ({t for t in required_types if t == "slurm"}
+                           if self.job_focus_active else required_types)
+
+            tasks = [loop.run_in_executor(None, collectors[t]) for t in local_types]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             metrics_by_type = {}
             collector_errors = {}  # type -> exception, for debug display
-            for t, r in zip(required_types, results):
+            for t, r in zip(local_types, results):
                 if isinstance(r, BaseException):
                     logger.error("Collector %s failed: %s", t, r, exc_info=True)
                     metrics_by_type[t] = None
                     collector_errors[t] = r
                 else:
                     metrics_by_type[t] = r
+            if self.job_focus_active:
+                # None for a family the probe has not delivered yet, which the
+                # per-widget loop below already treats as "skip this tick".
+                for t in required_types:
+                    if t == "slurm":
+                        continue
+                    metrics_by_type[t] = focus_metrics.get(t)
 
             # Cache successful collections for the picker preview to reuse.
             self._last_metrics_by_type.update(
@@ -2396,6 +2501,51 @@ class GroundControl(App):
         elif isinstance(widget, SlurmJobsWidget):
             self._refresh_slurm_widget(metrics_by_type.get("slurm"))
 
+    @on(JobRow.FocusJob)
+    def _on_row_focus_job(self, message: JobRow.FocusJob) -> None:
+        """F button on a job row: point the dashboard at that job."""
+        message.stop()
+        jobid = str(message.jobid)
+        if (self._focused_job or {}).get("jobid") == jobid:
+            self.notify(f"Already focused on job {jobid}.", title="Slurm job focus")
+            return
+        # The row carries only what squeue reported; the sampler needs the
+        # nodelist, which the monitor's cached rows have.
+        job = next((j for j in self._slurm_monitor.cached()
+                    if str(j.get("jobid")) == jobid), {"jobid": jobid})
+        self._enter_job_focus(job)
+
+    @on(JobRow.CancelJob)
+    def _on_row_cancel_job(self, message: JobRow.CancelJob) -> None:
+        """C button on a job row, confirmed: scancel it.
+
+        Runs off the UI thread -- scancel talks to the controller, which can be
+        slow -- and reports what Slurm actually said rather than assuming success.
+        """
+        message.stop()
+        jobid = str(message.jobid)
+        asyncio.create_task(self._cancel_job(jobid))
+
+    async def _cancel_job(self, jobid: str) -> None:
+        loop = asyncio.get_event_loop()
+        try:
+            ok, detail = await loop.run_in_executor(
+                None, lambda: slurm_utils.scancel_job(jobid))
+        except Exception as e:  # noqa: BLE001
+            logger.error("scancel %s raised: %s", jobid, e)
+            self.notify(f"Could not cancel job {jobid} (see Logs).",
+                        title="Slurm", severity="error")
+            return
+        self.notify(detail, title="Slurm",
+                    severity="information" if ok else "error")
+        if not ok:
+            return
+        # A cancelled job stops being sampleable, so drop focus rather than
+        # waiting for probes to start failing.
+        if (self._focused_job or {}).get("jobid") == jobid:
+            self._exit_job_focus(f"Job {jobid} was cancelled.")
+        await self._poll_and_refresh_slurm()
+
     def _refresh_slurm_widget(self, jobs) -> None:
         """Update the Slurm jobs widget, choosing an informative empty-state note."""
         if self.slurm_jobs_widget is None:
@@ -2406,7 +2556,9 @@ class GroundControl(App):
         elif not self._monitored_jobids:
             note = "No jobs selected — press [bold]J[/] to choose."
         try:
-            self.slurm_jobs_widget.update_jobs(jobs or [], note=note)
+            self.slurm_jobs_widget.update_jobs(
+                jobs or [], note=note,
+                focused_jobid=(self._focused_job or {}).get("jobid"))
         except Exception:
             if self._debug_mode:
                 raise
@@ -2418,6 +2570,9 @@ class GroundControl(App):
             cpu_metrics['cpu_freqs'],
             cpu_metrics['mem_percent'],
             telemetry=cpu_metrics.get('cpu_telemetry'),
+            # Affinity / per-user core views are computed from local psutil
+            # state, which says nothing about a focused job's node.
+            remote=self.job_focus_active,
         )
 
     async def _update_memory_widget(self, widget, memory_metrics):
@@ -2547,7 +2702,11 @@ class GroundControl(App):
                 raise
 
     async def action_select_jobs(self) -> None:
-        """Open the Slurm job picker (works any time; enables --squeue mode)."""
+        """Open the Slurm job picker (works any time; enables --squeue mode).
+
+        Only *running* jobs are listed: a queued job holds no resources, so
+        there is nothing to focus on or sample yet.
+        """
         if not slurm_utils.slurm_available():
             self.notify("Slurm not found (squeue is not on PATH).",
                         title="Slurm", severity="warning")
@@ -2555,22 +2714,31 @@ class GroundControl(App):
         # Fetch the queue off the UI thread so a slow controller can't freeze us.
         loop = asyncio.get_event_loop()
         try:
-            jobs = await loop.run_in_executor(None, slurm_utils.get_user_jobs)
+            jobs = await loop.run_in_executor(None, slurm_utils.get_running_user_jobs)
         except Exception as e:
             logger.error("Failed to list Slurm jobs: %s", e)
             self.notify("Failed to query Slurm jobs (see Logs).",
                         title="Slurm", severity="error")
             return
+        focused = (self._focused_job or {}).get("jobid")
         self.push_screen(
-            JobSelectScreen(jobs, set(self._monitored_jobids)),
+            JobSelectScreen(jobs, set(self._monitored_jobids), focused_jobid=focused),
             self._on_jobs_selected,
         )
 
-    def _on_jobs_selected(self, jobids) -> None:
-        """Callback from JobSelectScreen with the chosen job ids (or None)."""
-        if jobids is None:
+    def _on_jobs_selected(self, result) -> None:
+        """Callback from JobSelectScreen: focus a job, or list jobs in the panel."""
+        if not result:
             return  # cancelled
-        self._monitored_jobids = [str(j) for j in jobids]
+        action = result.get("action")
+        if action == "focus":
+            self._enter_job_focus(result.get("job") or {})
+            return
+        if action == "unfocus":
+            self._exit_job_focus()
+            return
+
+        self._monitored_jobids = [str(j) for j in (result.get("jobids") or [])]
         self._slurm_monitor.set_jobs(self._monitored_jobids)
         logger.info("Now monitoring Slurm jobs: %s", self._monitored_jobids)
         if not self.squeue_mode:
@@ -2579,6 +2747,274 @@ class GroundControl(App):
             asyncio.create_task(self._enable_squeue_and_refresh())
         else:
             asyncio.create_task(self._poll_and_refresh_slurm())
+
+    # ---------------------------------------------------------------- #
+    # Job-focus mode
+    # ---------------------------------------------------------------- #
+    @property
+    def job_focus_active(self) -> bool:
+        return self._job_sampler is not None
+
+    def _enter_job_focus(self, job: dict) -> None:
+        """Point every panel at one job's own resources.
+
+        ``gc`` normally runs on a login node while the job runs elsewhere, so
+        this cannot be done by filtering local readings — the numbers would
+        describe the wrong machine. Instead a sampler joins the job's allocation
+        on its compute node and the panels render that.
+        """
+        jobid = str(job.get("jobid") or "").strip()
+        if not jobid:
+            return
+        node = slurm_utils.first_node(job.get("nodelist"))
+        # Stop any previous sampler before replacing it, or two probe threads
+        # race to fill the same panels.
+        self._stop_job_sampler()
+        self._focused_job = dict(job)
+        self._focused_job["_node"] = node
+        self._job_focus_probe_failures = 0
+        # Sample at the dashboard's own rate: the collector now lives inside the
+        # job, so a sample costs one line of JSON rather than a new job step.
+        self._job_sampler = slurm_utils.JobFocusSampler(
+            jobid, node=node, interval=max(float(self.refresh_rate), 0.5))
+        self._job_sampler.start()
+
+        # Also list the job in the Slurm panel, so its allocation and time limit
+        # stay visible next to the resource panels.
+        self._monitored_jobids = [jobid]
+        self._slurm_monitor.set_jobs(self._monitored_jobids)
+        self.squeue_mode = True
+
+        self._set_gpu_signals_enabled(False)
+        where = f" on {node}" if node else ""
+        self.notify(
+            f"Starting Ground Control inside job {jobid}{where} — the first "
+            f"sample takes a few seconds, then it streams. Press F to return to "
+            f"this host.",
+            title="Slurm job focus",
+        )
+        logger.info("Entered job focus: job=%s node=%s", jobid, node)
+        # The panel set depends on the job's hardware, so it is rebuilt once the
+        # first sample tells us what that hardware is.
+        asyncio.create_task(self._rebuild_when_sample_arrives())
+
+    def _stop_job_sampler(self) -> None:
+        if self._job_sampler is not None:
+            self._job_sampler.stop()
+            self._job_sampler = None
+
+    def _exit_job_focus(self, reason: str | None = None) -> None:
+        """Return to monitoring the host gc is running on."""
+        if not self.job_focus_active:
+            return
+        jobid = (self._focused_job or {}).get("jobid")
+        self._stop_job_sampler()
+        self._focused_job = None
+        self._job_focus_probe_failures = 0
+        self._set_gpu_signals_enabled(True)
+        self._restore_panel_titles()
+        message = reason or f"Stopped focusing on job {jobid}."
+        self.notify(message, title="Slurm job focus")
+        logger.info("Exited job focus (%s)", reason or "user request")
+        # The job's panel set (its GPUs, its mounts) has to give way to this
+        # host's again, which means another rebuild.
+        asyncio.create_task(self._rebuild_local_dashboard())
+
+    async def _rebuild_local_dashboard(self) -> None:
+        """Rebuild panels for this host after leaving job focus."""
+        try:
+            await self.setup_widgets()
+            self.apply_widget_visibility()
+            self._restore_panel_titles()
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to rebuild dashboard after unfocus: %s", e,
+                         exc_info=True)
+            if self._debug_mode:
+                raise
+
+    def action_toggle_job_focus(self) -> None:
+        """F: drop job focus, or open the picker to choose a job to focus."""
+        if self.job_focus_active:
+            self._exit_job_focus()
+        else:
+            asyncio.create_task(self.action_select_jobs())
+
+    def _set_gpu_signals_enabled(self, enabled: bool) -> None:
+        """Enable/disable the per-process signal buttons on GPU panels.
+
+        In job-focus mode the listed pids live on the compute node. Signalling
+        them locally would hit whatever unrelated login-node process happens to
+        hold that pid, so the buttons are disabled rather than misleading.
+        """
+        for widget in list(self.gpu_widgets or []):
+            try:
+                widget.set_signals_enabled(enabled)
+            except Exception:  # noqa: BLE001 - cosmetic, never break the tick
+                pass
+
+    def _panel_title_suffix(self, age: float) -> str:
+        """Suffix marking which job/node a panel is showing, plus staleness."""
+        job = self._focused_job or {}
+        jobid = job.get("jobid", "?")
+        node = job.get("_node")
+        suffix = f" — job {jobid}"
+        if node:
+            suffix += f" @ {node}"
+        if age == float("inf"):
+            suffix += " (starting…)"
+        elif age > self._job_sample_stale_after():
+            # Well past the remote collector's own cadence: say so rather than
+            # presenting an old reading as current.
+            suffix += f" (stale {int(age)}s)"
+        return suffix
+
+    def _job_sample_stale_after(self) -> float:
+        """Seconds after which a focused job's sample is called stale.
+
+        Derived from the sampler's cadence, not hardcoded: a streaming collector
+        delivers every second or so, while the one-shot fallback legitimately
+        takes seconds per sample, and calling the latter stale on the same clock
+        would flag normal operation.
+        """
+        sampler = self._job_sampler
+        if sampler is None:
+            return 15.0
+        floor = 20.0 if sampler.mode == "probe" else 6.0
+        return max(floor, sampler.interval * 4)
+
+    def _apply_panel_titles(self, age: float) -> None:
+        """Retitle panels so it is never ambiguous which machine is shown.
+
+        The suffix is set through ``set_title_suffix`` rather than by assigning
+        ``border_title``: alerting rebuilds that title from ``widget.title`` plus
+        its ▲/■ marker, so writing it here directly would make the two clobber
+        each other every tick. ``widget.title`` itself must stay untouched — the
+        app matches disk panels and tracks failures by it.
+        """
+        suffix = self._panel_title_suffix(age)
+        for widget in self._iter_visible_metric_widgets():
+            if not hasattr(widget, "set_title_suffix"):
+                continue  # e.g. the Slurm panel, which is not a MetricWidget
+            try:
+                widget.set_title_suffix(suffix)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _restore_panel_titles(self) -> None:
+        for widget in list(self.grid.children if self.grid else []):
+            if not hasattr(widget, "set_title_suffix"):
+                continue
+            try:
+                widget.set_title_suffix("")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _layout_metrics(self) -> dict:
+        """Metrics that decide *which* panels exist (GPU count, disk mounts, …).
+
+        In job-focus mode this is the focused job's own hardware, not this
+        host's: a login node typically has no GPUs at all, so building the
+        dashboard from local readings would leave a GPU job with no GPU panels.
+        Falls back to local metrics until the first remote sample lands.
+        """
+        if self.job_focus_active and self._job_sampler is not None:
+            snapshot, _age, _error = self._job_sampler.latest()
+            remote = metrics_from_snapshot(snapshot)
+            if remote.get("cpu") or remote.get("gpu"):
+                return remote
+        return {
+            "gpu": self.system_metrics.get_gpu_metrics(),
+            "cpu": self.system_metrics.get_cpu_metrics(),
+            "disk": self.system_metrics.get_disk_metrics(),
+            "memory": self.system_metrics.get_memory_metrics(),
+            "temperature": self.system_metrics.get_temperature_metrics(),
+        }
+
+    async def _rebuild_when_sample_arrives(self, timeout: float = 90.0) -> None:
+        """Rebuild the dashboard once the first probe of a focused job lands.
+
+        The panel set depends on the job's hardware, which is unknown until a
+        sample returns, so focus mode starts on the old layout and switches as
+        soon as there is something real to build from.
+        """
+        sampler = self._job_sampler
+        if sampler is None:
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if sampler is not self._job_sampler or sampler.stopped:
+                return  # focus changed or was dropped while we waited
+            snapshot, _age, _error = sampler.latest()
+            if snapshot is not None:
+                try:
+                    await self.setup_widgets()
+                    self.apply_widget_visibility()
+                    self._set_gpu_signals_enabled(False)
+                    await self._poll_and_refresh_slurm()
+                except Exception as e:  # noqa: BLE001
+                    # Without this the failure would only surface as an orphaned
+                    # task exception, leaving a half-built dashboard and no clue.
+                    logger.error("Failed to rebuild dashboard for focused job: %s",
+                                 e, exc_info=True)
+                    self.notify("Could not build panels for the focused job "
+                                "(see Logs).", title="Slurm job focus",
+                                severity="error")
+                    if self._debug_mode:
+                        raise
+                return
+            await asyncio.sleep(0.5)
+        # Nothing came back at all: say so instead of leaving empty panels, and
+        # include what the remote side actually said -- "Access/permission
+        # denied" or a missing module is a fixable error, "see Logs" is not.
+        jobid = (self._focused_job or {}).get("jobid")
+        detail = (sampler.diagnostics() or [None])[-1]
+        self._exit_job_focus(
+            f"Could not start Ground Control inside job {jobid}: "
+            + (detail or "no response from srun (see Logs).")
+        )
+
+    def _job_focus_metrics(self) -> dict:
+        """Metrics for the focused job, or {} until the first probe lands."""
+        sampler = self._job_sampler
+        if sampler is None:
+            return {}
+        snapshot, age, _error = sampler.latest()
+        metrics = metrics_from_snapshot(snapshot)
+        self._apply_panel_titles(age)
+
+        # A job that ends makes every probe fail. Notice that and hand the
+        # dashboard back rather than showing its last sample indefinitely. The
+        # confirming squeue call runs off-thread: this method is on the UI tick.
+        failures = sampler.consecutive_failures
+        if failures >= 3 and failures != self._job_focus_probe_failures:
+            self._job_focus_probe_failures = failures
+            asyncio.create_task(self._drop_focus_if_job_ended())
+        return metrics
+
+    async def _drop_focus_if_job_ended(self) -> None:
+        """Leave job focus if the focused job has stopped running."""
+        job = self._focused_job
+        if job is None:
+            return
+        jobid = str(job.get("jobid"))
+        loop = asyncio.get_event_loop()
+        try:
+            rows = await loop.run_in_executor(
+                None, lambda: slurm_utils.get_jobs_by_id([jobid])
+            )
+        except Exception as err:  # noqa: BLE001
+            logger.info("Could not confirm job %s state: %s", jobid, err)
+            return  # controller hiccup: don't drop focus on a guess
+        # Job absent from squeue, or present but no longer running.
+        row = rows.get(jobid)
+        if row is not None and slurm_utils.is_running_state(row.get("state")):
+            return
+        # Still focused on the same job? (the user may have switched meanwhile)
+        if (self._focused_job or {}).get("jobid") != job.get("jobid"):
+            return
+        self._exit_job_focus(
+            f"Job {jobid} is no longer running — back to this host."
+        )
 
     async def _enable_squeue_and_refresh(self) -> None:
         """Rebuild widgets so the Slurm panel appears, then refresh it."""
