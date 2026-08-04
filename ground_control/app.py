@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import queue
 from textual.app import App, ComposeResult
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import (
     Header,
     Footer,
@@ -37,6 +37,7 @@ from ground_control.widgets.gpu import GPUWidget
 from ground_control.widgets.memory import MemoryWidget
 from ground_control.widgets.temperature import TemperatureWidget
 from ground_control.widgets.slurm_jobs import JobRow, SlurmJobsWidget
+from ground_control.widgets.resizable_grid import ResizableGrid
 from ground_control.widgets.color_picker import (
     ColorPickerScreen,
     build_color_options,
@@ -45,6 +46,7 @@ from ground_control.widgets.color_picker import (
 from ground_control.utils.system_metrics import SystemMetrics
 from ground_control.utils import slurm as slurm_utils
 from ground_control.utils.snapshot import metrics_from_snapshot
+from ground_control.utils.grid_sizing import NUDGE_STEP, normalize_weights
 from ground_control.utils.alerts import (
     CRIT as ALERT_CRIT,
     OK as ALERT_OK,
@@ -450,6 +452,11 @@ class GroundControl(App):
         self.disk_widgets = []
         self.temperature_widget = None
         self.grid = None
+        # Panel proportions, per layout mode: {"grid": {"columns": [...], "rows": [...]}}.
+        # Kept per mode because a mode change re-tracks the grid entirely (one
+        # row in horizontal, one column in vertical), so weights do not carry
+        # any meaning across modes.
+        self._grid_weights: dict[str, dict[str, list[float]]] = {}
         self.select = None
         self.selectionoptions = []
         self.selected_widgets = {}  # Initialize selected_widgets
@@ -1060,6 +1067,14 @@ class GroundControl(App):
         Binding("h", "set_horizontal", "Horiz"),
         Binding("v", "set_vertical", "Vert"),
         Binding("space", "cycle_layout", "Cycle layout", show=False),
+        # Panel proportions. These resize the focused panel's grid *track*, so in
+        # grid mode its row-mates get taller with it; drag a border for a
+        # two-panel-only change.
+        Binding("ctrl+right", "widen_panel", "Wider", show=False),
+        Binding("ctrl+left", "narrow_panel", "Narrower", show=False),
+        Binding("ctrl+down", "heighten_panel", "Taller", show=False),
+        Binding("ctrl+up", "shorten_panel", "Shorter", show=False),
+        Binding("z", "reset_panel_sizes", "Reset sizes", show=False),
         # Refresh rate
         Binding("r", "force_refresh", "Refresh"),
         Binding("plus", "faster_refresh", "Faster"),
@@ -1259,6 +1274,7 @@ class GroundControl(App):
                     except (TypeError, ValueError):
                         self.alert_sticky_seconds = 30.0
                     self.thresholds = merge_thresholds(config.get("thresholds"))
+                    self._grid_weights = self._parse_grid_weights(config.get("grid_weights"))
                     raw_selected = config.get("selected", {})
                     if not isinstance(raw_selected, dict):
                         return {}
@@ -1267,6 +1283,30 @@ class GroundControl(App):
             except (json.JSONDecodeError, ValueError):
                 pass
         return {}
+
+    @staticmethod
+    def _parse_grid_weights(raw) -> dict[str, dict[str, list[float]]]:
+        """Validate saved panel proportions, discarding anything malformed.
+
+        Lengths are deliberately *not* checked here: the track counts depend on
+        how many panels this machine has, which is not known yet at config-load
+        time. ``set_tracks`` pads or truncates against the real counts later.
+        """
+        result: dict[str, dict[str, list[float]]] = {}
+        if not isinstance(raw, dict):
+            return result
+        for mode in ("grid", "horizontal", "vertical"):
+            entry = raw.get(mode)
+            if not isinstance(entry, dict):
+                continue
+            axes = {}
+            for axis in ("columns", "rows"):
+                values = entry.get(axis)
+                if isinstance(values, list):
+                    axes[axis] = normalize_weights(values, len(values))
+            if axes:
+                result[mode] = axes
+        return result
 
     def save_config(self):
         """Save configuration to file (debounced)"""
@@ -1301,6 +1341,7 @@ class GroundControl(App):
                 "history_size": self.history_size,
                 "selected": self.selected_widgets,
                 "layout": getattr(self, "current_layout", "grid"),
+                "grid_weights": self._grid_weights,
                 "widget_tabs": self._widget_tab_states,
                 "disk_ignore_prefixes": ", ".join(self.disk_ignore_prefixes),
                 "alerts_enabled": self.alerts_enabled,
@@ -1730,27 +1771,117 @@ class GroundControl(App):
 
         Call this when the number of visible widgets changes so proportions update (e.g. after
         toggling visibility in Settings). Does not mount/unmount widgets.
+
+        The track *counts* come from the layout mode and panel count; their
+        *weights* come from the saved per-mode proportions, so a resized
+        dashboard keeps its shape across rebuilds and restarts.
         """
         if self.grid is None:
             return
         grid_columns = max(1, self.get_layout_columns(visible_count))
         if self.current_layout == "horizontal":
-            self.grid.styles.grid_size_rows = 1
-            self.grid.styles.grid_size_columns = grid_columns
+            rows, cols = 1, grid_columns
         elif self.current_layout == "vertical":
-            self.grid.styles.grid_size_rows = grid_columns
-            self.grid.styles.grid_size_columns = 1
-        elif self.current_layout == "grid":
-            if grid_columns <= 12:
-                self.grid.styles.grid_size_rows = 2
-                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 2))
-            else:
-                self.grid.styles.grid_size_rows = 3
-                self.grid.styles.grid_size_columns = int(math.ceil(grid_columns / 3))
-        rows = self.grid.styles.grid_size_rows
-        cols = self.grid.styles.grid_size_columns
-        self.grid.styles.grid_rows = " ".join("1fr" for _ in range(rows))
-        self.grid.styles.grid_columns = " ".join("1fr" for _ in range(cols))
+            rows, cols = grid_columns, 1
+        else:  # grid
+            rows = 2 if grid_columns <= 12 else 3
+            cols = int(math.ceil(grid_columns / rows))
+        saved = self._grid_weights.get(self.current_layout, {})
+        self.grid.set_tracks(
+            cols, rows,
+            column_weights=saved.get("columns"),
+            row_weights=saved.get("rows"),
+        )
+        # Store back normalized: the counts may have just changed, and the saved
+        # lists should describe the grid that actually exists.
+        self._store_grid_weights(save=False)
+
+    def _store_grid_weights(self, save: bool = True) -> None:
+        """Copy the grid's live track weights into the config state."""
+        if self.grid is None:
+            return
+        self._grid_weights[self.current_layout] = {
+            "columns": list(self.grid.column_weights),
+            "rows": list(self.grid.row_weights),
+        }
+        if save:
+            self.save_config()
+
+    @on(ResizableGrid.TracksResized)
+    def _on_grid_tracks_resized(self, event: ResizableGrid.TracksResized) -> None:
+        """Persist proportions after a border drag."""
+        event.stop()
+        self._store_grid_weights()
+
+    def _focused_panel(self):
+        """The dashboard panel that owns keyboard focus, or None.
+
+        Walks up from the focused node because focus is often on something
+        *inside* a panel -- a GPU process row's signal button, a Slurm job row.
+        """
+        if self.grid is None:
+            return None
+        node = self.focused
+        while node is not None:
+            if node.parent is self.grid:
+                return node
+            node = node.parent
+        return None
+
+    def _focused_cell(self) -> tuple[int, int] | None:
+        """``(column, row)`` of the focused panel's grid cell, or None.
+
+        Mirrors ``GridLayout.arrange``: displayed children fill cells in order,
+        so a hidden panel shifts everything after it. No spans are used, so the
+        index arithmetic is exact.
+        """
+        panel = self._focused_panel()
+        if panel is None:
+            return None
+        displayed = [child for child in self.grid.children if child.display]
+        if panel not in displayed:
+            return None
+        cols = max(1, int(self.grid.styles.grid_size_columns or 1))
+        index = displayed.index(panel)
+        return index % cols, index // cols
+
+    def _resize_focused_panel(self, orientation: str, delta: float) -> None:
+        """Nudge the row or column containing the focused panel."""
+        cell = self._focused_cell()
+        if cell is None:
+            self.notify("Focus a panel first — ] and [ move between panels",
+                        title="Panel size", severity="warning")
+            return
+        index = cell[0] if orientation == "columns" else cell[1]
+        if not self.grid.nudge(orientation, index, delta):
+            axis = "columns" if orientation == "columns" else "rows"
+            count = len(self.grid.column_weights if orientation == "columns"
+                        else self.grid.row_weights)
+            if count < 2:
+                self.notify(
+                    f"This layout has a single {axis[:-1]} — nothing to resize against",
+                    title="Panel size", severity="warning")
+            return
+        self._store_grid_weights()
+
+    def action_widen_panel(self) -> None:
+        self._resize_focused_panel("columns", NUDGE_STEP)
+
+    def action_narrow_panel(self) -> None:
+        self._resize_focused_panel("columns", -NUDGE_STEP)
+
+    def action_heighten_panel(self) -> None:
+        self._resize_focused_panel("rows", NUDGE_STEP)
+
+    def action_shorten_panel(self) -> None:
+        self._resize_focused_panel("rows", -NUDGE_STEP)
+
+    def action_reset_panel_sizes(self) -> None:
+        """Return every row and column to an equal share."""
+        if self.grid is None or not self.grid.reset_tracks():
+            return
+        self._store_grid_weights()
+        self.notify("Panel sizes reset", title="Panel size", severity="information")
 
     def _get_shortcuts_banner_text(self) -> str:
         """Build Rich markup text listing all key bindings, grouped by purpose."""
@@ -1762,6 +1893,15 @@ class GroundControl(App):
         lines += [row("d", "Dashboard"), row("s", "Settings (jumps to widget list)"), row("l", "Logs")]
         lines.append("\n[bold]Layout[/]")
         lines += [row("g", "Grid"), row("h", "Horizontal"), row("v", "Vertical"), row("space", "Cycle layout")]
+        lines.append("\n[bold]Panel size[/]")
+        lines += [
+            row("ctrl+←→", "Narrow / widen the focused panel's column"),
+            row("ctrl+↑↓", "Shorten / heighten the focused panel's row"),
+            row("z", "Reset all panels to equal size"),
+            row("drag", "Drag a shared border (or corner) between panels"),
+        ]
+        lines.append("  [dim]Keys resize a whole row/column, so panels sharing it follow;[/]")
+        lines.append("  [dim]a dragged border moves only the two panels either side of it.[/]")
         lines.append("\n[bold]Refresh & theme[/]")
         lines += [
             row("r", "Refresh now"),
@@ -1827,7 +1967,7 @@ class GroundControl(App):
             # Dashboard tab: just the widget grid.
             with TabPane("Dashboard", id="dashboard"):
                 with Vertical(id="dashboard-pane"):
-                    self.grid = Grid(classes="grid")
+                    self.grid = ResizableGrid(classes="grid")
                     yield self.grid
 
             # Settings tab: left column = widget visibility, layout, timing, disk

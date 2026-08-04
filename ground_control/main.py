@@ -349,6 +349,7 @@ def get_default_config():
     return {
         "selected": {},
         "layout": "grid",
+        "grid_weights": {},
         "refresh_rate": 1.0,
         "history_size": 120,
         "widget_tabs": {},
