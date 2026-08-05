@@ -22,8 +22,9 @@ from textual.widgets import Button, Static
 
 from ..utils.colors import get_rich_color
 from ..utils.formatting import align
-from ..utils.slurm import format_duration, format_size, parse_duration, parse_size
-from .base import gauge_bar
+from ..utils.slurm import (format_duration, format_size, is_running_state,
+                           is_terminal_state, parse_duration, parse_size)
+from .base import SWAP_ARMED_MARKER, gauge_bar, set_swap_armed_style
 
 
 # Map common Slurm states to a colour + glyph for quick visual scanning, plus the
@@ -59,10 +60,16 @@ JOB_COLUMNS = (
 COL_GAP = 1
 # Narrower than this and the job name is unreadable, so it is dropped instead.
 NAME_MIN_WIDTH = 8
-# One cell of label plus a margin, twice over (Focus + Cancel): the strip the
-# buttons occupy, which the header must reserve so its columns line up.
+# One button plus its margin, three times over (Focus / Output / Cancel): the
+# strip the buttons occupy, which the header must reserve so its columns line up.
 JOB_BUTTON_WIDTH = 3
-JOB_BUTTON_STRIP = 2 * (JOB_BUTTON_WIDTH + 1)
+JOB_BUTTONS = 3
+JOB_BUTTON_STRIP = JOB_BUTTONS * (JOB_BUTTON_WIDTH + 1)
+# States in which a job has not run yet, and so has written nothing. Every other
+# state -- running, suspended, completing, finished -- has output worth reading;
+# a job that failed is exactly when its log matters most.
+NOT_STARTED_STATES = frozenset({"PENDING", "PD", "CONFIGURING", "CF", ""})
+
 # Below this the time gauge is noise rather than information.
 TIME_BAR_MIN_WIDTH = 10
 # A job past this fraction of its time limit is close enough to being killed
@@ -301,11 +308,17 @@ def format_job_detail(job: dict, width: int) -> str:
 
 
 class JobRow(Static):
-    """One job on one row: table columns plus its Focus / Cancel buttons.
+    """One job on one row: table columns plus its Focus / Output / Cancel buttons.
 
     The buttons are real ``Button`` widgets squeezed to a single cell high, so
     they keep focus, hover and keyboard activation -- the same treatment the GPU
     process rows get.
+
+    Which buttons are live follows what the job's state actually allows, and the
+    three differ: Focus needs a running allocation to sample; Output needs only
+    that the job has *started*, since a finished job's log is exactly the one you
+    want; Cancel stays live for a queued job (that is when cancelling is cheapest)
+    and goes dead only once the job reaches a state it cannot leave.
 
     Cancel is armed rather than immediate. A stray click on a signal button costs
     one process; a stray click here throws away hours of queueing and whatever
@@ -325,6 +338,13 @@ class JobRow(Static):
 
     class FocusJob(Message):
         """Posted when the user asks to focus the dashboard on ``jobid``."""
+
+        def __init__(self, jobid: str) -> None:
+            super().__init__()
+            self.jobid = jobid
+
+    class ShowOutput(Message):
+        """Posted when the user asks to read ``jobid``'s stdout/stderr."""
 
         def __init__(self, jobid: str) -> None:
             super().__init__()
@@ -360,8 +380,12 @@ class JobRow(Static):
         text-style: bold;
     }
     JobRow .focus-btn  { background: #005f87; color: white; }
+    JobRow .output-btn { background: #4e4e8a; color: white; }
     JobRow .cancel-btn { background: #874000; color: white; }
     JobRow .cancel-btn.-armed { background: #c00; color: white; }
+    /* A disabled button keeps its cell -- the columns above it still have to
+       line up -- but stops looking like something to press. */
+    JobRow .job-btn:disabled { background: #303030; color: #707070; text-style: none; }
     """
 
     def __init__(self, job: dict, focused: bool = False, **kwargs):
@@ -378,7 +402,8 @@ class JobRow(Static):
     def compose(self) -> ComposeResult:
         with Horizontal():
             yield Static("", classes="job-info")
-            for label, cls in (("F", "focus-btn"), ("C", "cancel-btn")):
+            for label, cls in (("F", "focus-btn"), ("O", "output-btn"),
+                               ("C", "cancel-btn")):
                 button = Button(label, classes=f"job-btn {cls}")
                 # Textual ignores a click while the press animation is running,
                 # which would silently swallow the second half of the two-press
@@ -389,7 +414,7 @@ class JobRow(Static):
 
     def on_mount(self) -> None:
         self._render_info()
-        self._refresh_tooltips()
+        self._refresh_buttons()
 
     def on_resize(self, event) -> None:
         # Column set depends on the width available, so re-render on every
@@ -401,7 +426,16 @@ class JobRow(Static):
         self._job = dict(job)
         self._focused_job = focused
         self._render_info()
-        self._refresh_tooltips()
+        self._refresh_buttons()
+
+    @property
+    def running(self) -> bool:
+        return is_running_state(self._job.get("state"))
+
+    @property
+    def started(self) -> bool:
+        """True once the job has run at all — including after it has finished."""
+        return (self._job.get("state") or "").strip().upper() not in NOT_STARTED_STATES
 
     def _render_info(self) -> None:
         try:
@@ -411,20 +445,46 @@ class JobRow(Static):
         width = info.content_size.width or (self.content_size.width - JOB_BUTTON_STRIP)
         info.update(format_job_line(self._job, max(0, width)))
 
-    def _refresh_tooltips(self) -> None:
+    def _refresh_buttons(self) -> None:
+        """Re-derive each button's enabled state and tooltip from the job.
+
+        Called on every in-place update, because a job crosses from PENDING to
+        RUNNING under a row that is never remounted -- so the row that came up
+        with Focus greyed out has to light it up by itself.
+        """
         jid = self.jobid or "?"
         try:
             focus_btn = self.query_one(".focus-btn", Button)
+            output_btn = self.query_one(".output-btn", Button)
             cancel_btn = self.query_one(".cancel-btn", Button)
         except NoMatches:
             return
+        running = self.running
+        state = (self._job.get("state") or "").upper() or "this state"
+
+        focus_btn.disabled = not running
         focus_btn.tooltip = (
-            f"Already focused on job {jid}" if self._focused_job else
-            f"Focus the dashboard on job {jid} (sample it on its own node)"
+            f"Only a running job can be focused (job {jid} is {state})" if not running
+            else f"Already focused on job {jid}" if self._focused_job
+            else f"Focus the dashboard on job {jid} (sample it on its own node)"
         )
+
+        # Output outlives the job: a log is most worth reading once the job has
+        # stopped, so this is gated on "has it started", not "is it running".
+        output_btn.disabled = not self.started
+        output_btn.tooltip = (
+            f"Job {jid} has not started, so it has written no output yet"
+            if output_btn.disabled else f"Read job {jid}'s stdout / stderr"
+        )
+
+        # A finished job has nothing left to cancel; a queued one very much does.
+        cancel_btn.disabled = is_terminal_state(self._job.get("state"))
+        if cancel_btn.disabled and self._armed:
+            self._disarm()
         cancel_btn.tooltip = (
-            f"Press again to cancel job {jid}" if self._armed else
-            f"scancel job {jid} — asks for confirmation"
+            f"Job {jid} has already ended ({state})" if cancel_btn.disabled
+            else f"Press again to cancel job {jid}" if self._armed
+            else f"scancel job {jid} — asks for confirmation"
         )
 
     @on(Button.Pressed, ".focus-btn")
@@ -432,6 +492,12 @@ class JobRow(Static):
         event.stop()
         if self.jobid:
             self.post_message(self.FocusJob(self.jobid))
+
+    @on(Button.Pressed, ".output-btn")
+    def _output_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        if self.jobid:
+            self.post_message(self.ShowOutput(self.jobid))
 
     @on(Button.Pressed, ".cancel-btn")
     def _cancel_pressed(self, event: Button.Pressed) -> None:
@@ -452,7 +518,7 @@ class JobRow(Static):
             button.label = "!"
         except NoMatches:
             pass
-        self._refresh_tooltips()
+        self._refresh_buttons()
         # Auto-disarm: an armed destructive button left sitting there is a trap.
         self._disarm_timer = self.set_timer(self.ARM_SECONDS, self._disarm)
 
@@ -469,7 +535,7 @@ class JobRow(Static):
             button.label = "C"
         except NoMatches:
             pass
-        self._refresh_tooltips()
+        self._refresh_buttons()
 
 
 class JobEntry(Vertical):
@@ -548,16 +614,26 @@ def _clear(container) -> None:
 
 
 class SlurmJobsWidget(VerticalScroll):
-    """Table of monitored Slurm jobs, one row each, with per-row buttons.
+    """Table of the user's Slurm jobs, one row each, with per-row buttons.
 
     Integrates with the dashboard grid like any other metric widget: it exposes
     ``title`` / ``border_title`` and an ``update_content``-style API
     (:meth:`update_jobs`). It does not plot.
 
+    Everything the user has in the queue is listed, running and pending alike --
+    there is nothing to pick and no mode to be in. A pending job is exactly what
+    a job list is for on a busy cluster ("is it my turn yet, and why not"), and
+    its row already carries the reason.
+
     Rows are rebuilt only when the *set* of jobs changes; otherwise values are
     updated in place, so a half-armed Cancel button and keyboard focus survive
     the refresh tick.
     """
+
+    #: Rows mounted at once. A queue of several hundred jobs is a real thing on a
+    #: shared cluster, and mounting a widget per job would cost more than the
+    #: information is worth; the overflow is counted in a footer instead.
+    MAX_ROWS = 50
 
     can_focus = True
 
@@ -595,16 +671,21 @@ class SlurmJobsWidget(VerticalScroll):
         overflow: hidden hidden;
     }
     /* Same width as a row's button strip, so the headers sit over their buttons
-       and the F/C letters get labelled. */
+       and the F/O/C letters get labelled. */
     SlurmJobsWidget .header-buttons {
-        width: 8;
-        min-width: 8;
+        width: 12;
+        min-width: 12;
         height: 1;
-        text-align: right;
+        text-align: left;
     }
     SlurmJobsWidget > #slurm-jobs-rows {
         width: 1fr;
         height: auto;
+    }
+    SlurmJobsWidget > #slurm-jobs-more {
+        width: 1fr;
+        height: auto;
+        padding: 0 1;
     }
     """
 
@@ -619,18 +700,32 @@ class SlurmJobsWidget(VerticalScroll):
         super().__init__(id=id)
         self.title = title
         self.border_title = title
-        self._note: str | None = "No jobs selected — press [bold]J[/] to choose."
+        self._note: str | None = "Looking for your jobs…"
         self._jobs: list = []
         self._focused_jobid: str | None = None
         self._row_ids: list[str] = []
+        # Mirrors MetricWidget.set_swap_armed -- this panel is not one, but the
+        # dashboard swap feature treats every grid child the same way.
+        self._swap_armed = False
+
+    def set_swap_armed(self, armed: bool) -> None:
+        armed = bool(armed)
+        if armed == self._swap_armed:
+            return
+        self._swap_armed = armed
+        set_swap_armed_style(self, armed)
+        self.border_title = f"{SWAP_ARMED_MARKER}{self.title}" if armed else self.title
 
     def compose(self) -> ComposeResult:
         yield Static("", id="slurm-jobs-note", markup=True)
         with Static(id="slurm-jobs-header"):
             with Horizontal():
                 yield Static("", classes="header-cols")
-                yield Static("[bold] F  C[/]", classes="header-buttons")
+                # Padded so each letter sits over its own button: one leading
+                # margin cell, then three cells per button with the label centred.
+                yield Static("[bold]  F   O   C[/]", classes="header-buttons")
         yield Vertical(id="slurm-jobs-rows")
+        yield Static("", id="slurm-jobs-more", markup=True)
 
     def on_mount(self) -> None:
         self._render_jobs()
@@ -662,6 +757,7 @@ class SlurmJobsWidget(VerticalScroll):
             note = self.query_one("#slurm-jobs-note", Static)
             header = self.query_one("#slurm-jobs-header", Static)
             container = self.query_one("#slurm-jobs-rows", Vertical)
+            more = self.query_one("#slurm-jobs-more", Static)
         except NoMatches:
             return  # not composed yet; on_mount will render
 
@@ -669,6 +765,7 @@ class SlurmJobsWidget(VerticalScroll):
             note.update(f"[dim]{self._note or 'No jobs.'}[/]")
             note.display = True
             header.display = False
+            more.display = False
             if self._row_ids:
                 self._row_ids = []
                 _clear(container)
@@ -679,27 +776,36 @@ class SlurmJobsWidget(VerticalScroll):
         header.display = True
         self._render_header()
         self._sync_rows(container)
+        # Truncation is stated rather than silent: a list that stops at 50 without
+        # saying so reads as "these are all my jobs".
+        hidden = max(0, len(self._jobs) - self.MAX_ROWS)
+        more.display = bool(hidden)
+        if hidden:
+            more.update(f"[dim]+{hidden} more job{'s' if hidden > 1 else ''} "
+                        f"not shown (squeue --me lists them all)[/]")
 
     def _render_header(self) -> None:
         try:
             cols = self.query_one(".header-cols", Static)
         except NoMatches:
             return
-        width = cols.content_size.width or max(0, self.content_size.width - 8 - 2)
+        width = cols.content_size.width or max(
+            0, self.content_size.width - JOB_BUTTON_STRIP - 2)
         cols.update(format_job_line({}, max(0, width), header=True))
 
     def _sync_rows(self, container: Vertical) -> None:
         """Update existing rows in place; remount only if the job set changed."""
-        ids = [str(job.get("jobid") or "") for job in self._jobs]
+        shown = self._jobs[: self.MAX_ROWS]
+        ids = [str(job.get("jobid") or "") for job in shown]
         entries = list(container.query(JobEntry).results(JobEntry))
         if ids != self._row_ids or len(entries) != len(ids):
             self._row_ids = ids
             _clear(container)
             container.mount_all([
                 JobEntry(job, focused=str(job.get("jobid")) == self._focused_jobid)
-                for job in self._jobs
+                for job in shown
             ])
             return
-        for entry, job in zip(entries, self._jobs):
+        for entry, job in zip(entries, shown):
             entry.update_job(job,
                              focused=str(job.get("jobid")) == self._focused_jobid)

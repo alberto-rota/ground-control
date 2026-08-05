@@ -125,6 +125,18 @@ Each panel in Ground Control represents a different system metric:
 
 ![GPU widget](https://github.com/alberto-rota/ground-control/blob/main/assets/gpu.gif?raw=true)
 
+### 🔹 **Slurm Jobs**
+Shown automatically wherever `squeue` is on `PATH` — no flag needed (`gc --slurm` shows *only* this panel, like the other widget filters).
+
+- Lists **all of your jobs**, running and pending, one row each: id, state, elapsed/limit time, node, CPUs, memory, GPUs, partition and name. Narrow panels drop the least important columns instead of wrapping.
+- A second line per job carries the time-limit gauge (how close the job is to being killed) and live `sstat` usage for running jobs.
+- Three buttons per row:
+  - **F** — *focus*: point every panel at that job. Ground Control starts a collector **inside the job's allocation**, so CPU, memory, GPU and process panels show the compute node's view of the job instead of the login node's. Focus ends by itself when the job does, naming its final state (`COMPLETED`, `FAILED`, `TIMEOUT`, `CANCELLED`).
+  - **O** — *output*: read the job's `stdout`/`stderr`, tailing the last 64 KB and following it live. ANSI colours in the log are rendered, not printed.
+  - **C** — *cancel*: `scancel` the job. Press once to arm (the button turns red), again within four seconds to confirm.
+
+`F` from anywhere opens a list of your running jobs: arrow to one and press **enter** to focus it, `u` to stop focusing.
+
 ## 🛠️ Configuring Ground Control
 Ground Control offers extensive customization options to tailor your monitoring experience. You might not want to see all the widgets all at once, or you may want to focus on specific system metrics.
 
@@ -167,6 +179,7 @@ All available keyboard shortcuts are listed here:
 | `l`  | Show the Logs tab |
 | `r`  | Refresh now |
 | `+` / `-` | Refresh faster / slower |
+| `F`  | Focus a Slurm job (arrow + enter) / return to this host |
 | `?`  | List every shortcut, including the ones not in the footer |
 | `q`  | Quit Ground Control |
 

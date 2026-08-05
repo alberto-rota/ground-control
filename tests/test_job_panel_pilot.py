@@ -32,8 +32,9 @@ class PanelApp(App):
 
     def __init__(self):
         super().__init__()
-        self.cancels: list[str] = []
-        self.focuses: list[str] = []
+        self.cancels: list = []
+        self.focuses: list = []
+        self.outputs: list = []
 
     def compose(self) -> ComposeResult:
         yield SlurmJobsWidget("Slurm Jobs", id="slurm_jobs")
@@ -43,6 +44,9 @@ class PanelApp(App):
 
     def on_job_row_focus_job(self, message: JobRow.FocusJob) -> None:
         self.focuses.append(message.jobid)
+
+    def on_job_row_show_output(self, message: JobRow.ShowOutput) -> None:
+        self.outputs.append(message.jobid)
 
 
 def _run(coro):
@@ -128,9 +132,93 @@ def test_focus_button_posts_the_jobid():
             panel = app.query_one(SlurmJobsWidget)
             panel.update_jobs(JOBS)
             await pilot.pause()
-            await pilot.click(_entries(panel)[1].query_one(".focus-btn", Button))
+            await pilot.click(_entries(panel)[0].query_one(".focus-btn", Button))
             await pilot.pause()
-            assert app.focuses == ["3945189"]
+            assert app.focuses == ["3946056"]
+
+    _run(scenario())
+
+
+def test_output_button_posts_the_jobid():
+    async def scenario():
+        app = PanelApp()
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(SlurmJobsWidget)
+            panel.update_jobs(JOBS)
+            await pilot.pause()
+            await pilot.click(_entries(panel)[0].query_one(".output-btn", Button))
+            await pilot.pause()
+            assert app.outputs == ["3946056"]
+
+    _run(scenario())
+
+
+def test_pending_job_cannot_be_focused_or_read():
+    """A queued job has no allocation to sample and has written no output.
+
+    The buttons are disabled rather than absent: the row still has to line up
+    with every other row, and a greyed control explains itself where a missing
+    one would just look like a rendering bug.
+    """
+    async def scenario():
+        app = PanelApp()
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(SlurmJobsWidget)
+            panel.update_jobs(JOBS)
+            await pilot.pause()
+            pending = _entries(panel)[1].query_one(JobRow)
+            focus_btn = pending.query_one(".focus-btn", Button)
+            output_btn = pending.query_one(".output-btn", Button)
+            assert focus_btn.disabled and output_btn.disabled
+            # Cancelling a queued job is exactly when cancelling is cheapest.
+            assert not pending.query_one(".cancel-btn", Button).disabled
+
+            await pilot.click(focus_btn)
+            await pilot.click(output_btn)
+            await pilot.pause()
+            assert app.focuses == [] and app.outputs == []
+
+    _run(scenario())
+
+
+def test_buttons_light_up_when_a_job_starts_running():
+    """Rows update in place, so a PENDING row has to enable its own controls."""
+    async def scenario():
+        app = PanelApp()
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(SlurmJobsWidget)
+            panel.update_jobs(JOBS)
+            await pilot.pause()
+            row = _entries(panel)[1].query_one(JobRow)
+            assert row.query_one(".focus-btn", Button).disabled
+
+            started = [JOBS[0], dict(JOBS[1], state="RUNNING", nodelist="a2844")]
+            panel.update_jobs(started)
+            await pilot.pause()
+            assert row is _entries(panel)[1].query_one(JobRow), "set unchanged"
+            assert not row.query_one(".focus-btn", Button).disabled
+            assert not row.query_one(".output-btn", Button).disabled
+
+    _run(scenario())
+
+
+def test_finished_job_cannot_be_cancelled():
+    async def scenario():
+        app = PanelApp()
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(SlurmJobsWidget)
+            panel.update_jobs([dict(JOBS[0], state="COMPLETED")])
+            await pilot.pause()
+            row = _entries(panel)[0].query_one(JobRow)
+            cancel = row.query_one(".cancel-btn", Button)
+            assert cancel.disabled
+            await pilot.click(cancel)
+            await pilot.pause()
+            assert app.cancels == []
 
     _run(scenario())
 
@@ -168,7 +256,10 @@ def test_focused_job_is_marked_on_its_row():
         async with app.run_test(size=(110, 24)) as pilot:
             await pilot.pause()
             panel = app.query_one(SlurmJobsWidget)
-            panel.update_jobs(JOBS, focused_jobid="3946056")
+            # Both running: the marker is about which one is focused, and a
+            # pending row's Focus button says something else entirely.
+            panel.update_jobs([JOBS[0], dict(JOBS[1], state="RUNNING")],
+                              focused_jobid="3946056")
             await pilot.pause()
             first, second = _entries(panel)
             assert "Already focused" in (
@@ -212,5 +303,26 @@ def test_rows_render_without_wrapping_at_panel_width():
                 text = str(info.content)
                 assert "\n" not in text, "a wrapped row would break the table"
                 assert text.strip(), "row rendered empty"
+
+    _run(scenario())
+
+
+def test_a_finished_jobs_output_is_still_readable():
+    """The log of a job that failed is the log you most want to read."""
+    async def scenario():
+        app = PanelApp()
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(SlurmJobsWidget)
+            panel.update_jobs([dict(JOBS[0], state="FAILED")])
+            await pilot.pause()
+            row = _entries(panel)[0].query_one(JobRow)
+            output_btn = row.query_one(".output-btn", Button)
+            assert not output_btn.disabled
+            # Nothing left to sample inside it, though.
+            assert row.query_one(".focus-btn", Button).disabled
+            await pilot.click(output_btn)
+            await pilot.pause()
+            assert app.outputs == ["3946056"]
 
     _run(scenario())

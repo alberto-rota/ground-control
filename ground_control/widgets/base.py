@@ -16,6 +16,35 @@ ARROW_RIGHT = ""
 BAR_BODY = "█"
 BAR_TRACK = "─"
 
+# Prefixed to a panel's title while it is armed for a swap (keyboard or mouse
+# drag) — a marker, not colour alone, for the same reason the alert markers
+# below are text.
+SWAP_ARMED_MARKER = "⇄ "
+
+
+def set_swap_armed_style(widget, armed: bool) -> None:
+    """Toggle the blocky highlighted border marking a panel armed for a swap.
+
+    "thick" (solid block characters) rather than "heavy" so an armed panel
+    reads as unmistakably different from a merely-focused one (see the
+    ``:focus``/``:focus-within`` rule in app.py, which uses "double") and
+    from an alerting one (which uses "heavy") even on themes where
+    ``selection_highlight`` happens to equal the alert or border colour.
+
+    Module-level so the (non-``MetricWidget``) Slurm panel can draw the same
+    highlight as every metric panel, the way it already shares ``gauge_bar``.
+    """
+    try:
+        if armed:
+            widget.styles.border = ("thick", get_color("selection_highlight"))
+        else:
+            # Textual stores `border` as four per-edge rules, so clearing
+            # "border" itself is a no-op and would strand the highlight.
+            for edge in ("border_top", "border_right", "border_bottom", "border_left"):
+                widget.styles.clear_rule(edge)
+    except Exception:  # noqa: BLE001 - styling must never break a panel
+        pass
+
 
 def gauge_bar(width: int, fraction: float, color: str, grow: str = "right",
               track_color: str = None) -> str:
@@ -145,6 +174,11 @@ class MetricWidget(Static):
         # displays live RAM/SWAP sizes). Also kept separate from `title` for the
         # same reason: the app looks panels up by it.
         self._display_title: str | None = None
+        # True while this panel is the pending half of a keyboard- or
+        # mouse-driven swap (see app.py action_mark_swap_panel and
+        # ResizableGrid's drag handling). Border and title both change, not
+        # colour alone, mirroring the alert markers below.
+        self._swap_armed = False
         # If color is a hex value or color name, use it; otherwise use default
         # Note: We use _color_config to avoid conflict with Textual's colors attribute
         if color.startswith("#"):
@@ -217,13 +251,31 @@ class MetricWidget(Static):
         self._refresh_border_title()
 
     def _refresh_border_title(self) -> None:
-        """Rebuild the border title from marker + display title + suffix."""
+        """Rebuild the border title from swap marker + alert marker + display title + suffix."""
         try:
+            armed = SWAP_ARMED_MARKER if self._swap_armed else ""
             marker = self.ALERT_MARKERS.get(self._alert_level, "")
             shown = self._display_title if self._display_title is not None else self.title
-            self.border_title = f"{marker}{shown}{self._title_suffix}"
+            self.border_title = f"{armed}{marker}{shown}{self._title_suffix}"
         except Exception:  # noqa: BLE001
             pass
+
+    def set_swap_armed(self, armed: bool) -> None:
+        """Mark/unmark this panel as the pending half of a panel swap.
+
+        Restoring (``armed=False``) goes through ``_apply_alert_style`` rather
+        than a plain clear, so a panel that started alerting while armed comes
+        back to its alert border instead of losing it.
+        """
+        armed = bool(armed)
+        if armed == self._swap_armed:
+            return
+        self._swap_armed = armed
+        if armed:
+            set_swap_armed_style(self, True)
+            self._refresh_border_title()
+        else:
+            self._apply_alert_style()
 
     def set_title_suffix(self, suffix: str) -> None:
         """Annotate the panel title without disturbing its alert marker."""

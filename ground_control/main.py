@@ -270,8 +270,9 @@ def run_stream(interval: float, all_gpus: bool, debug: bool,
              help='Filter to specific GPU(s): 0, 0,1, etc. Use with -g (e.g. gc -g --gpu-index 0).')
 @click.option('--all-gpus', is_flag=True,
              help='Show every physical GPU, ignoring CUDA_VISIBLE_DEVICES / Slurm allocation.')
-@click.option('--squeue', is_flag=True,
-             help='Add a Slurm panel and prompt for which of your running jobs to monitor.')
+@click.option('--slurm', '-S', 'slurm', is_flag=True,
+             help='Show the Slurm jobs panel (lists all your jobs). Alias: --squeue.')
+@click.option('--squeue', is_flag=True, help='Alias for --slurm.')
 @click.option('--ram', '-r', is_flag=True, help='Show Memory widgets')
 @click.option('--disk', '-d', is_flag=True, help='Show Disk widgets')
 @click.option('--net', '-n', is_flag=True, help='Show Network widgets')
@@ -291,7 +292,7 @@ def run_stream(interval: float, all_gpus: bool, debug: bool,
 @click.option('--stream-max-seconds', type=float, default=3600.0, metavar='SECONDS',
              help='With --stream, stop after this long (0 = never; default 3600).')
 @click.pass_context
-def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, temp,
+def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, slurm, squeue, ram, disk, net, temp,
         once, as_json, check, interval, all_mounts, stream, stream_max_seconds):
     """Ground Control - Terminal System Monitor"""
     if ctx.invoked_subcommand is None:
@@ -319,6 +320,10 @@ def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, 
         if disk: allowed_types.add('disk')
         if net: allowed_types.add('net')
         if temp: allowed_types.add('temp')
+        # The Slurm panel is an ordinary widget now, so its flag is an ordinary
+        # filter: bare `gc` shows it wherever Slurm exists, and naming it here
+        # means "only this", exactly like --cpu does.
+        if slurm or squeue: allowed_types.add('slurm')
 
         # If no specific flags are set, pass None (allow all)
         if not allowed_types:
@@ -328,7 +333,7 @@ def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, 
         gpu_indices = _parse_gpu_indices(gpu_index) if gpu_index else None
 
         appl = GroundControl(allowed_types=allowed_types, gpu_indices=gpu_indices,
-                             debug=debug, all_gpus=all_gpus, squeue=squeue)
+                             debug=debug, all_gpus=all_gpus)
         appl.run()
     else:
         # Store log flag in context for subcommands if needed
@@ -350,6 +355,7 @@ def get_default_config():
         "selected": {},
         "layout": "grid",
         "grid_weights": {},
+        "panel_order": [],
         "refresh_rate": 1.0,
         "history_size": 120,
         "widget_tabs": {},

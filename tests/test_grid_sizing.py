@@ -6,6 +6,7 @@ laid-out panel regions -- the thing a unit test of the maths cannot check.
 """
 import asyncio
 
+from textual import on
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
@@ -117,6 +118,11 @@ class GridApp(App):
 
     def on_mount(self) -> None:
         self.grid.set_tracks(2, 2)
+        self.swap_events = []
+
+    @on(ResizableGrid.PanelsSwapped)
+    def _record_swap(self, event) -> None:
+        self.swap_events.append(True)
 
 
 def _run(coro):
@@ -237,5 +243,104 @@ def test_set_tracks_keeps_weights_across_a_changed_panel_count():
             app.grid.set_tracks(3, 2)
             await pilot.pause()
             assert app.grid.column_weights == [1.5, 1.0, 1.0]
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------- panel order
+
+def test_apply_order_reorders_children_to_match():
+    async def scenario():
+        app = GridApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            a, b, c, d = (app.query_one(f"#{n}", Static) for n in "abcd")
+            app.grid.apply_order([d, b, c, a])
+            assert list(app.grid.children) == [d, b, c, a]
+
+    _run(scenario())
+
+
+def test_swap_children_exchanges_only_the_pair():
+    async def scenario():
+        app = GridApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            a, b, c, d = (app.query_one(f"#{n}", Static) for n in "abcd")
+            assert app.grid.swap_children(a, c) is True
+            assert list(app.grid.children) == [c, b, a, d]
+
+    _run(scenario())
+
+
+def test_swap_children_rejects_same_or_foreign_widget():
+    async def scenario():
+        app = GridApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            a = app.query_one("#a", Static)
+            foreign = Static("outsider")
+            assert app.grid.swap_children(a, a) is False
+            assert app.grid.swap_children(a, foreign) is False
+
+    _run(scenario())
+
+
+def _panel_center(grid, region):
+    origin = grid.region.offset
+    return (region.x + region.width // 2 - origin.x,
+            region.y + region.height // 2 - origin.y)
+
+
+def test_dragging_a_panel_onto_another_swaps_them():
+    """The mouse path: drag from one panel's interior onto another's."""
+    async def scenario():
+        app = GridApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            a = app.query_one("#a", Static)
+            b = app.query_one("#b", Static)
+            origin_point = _panel_center(app.grid, a.region)
+            target_point = _panel_center(app.grid, b.region)
+
+            await pilot.mouse_down(app.grid, offset=origin_point)
+            await pilot.pause()
+            assert app.grid._swap_candidate is a
+            assert app.grid._swap_drag is None, "no drag yet on mousedown alone"
+
+            await pilot.hover(app.grid, offset=target_point)
+            await pilot.pause()
+            assert app.grid._swap_drag is a, "moving onto another panel promotes the drag"
+
+            await pilot.mouse_up(app.grid, offset=target_point)
+            await pilot.pause()
+
+            assert app.grid._swap_drag is None, "drag must end on mouse up"
+            assert list(app.grid.children).index(a) == 1
+            assert list(app.grid.children).index(b) == 0
+            assert app.swap_events == [True]
+
+    _run(scenario())
+
+
+def test_clicking_a_panel_interior_starts_no_swap():
+    """A plain click (no drag onto another panel) must change nothing."""
+    async def scenario():
+        app = GridApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            a = app.query_one("#a", Static)
+            before = list(app.grid.children)
+            point = _panel_center(app.grid, a.region)
+
+            await pilot.mouse_down(app.grid, offset=point)
+            await pilot.pause()
+            await pilot.mouse_up(app.grid, offset=point)
+            await pilot.pause()
+
+            assert app.grid._swap_candidate is None
+            assert app.grid._swap_drag is None
+            assert list(app.grid.children) == before
+            assert app.swap_events == []
 
     _run(scenario())

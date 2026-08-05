@@ -285,3 +285,50 @@ def test_detail_falls_back_to_a_blunt_ceiling_without_an_allocation():
     assert "cpu-time 10:00:00" in plain(sj.format_job_detail(fine, 120))
     absurd = dict(RUNNING, live_cpu="999-00:00:00", elapsed="", cpus="")
     assert "cpu-time" not in plain(sj.format_job_detail(absurd, 120))
+
+
+# --------------------------------------------------------------------------- #
+# Button strip geometry
+# --------------------------------------------------------------------------- #
+def test_button_strip_reserves_one_cell_per_button():
+    # The header labels sit over the row's buttons, so the strip width and the
+    # header's own width have to agree or every column drifts by a cell.
+    assert sj.JOB_BUTTON_STRIP == sj.JOB_BUTTONS * (sj.JOB_BUTTON_WIDTH + 1)
+    assert sj.JOB_BUTTONS == 3  # Focus / Output / Cancel
+
+
+# --------------------------------------------------------------------------- #
+# gres -> GPU count
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("gres,expected", [
+    ("gres/gpu:a100:1", 1),          # what squeue %b reports on a running job
+    ("gres/gpu:2", 2),
+    ("gpu:4", 4),
+    ("gres:gpu:8", 8),
+    ("gres/gpu:a100:1(IDX:0)", 1),   # some versions append the device list
+    ("gres/gpu:a100", 1),            # a type with no count means one device
+    ("gres/gpu:a100:2,gres/gpu:v100:1", 3),
+    ("cpu=4,mem=16G", None),         # no GPUs requested at all
+    ("N/A", None),
+    ("", None),
+    (None, None),
+])
+def test_gpus_from_gres(gres, expected):
+    assert slurm.gpus_from_gres(gres) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Terminal states
+# --------------------------------------------------------------------------- #
+def test_is_terminal_state():
+    assert slurm.is_terminal_state("COMPLETED")
+    assert slurm.is_terminal_state("failed")
+    assert slurm.is_terminal_state("TIMEOUT")
+    # sacct writes the cancelling uid into the state; the state is the first word.
+    assert slurm.is_terminal_state("CANCELLED by 213852")
+    # Not running is not the same as over: these two still have a future, and
+    # are still worth cancelling.
+    assert not slurm.is_terminal_state("PENDING")
+    assert not slurm.is_terminal_state("RUNNING")
+    assert not slurm.is_terminal_state("")
+    assert not slurm.is_terminal_state(None)

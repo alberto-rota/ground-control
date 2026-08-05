@@ -253,11 +253,67 @@ def test_sampler_gives_up_on_a_stream_that_never_speaks(monkeypatch):
 def test_sampler_start_is_idempotent(monkeypatch):
     monkeypatch.setattr(slurm, "_stream_command",
                         lambda *a, **k: _fake_stream([_snapshot_line(1)]))
-    sampler = slurm.JobFocusSampler("1", interval=0.3)
+    # Its own job id, because the reader thread is named after it: the other
+    # tests here use "1" and their threads take a moment to unwind after stop(),
+    # so counting threads named for a shared id counts theirs too.
+    sampler = slurm.JobFocusSampler("idem", interval=0.3)
     sampler.start()
     sampler.start()  # a second start must not create a second reader
     try:
         assert sum(1 for t in __import__("threading").enumerate()
-                   if t.name == "gc-job-stream-1") == 1
+                   if t.name == "gc-job-stream-idem") == 1
     finally:
         sampler.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Teardown
+# --------------------------------------------------------------------------- #
+class _FakeProc:
+    """Records the order teardown happens in."""
+
+    def __init__(self, events):
+        self.events = events
+        self._alive = True
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def terminate(self):
+        self.events.append("terminate")
+        self._alive = False
+
+    def wait(self, timeout=None):
+        self.events.append("wait")
+        return 0
+
+    def kill(self):
+        self.events.append("kill")
+
+
+def test_stop_signals_inline_and_reaps_off_thread():
+    """The SIGTERM must be sent by the caller, not by the helper thread.
+
+    ``stop()`` is also the last thing that runs when the app quits. Handing the
+    signal itself to a daemon thread risks the interpreter exiting first, which
+    leaves an orphaned collector inside the user's allocation; waiting for srun to
+    actually go, on the other hand, must never block the UI thread.
+    """
+    events = []
+    sampler = slurm.JobFocusSampler("42")
+    sampler._proc = _FakeProc(events)
+    sampler.stop()
+    assert events[0] == "terminate", "signal must have been sent synchronously"
+    assert sampler.stopped
+    # The wait lands on the throwaway thread shortly after.
+    for _ in range(50):
+        if "wait" in events:
+            break
+        time.sleep(0.02)
+    assert "wait" in events
+
+
+def test_stop_without_a_process_is_harmless():
+    sampler = slurm.JobFocusSampler("42")
+    sampler.stop()  # never started
+    assert sampler.stopped
