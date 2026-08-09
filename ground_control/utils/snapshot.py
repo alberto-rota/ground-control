@@ -92,8 +92,18 @@ def _cpu_section(cpu: Optional[Dict]) -> Optional[Dict]:
     try:
         current = [f.current for f in freqs if getattr(f, "current", None)]
         section["freq_mhz"] = round(sum(current) / len(current), 1) if current else None
+        # Per-core frequencies, kept so a consumer rebuilding a live view (see
+        # metrics_from_snapshot) can show the same detail as a local reading.
+        section["per_core_freq_mhz"] = [round(float(f.current), 1) for f in freqs
+                                        if getattr(f, "current", None)] or None
     except (AttributeError, TypeError):
         section["freq_mhz"] = None
+        section["per_core_freq_mhz"] = None
+    # Telemetry is a flat dict of numbers (load average, context switches,
+    # cgroup quota and throttling); pass it through as-is.
+    telemetry = cpu.get("cpu_telemetry")
+    section["telemetry"] = telemetry if isinstance(telemetry, dict) else None
+    section["memory_percent"] = cpu.get("mem_percent")
     return section
 
 
@@ -115,6 +125,18 @@ def _memory_section(memory: Optional[Dict]) -> Optional[Dict]:
             "used_gb": round(getattr(swap, "used", 0) / _GB, 2),
             "percent": getattr(swap, "percent", None),
         }
+    # /proc/meminfo-derived detail and the commit ratio, so a rebuilt view keeps
+    # the cached/buffers/committed breakdown. top_processes is deliberately not
+    # published: the collector fills it with placeholder data.
+    meminfo = memory.get("meminfo")
+    if isinstance(meminfo, dict):
+        section["meminfo"] = {k: v for k, v in meminfo.items()
+                              if isinstance(v, (int, float))}
+    if memory.get("commit_ratio") is not None:
+        try:
+            section["commit_ratio"] = round(float(memory["commit_ratio"]), 4)
+        except (TypeError, ValueError):
+            pass
     return section or None
 
 
@@ -167,6 +189,23 @@ def _gpu_section(gpus) -> List[Dict]:
             "memory_percent": (round(used / total * 100.0, 1)
                                if used is not None and total else None),
             "process_count": len(gpu.get("processes") or []),
+            # Full per-process rows, so a rebuilt view can show the same process
+            # list as a local reading. Values are already strings/ints from the
+            # collector. Note the pids are only meaningful on the sampled host.
+            "processes": [
+                {
+                    "pid": proc.get("pid"),
+                    "name": proc.get("name"),
+                    "gpu_memory": proc.get("gpu_memory"),
+                    "username": proc.get("username"),
+                    "command": proc.get("command"),
+                    "script": proc.get("script"),
+                    "cpu_percent": proc.get("cpu_percent"),
+                    "memory": proc.get("memory"),
+                }
+                for proc in (gpu.get("processes") or [])
+                if isinstance(proc, dict)
+            ],
             "power_w": rounded("power_w"),
             "power_limit_w": rounded("power_limit_w"),
             "power_percent": (round(power / limit * 100.0, 1)
@@ -231,6 +270,157 @@ def build_snapshot(system_metrics, thresholds: Optional[Dict] = None,
     }
 
 
+class _Fields:
+    """Minimal attribute holder standing in for a psutil named tuple.
+
+    Widgets and the alert evaluator reach into memory readings by attribute
+    (``memory_info.used``), so a snapshot rebuilt from JSON has to offer the
+    same access pattern rather than a plain dict.
+    """
+
+    __slots__ = ("total", "used", "available", "free", "percent", "current")
+
+    def __init__(self, **kwargs):
+        for name in self.__slots__:
+            setattr(self, name, kwargs.get(name))
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        set_fields = {n: getattr(self, n) for n in self.__slots__
+                      if getattr(self, n) is not None}
+        return f"_Fields({set_fields})"
+
+
+def metrics_from_snapshot(snapshot: Optional[Dict]) -> Dict:
+    """Rebuild a ``metrics_by_type`` mapping from a JSON snapshot.
+
+    This is the inverse of :func:`build_snapshot`, used to render a *remote*
+    host's reading -- a Slurm job sampled on its compute node -- through the
+    same widgets and the same alert evaluator as local metrics.
+
+    The published schema is lossy by design, so this is a faithful rebuild of
+    what it carries, not of everything the collector saw. Any family missing
+    from the payload comes back as None, which callers already treat as "that
+    collector produced nothing this tick". Older remote versions that predate
+    the detail fields therefore degrade (no GPU process rows, no meminfo
+    breakdown) instead of raising.
+    """
+    if not isinstance(snapshot, dict):
+        return {}
+    metrics = snapshot.get("metrics")
+    if not isinstance(metrics, dict):
+        return {}
+
+    result: Dict = {}
+
+    # -- cpu ---------------------------------------------------------------- #
+    cpu = metrics.get("cpu")
+    if isinstance(cpu, dict):
+        percentages = [float(p) for p in (cpu.get("per_core_percent") or [])]
+        freqs = [_Fields(current=float(f))
+                 for f in (cpu.get("per_core_freq_mhz") or [])]
+        telemetry = cpu.get("telemetry")
+        result["cpu"] = {
+            "cpu_percentages": percentages,
+            "cpu_freqs": freqs,
+            "cpu_name": cpu.get("name"),
+            "mem_percent": cpu.get("memory_percent") or 0.0,
+            "cpu_telemetry": telemetry if isinstance(telemetry, dict) else {},
+        }
+
+    # -- memory ------------------------------------------------------------- #
+    memory = metrics.get("memory")
+    if isinstance(memory, dict):
+        def to_bytes(value):
+            return int(float(value) * _GB) if value is not None else 0
+
+        swap = memory.get("swap") or {}
+        entry: Dict = {
+            "memory_info": _Fields(
+                total=to_bytes(memory.get("total_gb")),
+                used=to_bytes(memory.get("used_gb")),
+                available=to_bytes(memory.get("available_gb")),
+                free=to_bytes(memory.get("available_gb")),
+                percent=memory.get("percent"),
+            ),
+            "swap_info": _Fields(
+                total=to_bytes(swap.get("total_gb")),
+                used=to_bytes(swap.get("used_gb")),
+                percent=swap.get("percent"),
+            ),
+        }
+        if isinstance(memory.get("meminfo"), dict):
+            entry["meminfo"] = memory["meminfo"]
+        if memory.get("commit_ratio") is not None:
+            entry["commit_ratio"] = memory["commit_ratio"]
+        result["memory"] = entry
+
+    # -- disk --------------------------------------------------------------- #
+    disk = metrics.get("disk")
+    if isinstance(disk, dict):
+        disks = []
+        for mount in disk.get("mounts") or []:
+            if not isinstance(mount, dict):
+                continue
+            total_gb, used_gb = mount.get("total_gb"), mount.get("used_gb")
+            disks.append({
+                "mountpoint": mount.get("mountpoint"),
+                "disk_total": int(float(total_gb) * _GB) if total_gb else 0,
+                "disk_used": int(float(used_gb) * _GB) if used_gb else 0,
+                "read_speed": mount.get("read_mbps") or 0.0,
+                "write_speed": mount.get("write_mbps") or 0.0,
+            })
+        result["disk"] = {
+            "disks": disks,
+            "read_speed": disk.get("read_mbps") or 0.0,
+            "write_speed": disk.get("write_mbps") or 0.0,
+        }
+
+    # -- network ------------------------------------------------------------ #
+    network = metrics.get("network")
+    if isinstance(network, dict):
+        result["network"] = {
+            "download_speed": network.get("download_mbps") or 0.0,
+            "upload_speed": network.get("upload_mbps") or 0.0,
+        }
+
+    # -- gpu ---------------------------------------------------------------- #
+    gpus = metrics.get("gpu")
+    if isinstance(gpus, list):
+        rebuilt = []
+        for gpu in gpus:
+            if not isinstance(gpu, dict):
+                continue
+            # The widget treats a negative utilisation as "unavailable"; null in
+            # the payload means the same thing, so map it back to the sentinel.
+            util = gpu.get("utilization_percent")
+            rebuilt.append({
+                "gpu_name": gpu.get("name") or f"GPU {gpu.get('index')}",
+                "gpu_util": -1.0 if util is None else float(util),
+                "mem_used": gpu.get("memory_used_gb") or 0.0,
+                "mem_total": gpu.get("memory_total_gb") or 0.0,
+                "processes": list(gpu.get("processes") or []),
+                "power_w": gpu.get("power_w"),
+                "power_limit_w": gpu.get("power_limit_w"),
+                "temperature_c": gpu.get("temperature_c"),
+                "fan_percent": gpu.get("fan_percent"),
+                "sm_clock_mhz": gpu.get("sm_clock_mhz"),
+                "max_sm_clock_mhz": gpu.get("max_sm_clock_mhz"),
+                "mem_bw_percent": gpu.get("memory_bandwidth_percent"),
+                "perf_state": gpu.get("performance_state"),
+                "throttle_reasons": list(gpu.get("throttle_reasons") or []),
+                "throttle_severe": bool(gpu.get("throttle_severe")),
+            })
+        result["gpu"] = rebuilt
+
+    # -- temperature -------------------------------------------------------- #
+    temperatures = metrics.get("temperature_c")
+    if isinstance(temperatures, dict):
+        result["temperature"] = {k: float(v) for k, v in temperatures.items()
+                                 if isinstance(v, (int, float))}
+
+    return result
+
+
 def sample_twice(system_metrics, interval: float = 0.5,
                  include_gpu: bool = True) -> None:
     """
@@ -242,6 +432,42 @@ def sample_twice(system_metrics, interval: float = 0.5,
     """
     collect_metrics_by_type(system_metrics, include_gpu=include_gpu)
     time.sleep(max(interval, 0.05))
+
+
+def iter_snapshots(system_metrics, thresholds: Optional[Dict] = None,
+                   include_gpu: bool = True,
+                   disk_ignore_prefixes: Optional[List[str]] = None,
+                   interval: float = 1.0,
+                   max_seconds: Optional[float] = None):
+    """Yield one snapshot every ``interval`` seconds, indefinitely.
+
+    This is what ``gc --stream`` runs, and the reason job monitoring is cheap:
+    the collector stays resident on the machine being measured and keeps
+    emitting, instead of paying process (and, over srun, job-step) startup for
+    every single sample.
+
+    The counters are primed once up front, so the *first* yielded snapshot
+    already carries meaningful rates -- unlike a cold one-shot run. Sleeps are
+    measured from the end of the previous collection, so a slow sampler reduces
+    its own frequency rather than falling permanently behind.
+
+    ``max_seconds`` bounds the total lifetime. It exists because this process
+    typically runs inside somebody else's Slurm allocation: if the reader ever
+    dies without its signal reaching us, the stream must still expire on its own
+    rather than sitting in the job's cgroup forever.
+    """
+    interval = max(float(interval), 0.1)
+    started = time.monotonic()
+    # Prime the rate counters; short gap so the first real sample is not late.
+    sample_twice(system_metrics, interval=min(interval, 0.5), include_gpu=include_gpu)
+    while True:
+        collected_at = time.monotonic()
+        yield build_snapshot(system_metrics, thresholds=thresholds,
+                             include_gpu=include_gpu,
+                             disk_ignore_prefixes=disk_ignore_prefixes)
+        if max_seconds is not None and (time.monotonic() - started) >= max_seconds:
+            return
+        time.sleep(max(interval - (time.monotonic() - collected_at), 0.05))
 
 
 def exit_code_for(status: str) -> int:

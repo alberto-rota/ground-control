@@ -103,6 +103,9 @@ class CPUWidget(MetricWidget):
         self.stall_history = deque(maxlen=history_size)
         self._stall_available = False
         self._telemetry: dict = {}
+        # True when the sample describes another host (a focused Slurm job), in
+        # which case the locally-derived views are suppressed.
+        self._remote = False
         self._telemetry_shown = True
         self._tabbed_height = 0
 
@@ -116,16 +119,23 @@ class CPUWidget(MetricWidget):
     def _get_user_cpus(self, n_cores: int):
         """
         Return sorted list of CPU indices that have run processes owned by the current user.
-        Uses process username and cpu_num() (Linux; best-effort on other platforms).
+        Uses process uid and cpu_num() (Linux; best-effort on other platforms).
+
+        Ownership is compared by *uid*, never by username: ``Process.username()``
+        resolves the uid through the name service, and on a cluster login node
+        that means an LDAP round trip per process. Scanning ~5500 processes cost
+        5.6s that way -- on the UI's own thread, every refresh tick -- against
+        0.3s reading uids straight out of /proc.
         """
         try:
-            current_user = psutil.Process(os.getpid()).username()
-        except (AttributeError, psutil.Error):
+            current_uid = os.getuid()
+        except AttributeError:  # non-POSIX
             return None
         user_cpus = set()
-        for proc in psutil.process_iter(attrs=["username"]):
+        for proc in psutil.process_iter(attrs=["uids"]):
             try:
-                if proc.info.get("username") != current_user:
+                uids = proc.info.get("uids")
+                if uids is None or uids.real != current_uid:
                     continue
                 cpu_num = proc.cpu_num()
                 if 0 <= cpu_num < n_cores:
@@ -145,6 +155,14 @@ class CPUWidget(MetricWidget):
         so the heatmap gutter can name the cores a filtered view is showing.
         """
         if mode == "all":
+            return cpu_percentages, list(range(n))
+        # Affinity and per-user views are derived from *local* state: this
+        # process's cpu_affinity and a psutil scan of local processes. Neither
+        # describes the machine a focused Slurm job runs on, so showing them
+        # would label another host's cores with this one's ownership. Falling
+        # back to all cores also spares a full process_iter every tick, which is
+        # never free on a login node with thousands of processes.
+        if getattr(self, "_remote", False):
             return cpu_percentages, list(range(n))
         if mode == "affinity":
             cpus = self._get_affinity_cpus()
@@ -549,14 +567,19 @@ class CPUWidget(MetricWidget):
             telemetry_line.update(self.create_telemetry_line(width))
 
     def update_content(self, cpu_percentages, cpu_freqs=None, mem_percent=None,
-                       telemetry=None):
+                       telemetry=None, remote=False):
         """Store a fresh sample and redraw.
 
         ``cpu_freqs`` and ``mem_percent`` are accepted for call compatibility;
         frequency now reaches the panel through ``telemetry``, which carries
         the load, stall and throttling figures as optional keys.
+
+        ``remote`` marks the sample as coming from another machine (a focused
+        Slurm job), which disables the views that can only be computed locally
+        — see :meth:`_get_display_for_mode`.
         """
         self._last_cpu_percentages = cpu_percentages
+        self._remote = remote
         if telemetry is not None:
             self._telemetry = telemetry
 

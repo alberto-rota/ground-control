@@ -186,9 +186,12 @@ class ProcessRow(Static):
     ProcessRow .sigint-btn  { background: #bb0; color: black; }
     """
 
-    def __init__(self, process: dict, **kwargs):
+    def __init__(self, process: dict, signals_enabled: bool = True, **kwargs):
         super().__init__(**kwargs)
         self._process = process
+        # False while the listed pids belong to another host (Slurm job focus),
+        # where signalling locally would hit an unrelated process.
+        self._signals_enabled = signals_enabled
 
     def compose(self) -> ComposeResult:
         pid = self._process.get("pid", "?")
@@ -200,8 +203,26 @@ class ProcessRow(Static):
                 ("I", "sigint-btn", "SIGINT", 2),
             ):
                 button = Button(label, classes=f"sig-btn {cls}")
-                button.tooltip = f"Send {signal_name} ({number}) to PID {pid}"
+                button.disabled = not self._signals_enabled
+                button.tooltip = (
+                    f"Send {signal_name} ({number}) to PID {pid}"
+                    if self._signals_enabled else
+                    f"PID {pid} is on a remote node — signals are disabled "
+                    f"while focused on a Slurm job"
+                )
                 yield button
+
+    def set_signals_enabled(self, enabled: bool) -> None:
+        """Enable/disable this row's signal buttons in place."""
+        self._signals_enabled = enabled
+        pid = self._process.get("pid", "?")
+        for button in self.query(".sig-btn").results(Button):
+            button.disabled = not enabled
+            if not enabled:
+                button.tooltip = (
+                    f"PID {pid} is on a remote node — signals are disabled "
+                    f"while focused on a Slurm job"
+                )
 
     def on_mount(self) -> None:
         self._render_info()
@@ -234,6 +255,15 @@ class ProcessRow(Static):
     def _send_signal(self, sig_name: str, sig_num: int) -> None:
         pid = self._process.get("pid")
         if pid is None:
+            return
+        # Hard guard, not just a disabled button: in job-focus mode this pid was
+        # read on a compute node, so os.kill here would signal whichever
+        # unrelated local process happens to hold the same number.
+        if not self._signals_enabled:
+            logger.warning(
+                "Refusing to send %s to pid %s: that pid belongs to a remote "
+                "node while focused on a Slurm job", sig_name, pid,
+            )
             return
         try:
             os.kill(pid, sig_num)
@@ -291,9 +321,16 @@ class GPUProcessList(Static):
     }
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, signals_enabled: bool = True, **kwargs):
         super().__init__(**kwargs)
         self._last_sig = None
+        self._signals_enabled = signals_enabled
+
+    def set_signals_enabled(self, enabled: bool) -> None:
+        """Enable/disable signal buttons on current and future rows."""
+        self._signals_enabled = enabled
+        for row in self.query(ProcessRow).results(ProcessRow):
+            row.set_signals_enabled(enabled)
 
     def compose(self) -> ComposeResult:
         with Static(id="gpu-process-header"):
@@ -329,7 +366,7 @@ class GPUProcessList(Static):
         if not processes:
             return
         for p in processes:
-            container.mount(ProcessRow(p))
+            container.mount(ProcessRow(p, signals_enabled=self._signals_enabled))
 
 
 class GPUWidget(MetricWidget):
@@ -391,6 +428,7 @@ class GPUWidget(MetricWidget):
         color: str = "green",
         history_size: int = 120,
         initial_tab: str = "plot",
+        signals_enabled: bool = True,
     ):
         """Initialise a GPU widget.
 
@@ -401,6 +439,9 @@ class GPUWidget(MetricWidget):
             history_size: Number of data-points to keep in the history deque.
             initial_tab: Tab pane id to show on mount (``"plot"`` or
                 ``"processes"``).  Persisted across app restarts.
+            signals_enabled: Whether the per-process signal buttons are live.
+                False when the panel shows a remote host's processes (Slurm job
+                focus), where the pids do not refer to local processes.
         """
         super().__init__(title=title, color=get_rich_color("gpu_ram", "#00FF00"), history_size=history_size, id=id)
         self.gpu_ram_history = deque(maxlen=history_size)
@@ -416,6 +457,7 @@ class GPUWidget(MetricWidget):
         # currently has a row (short panels give it back to the plot).
         self._telemetry: dict = {}
         self._telemetry_shown = True
+        self._signals_enabled = signals_enabled
 
     def compose(self) -> ComposeResult:
         with TabbedContent(initial=self._initial_tab, id="gpu-tabbed"):
@@ -424,7 +466,10 @@ class GPUWidget(MetricWidget):
                 yield Static("", id="current-value", classes="metric-value")
                 yield Static("", id="gpu-telemetry", classes="metric-value")
             with TabPane("Processes", id="processes"):
-                yield GPUProcessList(id="gpu-processes", classes="gpu-processes-pane")
+                yield GPUProcessList(
+                    id="gpu-processes", classes="gpu-processes-pane",
+                    signals_enabled=self._signals_enabled,
+                )
 
     @on(TabbedContent.TabActivated, "#gpu-tabbed")
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -660,6 +705,18 @@ class GPUWidget(MetricWidget):
                 )
         except NoMatches:
             pass  # DOM not ready yet (e.g. after layout switch)
+
+    def set_signals_enabled(self, enabled: bool) -> None:
+        """Enable/disable the per-process signal buttons on this panel.
+
+        Called when entering/leaving Slurm job focus, where the process list
+        describes a different machine than the one gc is running on.
+        """
+        self._signals_enabled = enabled
+        try:
+            self.query_one("#gpu-processes").set_signals_enabled(enabled)
+        except NoMatches:
+            pass  # DOM not ready yet; the flag is applied when rows are built
 
     def update_content(
         self, gpu_name, gpu_usage, mem_used, mem_total, processes=None,

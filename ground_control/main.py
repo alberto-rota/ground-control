@@ -190,6 +190,77 @@ def run_once(as_json: bool, check: bool, interval: float, all_gpus: bool,
         return 3
 
 
+def run_stream(interval: float, all_gpus: bool, debug: bool,
+               all_mounts: bool = False, max_seconds: float = 3600.0) -> int:
+    """
+    Emit one JSON snapshot per line, forever, until told to stop.
+
+    This is the collector half of job monitoring. ``gc`` on a login node starts
+    one of these *inside* the job's allocation and reads its lines; all the
+    psutil/NVML work then happens on the compute node, once per line, and the
+    login node only parses JSON. Compare with ``--once``, where every sample
+    pays for a new Slurm job step plus a fresh interpreter (seconds, not
+    milliseconds).
+
+    The output is newline-delimited JSON (one compact object per line, flushed
+    immediately) rather than a single pretty document, so a reader can consume it
+    incrementally with ``readline``. Diagnostics go to stderr, keeping stdout a
+    clean stream.
+
+    Termination is deliberately over-determined, because this process runs in
+    someone's allocation: SIGTERM/SIGINT exit cleanly, a closed stdout (reader
+    gone) exits cleanly, and ``max_seconds`` expires the stream even if no signal
+    ever arrives.
+    """
+    import signal
+
+    from .utils.snapshot import iter_snapshots
+    from .utils.system_metrics import SystemMetrics
+
+    stop = {"flag": False}
+
+    def _request_stop(_signum, _frame):
+        # Flag rather than exit: finishing the current line keeps stdout valid.
+        stop["flag"] = True
+
+    for signame in ("SIGTERM", "SIGINT", "SIGHUP"):
+        sig = getattr(signal, signame, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, _request_stop)
+            except (ValueError, OSError):
+                pass  # not the main thread, or platform lacks it
+
+    try:
+        thresholds, alerts_enabled, ignore_prefixes = _load_threshold_config()
+        system_metrics = SystemMetrics(all_gpus=all_gpus)
+        snapshots = iter_snapshots(
+            system_metrics, thresholds=thresholds,
+            disk_ignore_prefixes=[] if all_mounts else ignore_prefixes,
+            interval=interval,
+            max_seconds=max_seconds if max_seconds and max_seconds > 0 else None,
+        )
+        for snapshot in snapshots:
+            if not alerts_enabled:
+                snapshot["alerts"] = []
+                snapshot["status"] = "ok"
+            # separators= keeps the line compact; a stream is parsed, not read.
+            sys.stdout.write(json.dumps(snapshot, default=str,
+                                        separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+            if stop["flag"]:
+                break
+        return 0
+    except (BrokenPipeError, KeyboardInterrupt):
+        # The reader went away. Nothing to report and nowhere to report it.
+        return 0
+    except Exception as e:  # noqa: BLE001 - a collector must not dump a traceback
+        if debug:
+            raise
+        click.echo(f"Error: could not stream metrics: {e}", err=True)
+        return 3
+
+
 @click.group(invoke_without_command=True)
 @click.option('--log', is_flag=True, help='Also save log file in current working directory')
 @click.option('--debug', is_flag=True, help='Run in debug mode (do not catch errors).')
@@ -199,8 +270,9 @@ def run_once(as_json: bool, check: bool, interval: float, all_gpus: bool,
              help='Filter to specific GPU(s): 0, 0,1, etc. Use with -g (e.g. gc -g --gpu-index 0).')
 @click.option('--all-gpus', is_flag=True,
              help='Show every physical GPU, ignoring CUDA_VISIBLE_DEVICES / Slurm allocation.')
-@click.option('--squeue', is_flag=True,
-             help='Add a Slurm panel and prompt for which queued/running jobs to monitor.')
+@click.option('--slurm', '-S', 'slurm', is_flag=True,
+             help='Show the Slurm jobs panel (lists all your jobs). Alias: --squeue.')
+@click.option('--squeue', is_flag=True, help='Alias for --slurm.')
 @click.option('--ram', '-r', is_flag=True, help='Show Memory widgets')
 @click.option('--disk', '-d', is_flag=True, help='Show Disk widgets')
 @click.option('--net', '-n', is_flag=True, help='Show Network widgets')
@@ -215,11 +287,23 @@ def run_once(as_json: bool, check: bool, interval: float, all_gpus: bool,
              help='With --once, gap between the priming and reported sample (default 0.5).')
 @click.option('--all-mounts', is_flag=True,
              help='With --once, include mounts normally hidden (snap, /boot/efi).')
+@click.option('--stream', is_flag=True,
+             help='Emit one JSON snapshot per line every --interval seconds until stopped.')
+@click.option('--stream-max-seconds', type=float, default=3600.0, metavar='SECONDS',
+             help='With --stream, stop after this long (0 = never; default 3600).')
 @click.pass_context
-def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, temp,
-        once, as_json, check, interval, all_mounts):
+def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, slurm, squeue, ram, disk, net, temp,
+        once, as_json, check, interval, all_mounts, stream, stream_max_seconds):
     """Ground Control - Terminal System Monitor"""
     if ctx.invoked_subcommand is None:
+        if stream:
+            # --interval means "gap between samples" here, not the priming gap;
+            # the one-shot default of 0.5s would hammer the machine, so a bare
+            # --stream ticks once a second like the dashboard does.
+            raise SystemExit(run_stream(
+                interval=interval if interval != 0.5 else 1.0,
+                all_gpus=all_gpus, debug=debug, all_mounts=all_mounts,
+                max_seconds=stream_max_seconds))
         if once or as_json or check:
             raise SystemExit(run_once(as_json=as_json, check=check, interval=interval,
                                       all_gpus=all_gpus, debug=debug,
@@ -236,6 +320,10 @@ def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, 
         if disk: allowed_types.add('disk')
         if net: allowed_types.add('net')
         if temp: allowed_types.add('temp')
+        # The Slurm panel is an ordinary widget now, so its flag is an ordinary
+        # filter: bare `gc` shows it wherever Slurm exists, and naming it here
+        # means "only this", exactly like --cpu does.
+        if slurm or squeue: allowed_types.add('slurm')
 
         # If no specific flags are set, pass None (allow all)
         if not allowed_types:
@@ -245,7 +333,7 @@ def cli(ctx, log, debug, cpu, gpu, gpu_index, all_gpus, squeue, ram, disk, net, 
         gpu_indices = _parse_gpu_indices(gpu_index) if gpu_index else None
 
         appl = GroundControl(allowed_types=allowed_types, gpu_indices=gpu_indices,
-                             debug=debug, all_gpus=all_gpus, squeue=squeue)
+                             debug=debug, all_gpus=all_gpus)
         appl.run()
     else:
         # Store log flag in context for subcommands if needed
@@ -266,6 +354,8 @@ def get_default_config():
     return {
         "selected": {},
         "layout": "grid",
+        "grid_weights": {},
+        "panel_order": [],
         "refresh_rate": 1.0,
         "history_size": 120,
         "widget_tabs": {},
