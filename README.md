@@ -1,6 +1,6 @@
 # 🚀 Ground Control - The Ultimate Terminal System Monitor
 
-![Ground Control Banner](https://github.com/alberto-rota/ground-control/blob/main/assets/dashboard.gif?raw=true)
+![Ground Control Banner](https://github.com/alberto-rota/ground-control/blob/main/assets/hero.gif?raw=true)
 
 [![PyPI version](https://badge.fury.io/py/groundcontrol.svg)](https://badge.fury.io/py/groundcontrol)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -65,12 +65,12 @@ gc
 ### 🔹 Available Layouts
 
 ### Grid Layout
-A structured layout displaying all widgets neatly in a grid. When you first launch **Ground Control**, it will show this layout. The recording below is `gc` running inside a Slurm job with four GPUs.
-![Grid Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/dashboard.gif?raw=true)
+A structured layout displaying all widgets neatly in a grid. When you first launch **Ground Control**, it will show this layout — every panel the machine has to offer, on screen at once.
+![Grid Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/hero.gif?raw=true)
 
 ### Horizontal Layout
-All widgets aligned in a single row. If you like working with wide shell spaces, split a TMUX session horizontally and use this layout!
-![Horizontal Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/horizontal.gif?raw=true)
+All widgets aligned in a single row. If you like working with wide shell spaces, split a TMUX session horizontally and use this layout! The recording below switches grid → horizontal → grid with `g` and `h`, on live data.
+![Horizontal Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/layouts.gif?raw=true)
 
 #### Vertical Layout
 A column-based layout, ideal for narrow shell spaces. If you like working with tall shell spaces, split a TMUX session verticall and use this layout!
@@ -137,6 +137,16 @@ Shown automatically wherever `squeue` is on `PATH` — no flag needed (`gc --slu
 
 `F` from anywhere opens a list of your running jobs: arrow to one and press **enter** to focus it, `u` to stop focusing.
 
+### 🔹 **Threshold Alerts**
+Any panel that crosses a threshold paints its border and prefixes its title with a marker — `▲` for a warning, `■` for critical. The marker matters as much as the colour: it survives a monochrome terminal, and it means you can tell the two states apart without relying on colour alone.
+
+- *Direction is a property of the metric, not of your config* — "CPU above 90%" and "disk free below 2 GB" are both written as plain numbers.
+- A breach stays visible for a few seconds after recovery, so a spike that happened while you were on another tab is not missed. An escalation still shows immediately.
+- Sensible defaults ship for every metric. GPU utilization is **off** by default — a pegged GPU is usually the goal, not an incident — as are network rates, which have no site-independent ceiling.
+- Press `a` to toggle alerting at runtime; `alerts_enabled`, `alert_sticky_seconds` and `thresholds` persist it.
+
+![Threshold alerts](https://github.com/alberto-rota/ground-control/blob/main/assets/alerts.gif?raw=true)
+
 ## 🛠️ Configuring Ground Control
 Ground Control offers extensive customization options to tailor your monitoring experience. You might not want to see all the widgets all at once, or you may want to focus on specific system metrics.
 
@@ -164,6 +174,20 @@ You can switch between different layouts instantly:
 
 ![Settings tab](https://github.com/alberto-rota/ground-control/blob/main/assets/settings.gif?raw=true)
 
+### 🔹 **Themes**
+Twenty built-in palettes ship with Ground Control, dark and light. Pick one in the Settings tab, or press `t` to cycle through them without leaving the dashboard — plots, bars and borders all repaint live.
+
+![Themes](https://github.com/alberto-rota/ground-control/blob/main/assets/themes.gif?raw=true)
+
+### 🔹 **Editing Individual Colours**
+A theme is a starting point, not a straitjacket. The Settings tab lists every colour key grouped by widget; press **enter** on any of them to open the picker — a hue/shade swatch grid, plus H/S/V steppers for the shade the grid does not have (hold shift for ×10).
+
+The preview pane on the right is a **real metric widget being fed real data**, not a mock-up, and every cursor move applies immediately, so you can see what a colour actually looks like on a live plot before you keep it. `ctrl+z` reverts to the value the key had when the screen opened.
+
+Save the result as your own named theme from the Settings tab, or with `gc theme --save-as NAME`.
+
+![Colour picker](https://github.com/alberto-rota/ground-control/blob/main/assets/colorpicker.gif?raw=true)
+
 ### 🔹 **Persistent Configuration**
 All your customizations are automatically saved when you quit Ground Control. When you launch it again, you'll see the same layout and widget configuration you previously selected, ensuring a consistent monitoring experience.
 
@@ -177,6 +201,7 @@ All available keyboard shortcuts are listed here:
 | `d`  | Show the Dashboard |
 | `s`  | Show the Settings tab |
 | `l`  | Show the Logs tab |
+| `t`  | Cycle to the next colour theme |
 | `r`  | Refresh now |
 | `+` / `-` | Refresh faster / slower |
 | `F`  | Focus a Slurm job (arrow + enter) / return to this host |
@@ -201,6 +226,24 @@ or
 gc config
 ```
 
+## 📟 Scripting and Health Checks
+
+Ground Control is not only a TUI. `gc --once` takes a single sample, prints it and exits — no alternate screen, no event loop — which makes it usable from cron, CI, or a monitoring agent:
+
+```sh
+gc --once                      # one human-readable snapshot
+gc --once --json               # ...the same sample as JSON, for scripts
+gc --once --check              # ...as an exit code: 0 ok, 1 warn, 2 crit, 3 collector failed
+```
+
+`--check` follows the Nagios convention, so it drops into an existing monitoring setup unchanged. The JSON carries a `schema_version` and is built field by field, so internal metric changes cannot silently alter what your scripts parse.
+
+Two details worth knowing: throughput figures are *deltas*, so `--once` primes the counters and samples again (`--interval` sets the gap), and the same mount filtering the dashboard uses applies here — without it every read-only squashfs under `/snap` reports as 100% full (`--all-mounts` opts back in).
+
+For continuous collection, `gc --stream` emits one compact JSON object per line, flushed immediately, until stopped or `--stream-max-seconds` expires.
+
+![gc --once](https://github.com/alberto-rota/ground-control/blob/main/assets/snapshot.gif?raw=true)
+
 ## ⛔ Current Known Limitations/Bugs
 - In heavy-duty HPC systems, with multiple disks, cores and GPUs to be monitored, metric collection and plotting might get bottlenecked and groundcontrol might run slow. Consider **directly editing the config file with a text editor** to avoid 
 - GPU usage is monitored only for CUDA-enabled hardware. Ground Control detects MiG devices but in some cases it cannot detect their utilization. You'll see *Usage UNAV* in the GPU Widget if this is the case
@@ -214,7 +257,7 @@ Pull requests and contributions are welcome! To contribute:
 
 Visit the [Issue Section](https://github.com/alberto-rota/ground-control/issues) to start!
 
-Every animation in this README is generated from a [vhs](https://github.com/charmbracelet/vhs) tape in [`tapes/`](tapes) — one tape per asset, re-recordable with `vhs tapes/<name>.tape`. See [`tapes/README.md`](tapes/README.md) if you change the UI and need to refresh them.
+Every animation in this README is generated from a [vhs](https://github.com/charmbracelet/vhs) tape in [`demo/tapes/`](demo/tapes) — one tape per asset, all of them re-recordable with `demo/record.sh`. See [`demo/README.md`](demo/README.md) if you change the UI and need to refresh them.
 
 ## 📜 License
 This project is licensed under the **GNU General Public License v3.0**. See the [LICENSE](LICENSE) file for details.

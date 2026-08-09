@@ -1,12 +1,12 @@
 # gc --once: one sample, no TUI. For cron, CI and health checks.
 Output assets/snapshot.gif
 
-Source demo/tapes/themes/monokai.tape
+Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 16
-Set Width 1240
-Set Height 740
-Set Padding 14
+Set FontSize 24
+Set Width 1860
+Set Height 1110
+Set Padding 21
 Set BorderRadius 10
 Set Framerate 20
 Set TypingSpeed 45ms
@@ -16,7 +16,7 @@ Set TypingSpeed 45ms
 # this a demo of --check that only ever prints 0 -- and of a JSON document whose
 # "alerts" array is always empty.
 Hide
-Type "gc-prepare --theme monokai --alerts-tuned"
+Type "gc-prepare --theme gruvbox --alerts-tuned"
 Enter
 Sleep 2s
 Type "clear"

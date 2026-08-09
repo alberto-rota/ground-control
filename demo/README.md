@@ -76,6 +76,72 @@ which is what `gen_theme_tapes.py` bakes into `tapes/themes/`. That is why the
 terminal background matches the TUI exactly instead of nearly — picking the
 closest-named VHS built-in leaves a visible seam at the edge of the frame.
 
+## One palette for the whole README
+
+Every tape records on **gruvbox**, in both halves of the frame: `Source
+demo/tapes/themes/gruvbox.tape` sets the terminal's colours and `gc-prepare
+--theme gruvbox` sets the app's, and both come from the same
+`ground_control/themes/gruvbox.json`. The tapes used to carry a theme each,
+which showed off the palettes but meant a reader scrolling the README met a
+different colour scheme every two paragraphs — the individual GIFs looked fine
+and the page did not.
+
+`themes.tape` is the deliberate exception: its subject *is* the other palettes,
+so it starts on gruvbox and cycles away from it. It loops back on its own.
+
+## Why every tape passes `--no-alerts`
+
+Threshold alerts paint a panel's border and prefix its title with `▲`/`■`. They
+are a real feature, but the main README does not explain them, so an orange
+panel in a recording reads as a bug rather than as a warning.
+
+They also fire for a reason that is an artifact of the rig: the load generator
+drives this machine hard enough that the motherboard sensor crosses the shipped
+80 °C `temperature_c` threshold, which no idle reader's machine would. So every
+tape turns alerting off — except the two whose subject it is. `alerts.tape` and
+`snapshot.tape` pass `--alerts-tuned` instead, which lowers the thresholds far
+enough that the demo load reliably breaches them (on a healthy machine the
+shipped defaults are never crossed, which would make `snapshot.tape` a demo of
+`--check` that only ever prints `0`).
+
+## Resolution, and the one rule about geometry
+
+`Width` and `Height` are pixels, but what the app actually lays out against is
+the terminal's **cols × rows**, and that is `(Width - 2·Padding) / cellWidth`.
+Cell size is a function of `FontSize`. So the rule when resizing a tape is:
+
+> multiply `FontSize`, `Width`, `Height` and `Padding` by the *same* factor.
+
+That buys pixels without changing what fits on screen. Scaling the canvas alone
+shrinks the text and adds columns; scaling the font alone drops columns until a
+panel gives up and prints `too small`. The current tapes are a 1.5× pass over
+the originals (font 14 → 21 for the grid tapes, 15 → 22 for the single-panel
+ones), verified by probe: font 14 @1500×900 and font 21 @2250×1350 both give
+48 rows.
+
+More pixels per frame is also more work per captured frame, which is the main
+way a GIF ends up short — see below. If you scale up much further, expect to
+trade frame rate for it.
+
+## Recording inside a Slurm job
+
+A login node has no GPUs and nothing interesting to plot, so the GPU and
+all-panels recordings are worth re-shooting on a compute node. `srun --overlap`
+joins an **existing** allocation, so the app lands inside the job's cgroup and
+sees the job's own CPUs, memory and GPUs — the same mechanism as the app's `F`
+job focus:
+
+```sh
+srun --overlap --jobid=$(squeue -h -u $USER -t R -o %i | head -n1) \
+     --pty -n1 bash -lc 'gc'
+```
+
+To put that on film, replace the `Type "gc"` line of `hero.tape` or `gpu.tape`
+with the `srun` line above and lengthen the `Sleep` that follows it — a job step
+has to be created before `gc` starts, which the local tapes do not pay for. Pick
+your *first running job* carefully: the tapes take whatever `squeue` lists first,
+and an idle GPU plots as a flat line at zero.
+
 ## The hidden warm-up
 
 Each tape starts the app, then sleeps for the full history window behind a
@@ -124,8 +190,10 @@ the order they have actually bitten:
 
 ## Adding a tape
 
-1. Copy the closest existing tape and change its `Output`, theme `Source`, and
-   the `gc-prepare` line.
+1. Copy the closest existing tape and change its `Output` and the flags on its
+   `gc-prepare` line. Leave the theme alone: gruvbox in both halves of the
+   frame is the house style, and `tapes/themes/` exists for the one tape that
+   needs to move off it.
 2. Panel-scoped keys need the panel focused first — press `]`. On CPU those are
    `1`/`2`/`3`; on GPU, `1` and `2`. (The in-app help offers `p` for the GPU
    Processes tab, but the widget binds `p` to `show_plot`, so it does nothing

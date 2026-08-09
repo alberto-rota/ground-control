@@ -12,7 +12,7 @@ the same JSON the app reads.
 
 Each generated file is a fragment, meant to be pulled in from a real tape:
 
-    Source demo/tapes/themes/tokyo-night.tape
+    Source demo/tapes/themes/gruvbox.tape
 
 Re-run this after adding or editing a theme under ground_control/themes/.
 """

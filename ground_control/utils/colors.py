@@ -203,6 +203,40 @@ def hex_to_rgb(hex_color: str) -> tuple:
         return (0, 0, 0)
 
 
+def relative_luminance(hex_color: str) -> float:
+    """WCAG relative luminance of a hex colour, 0.0 (black) to 1.0 (white)."""
+    def channel(v: int) -> float:
+        s = v / 255
+        return s / 12.92 if s <= 0.03928 else ((s + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(v) for v in hex_to_rgb(hex_color))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a: str, b: str) -> float:
+    """WCAG contrast ratio between two hex colours, 1.0 (identical) to 21.0."""
+    la, lb = relative_luminance(a), relative_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def most_readable_on(background: str, *candidates: str) -> str:
+    """
+    Return whichever candidate contrasts best with ``background``.
+
+    Used where a theme key's correct foreground depends on what the theme put
+    in the *background* key. ``header_bg`` is the standing example: some themes
+    paint the header in the accent colour (so ``text_on_accent`` is right) and
+    most paint it in a surface colour (so ``text`` is), and no shipped theme
+    defines ``header_fg`` to settle it. A fixed fallback is wrong for roughly
+    half of them either way; contrast is the thing actually being chosen for.
+    """
+    usable = [c for c in candidates if c]
+    if not usable:
+        return "#FFFFFF"
+    return max(usable, key=lambda c: contrast_ratio(background, c))
+
+
 def is_valid_hex(value: str) -> bool:
     """True if ``value`` is a 6-digit hex colour, with or without a leading '#'."""
     return bool(_HEX_RE.match((value or "").strip()))
@@ -242,9 +276,10 @@ def get_theme_tokens(colors: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     Return a dict of CSS-ready token values (rgb(...)) from the theme.
 
     Single source of truth for app CSS: no hardcoded colors in the app.
-    Missing keys are filled from _FALLBACK_DEFAULT_COLORS. Use header_fg and
-    tab_active_fg for text on accent (default text_on_accent) so header/tabs
-    stay readable.
+    Missing keys are filled from _FALLBACK_DEFAULT_COLORS. Text that sits on
+    the accent colour (active tab, footer keys) uses tab_active_fg /
+    text_on_accent; header_fg is chosen by contrast instead, since header_bg is
+    an accent colour in some themes and a surface colour in most.
     """
     c = dict(_FALLBACK_DEFAULT_COLORS)
     if colors:
@@ -280,7 +315,13 @@ def get_theme_tokens(colors: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         "tab_inactive_bg": rgb("tab_inactive_bg", "#1A1A1A"),
         "tab_inactive_fg": rgb_hex(c.get("tab_inactive_fg") or c.get("text") or "#E0E0E0"),
         "header_bg": rgb("header_bg", "#13A10E"),
-        "header_fg": rgb_hex(c.get("header_fg") or c.get("text_on_accent") or "#000000"),
+        # Not a fixed fallback: themes disagree on whether header_bg is the
+        # accent colour or a surface colour, and none of them define header_fg.
+        "header_fg": rgb_hex(c.get("header_fg") or most_readable_on(
+            c.get("header_bg", "#13A10E"),
+            c.get("text", "#E0E0E0"),
+            c.get("text_on_accent", "#000000"),
+        )),
         "footer_bg": rgb("footer_bg", "#1A1A1A"),
         "footer_fg": rgb_hex(c.get("footer_fg") or c.get("text") or "#E0E0E0"),
         "footer_key_bg": rgb("footer_key_bg", "#13A10E"),

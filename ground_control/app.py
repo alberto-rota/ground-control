@@ -602,19 +602,23 @@ class GroundControl(App):
         color: {tok["tab_active_bg"]};
     }}
 
-    /* Scoped under GroundControl so we override Textual's default theme for header/footer */
-    GroundControl > Header {{
+    /* Scoped under GroundControl so we override Textual's default theme for
+       header/footer. Descendant, not child: App.compose() mounts onto the
+       default Screen, so the DOM is GroundControl < Screen < Header and a
+       `GroundControl > Header` selector matches nothing -- which left both
+       bars on Textual's own blue in every one of the 20 themes. */
+    GroundControl Header {{
         background: {tok["header_bg"]};
         color: {tok["header_fg"]};
     }}
-    GroundControl > Footer {{
+    GroundControl Footer {{
         background: {tok["footer_bg"]};
         color: {tok["footer_fg"]};
     }}
-    GroundControl > Footer FooterKey {{
+    GroundControl Footer FooterKey {{
         color: {tok["footer_fg"]};
     }}
-    GroundControl > Footer > FooterKey > .footer-key--key {{
+    GroundControl Footer FooterKey > .footer-key--key {{
         background: {tok["footer_key_bg"]};
         color: {tok["footer_key_fg"]};
     }}

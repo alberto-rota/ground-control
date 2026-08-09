@@ -230,8 +230,24 @@ for name in "${TAPES[@]}"; do
     rm -f "$gif.opt"
   fi
 
-  if command -v ffprobe >/dev/null && [[ -f $gif ]]; then
-    actual=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$gif")
+  # vhs can exit 0 having written nothing -- the encode is a separate ffmpeg
+  # process whose failure it does not propagate. Catch it here, or the run
+  # reports success for a GIF that is a zero-byte file.
+  if [[ ! -s $gif ]]; then
+    echo "    produced no output (see the ffmpeg errors above)" >&2
+    failed+=("$name")
+    continue
+  fi
+
+  # `|| true` on every ffprobe: it exits non-zero on a GIF it cannot parse,
+  # and under `set -e` that aborted the whole run at the first bad tape --
+  # twelve good recordings lost to one broken one.
+  actual=""
+  if command -v ffprobe >/dev/null; then
+    actual=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$gif" || true)
+  fi
+
+  if [[ -n $actual ]]; then
     want=$(expected_seconds "$tape")
 
     # 15% is slack for typing time and startup; beyond that, frames were lost.
@@ -241,13 +257,13 @@ for name in "${TAPES[@]}"; do
       # through content the tape meant to dwell on.
       if [[ $RETIME -eq 1 ]] && "$PYTHON" "$DEMO_DIR/retime_gif.py" "$gif" "$want" \
            | sed 's/^/    retimed: /'; then
-        actual=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$gif")
+        actual=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$gif" || true)
       else
         short+=("$name")
       fi
     fi
 
-    printf '    %.1fs (tape asks for ~%ss, %s)\n' "$actual" "$want" \
+    printf '    %.1fs (tape asks for ~%ss, %s)\n' "${actual:-0}" "$want" \
       "$(du -h "$gif" | cut -f1)"
   fi
 done

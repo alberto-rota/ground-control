@@ -1,12 +1,12 @@
 # Threshold alerts: breached panels get a coloured border and a ▲ or ■ marker.
 Output assets/alerts.gif
 
-Source demo/tapes/themes/neon.tape
+Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 14
-Set Width 1500
-Set Height 900
-Set Padding 12
+Set FontSize 21
+Set Width 2250
+Set Height 1350
+Set Padding 18
 Set BorderRadius 10
 Set Framerate 20
 Set TypingSpeed 60ms
@@ -15,7 +15,7 @@ Set TypingSpeed 60ms
 # them. The shipped defaults are set for real incidents, which is exactly wrong
 # for a 20-second recording of the alerting feature.
 Hide
-Type "gc-prepare --theme neon --layout grid --refresh 1 --history 120 --alerts-tuned"
+Type "gc-prepare --theme gruvbox --layout grid --refresh 1 --history 120 --alerts-tuned"
 Enter
 Sleep 2s
 Type "clear"

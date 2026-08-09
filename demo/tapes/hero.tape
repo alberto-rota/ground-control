@@ -1,19 +1,19 @@
 # Every widget at once, in the default grid layout. This is the banner.
 Output assets/hero.gif
 
-Source demo/tapes/themes/tokyo-night.tape
+Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 14
-Set Width 1500
-Set Height 900
-Set Padding 12
+Set FontSize 21
+Set Width 2250
+Set Height 1350
+Set Padding 18
 Set BorderRadius 10
 Set Framerate 20
 Set TypingSpeed 60ms
 
 # Prepare this recording's throwaway config off-camera.
 Hide
-Type "gc-prepare --theme tokyo-night --layout grid --refresh 1 --history 120"
+Type "gc-prepare --theme gruvbox --layout grid --refresh 1 --history 120 --no-alerts"
 Enter
 Sleep 2s
 Type "clear"
