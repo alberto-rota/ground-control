@@ -8,7 +8,13 @@ from textual import on
 from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import align, ansi2rich, format_size, recolor, substitute_plot_timeframe
+from ..utils.formatting import (
+    align,
+    ansi2rich,
+    format_size,
+    recolor,
+    substitute_plot_timeframe,
+)
 from ..utils.colors import get_rich_color
 import logging
 
@@ -23,15 +29,13 @@ logger = logging.getLogger("ground-control.gpu")
 # dropped by priority rather than letting the line wrap or truncate blindly.
 #
 # (key, header, width, align, priority) -- lower priority drops first.
-# PID and GPU memory have no priority: they are never dropped, since a row you
-# cannot identify and whose memory cost you cannot see is not worth a row.
+# PID has no priority so it remains visible, while COMMAND gets the remaining
+# width after the identity columns.
 PROC_COLUMNS = (
-    ("username",    "USER",   10, "left",  3),
-    ("pid",         "PID",     7, "right", None),
-    ("gpu_memory",  "GPU MEM", 8, "right", None),
-    ("cpu_percent", "CPU",     6, "right", 1),
-    ("memory",      "HOST",    8, "right", 2),
+    ("username", "USER", 10, "left", 3),
+    ("pid", "PID", 3, "right", None),
 )
+PID_MIN_WIDTH = 3
 COL_GAP = 1
 # Narrower than this and the command is unreadable, so it is dropped instead.
 CMD_MIN_WIDTH = 8
@@ -45,12 +49,6 @@ def _proc_value(process: dict, key: str) -> str:
     """Display string for one column of a process row."""
     if key == "pid":
         return str(process.get("pid", ""))
-    if key == "gpu_memory":
-        return str(process.get("gpu_memory") or "-")
-    if key == "cpu_percent":
-        return str(process.get("cpu_percent") or "-")
-    if key == "memory":
-        return str(process.get("memory") or "-")
     if key == "username":
         return str(process.get("username") or "-")
     return ""
@@ -58,20 +56,31 @@ def _proc_value(process: dict, key: str) -> str:
 
 def _proc_command(process: dict) -> str:
     """The most informative one-line description of what the process is."""
-    return str(
-        process.get("script")
-        or process.get("command")
-        or process.get("name")
-        or "?"
+    script = str(process.get("script") or "").strip()
+    command = str(process.get("command") or "").strip()
+    # Older collectors could store only the Python option in ``script`` even
+    # when ``command`` retained the useful module/script name.
+    if script in {"-m", "-c"} and command not in {"", "-m", "-c"}:
+        return command
+    return script or command or str(process.get("name") or "?")
+
+
+def _pid_width(processes) -> int:
+    """Return the width needed for the largest PID in a process list."""
+    return max(
+        PID_MIN_WIDTH,
+        max((len(str(process.get("pid", ""))) for process in processes), default=0),
     )
 
 
-def format_process_line(process: dict, width: int, header: bool = False) -> str:
+def format_process_line(
+    process: dict, width: int, header: bool = False, pid_width: int = PID_MIN_WIDTH
+) -> str:
     """Render one process (or the header) as exactly ``width`` cells of markup.
 
     Columns are dropped lowest-priority-first until the row fits, so a narrow
-    panel still shows who owns the process, its PID and how much GPU memory it
-    is holding -- the three facts needed to decide whether to kill it.
+    panel still shows who owns the process and its PID while preserving as much
+    command context as possible.
     """
     width = int(width)
     if width <= 0:
@@ -80,16 +89,19 @@ def format_process_line(process: dict, width: int, header: bool = False) -> str:
     def fixed_width(cols):
         return sum(w for _, _, w, _, _ in cols) + COL_GAP * len(cols)
 
-    columns = list(PROC_COLUMNS)
+    columns = [
+        (key, label, pid_width if key == "pid" else col_width, alignment, priority)
+        for key, label, col_width, alignment, priority in PROC_COLUMNS
+    ]
     # 1. Drop optional columns, cheapest first, until the command has room.
     while fixed_width(columns) + CMD_MIN_WIDTH > width:
         droppable = [c for c in columns if c[4] is not None]
         if not droppable:
             break
-        columns.remove(min(droppable, key=lambda c: c[4]))
+        columns.remove(min(droppable, key=lambda c: c[4] if c[4] is not None else 99))
 
-    # 2. On a very narrow panel even PID + GPU MEM overflow. Squeeze them from
-    #    the right before giving up, so the row never bleeds into the buttons.
+    # 2. On a very narrow panel even the fixed columns overflow. Squeeze them
+    #    from the right before giving up, so the row never bleeds into buttons.
     overflow = fixed_width(columns) - width
     index = len(columns) - 1
     while overflow > 0 and index >= 0:
@@ -108,8 +120,6 @@ def format_process_line(process: dict, width: int, header: bool = False) -> str:
         cmd_width = 0
 
     user_color = get_rich_color("gpu_usage", "#00FFFF")
-    mem_color = get_rich_color("gpu_ram", "#00FF00")
-
     parts = []
     for key, label, col_width, alignment, _ in columns:
         text = label if header else _proc_value(process, key)
@@ -118,10 +128,6 @@ def format_process_line(process: dict, width: int, header: bool = False) -> str:
             parts.append(f"[bold]{text}[/]")
         elif key == "username":
             parts.append(f"[{user_color}]{text}[/]")
-        elif key == "gpu_memory":
-            parts.append(f"[{mem_color}]{text}[/]")
-        elif key in ("cpu_percent", "memory"):
-            parts.append(f"[dim]{text}[/]")
         else:
             parts.append(text)
 
@@ -137,8 +143,9 @@ def format_process_line(process: dict, width: int, header: bool = False) -> str:
     # buttons, so a short line would let the background show through.
     plain_len = 0
     if parts:
-        plain_len = (sum(w for _, _, w, _, _ in columns) + cmd_width
-                     + COL_GAP * (len(parts) - 1))
+        plain_len = (
+            sum(w for _, _, w, _, _ in columns) + cmd_width + COL_GAP * (len(parts) - 1)
+        )
     if plain_len < width:
         line += " " * (width - plain_len)
     return line
@@ -186,9 +193,16 @@ class ProcessRow(Static):
     ProcessRow .sigint-btn  { background: #bb0; color: black; }
     """
 
-    def __init__(self, process: dict, signals_enabled: bool = True, **kwargs):
+    def __init__(
+        self,
+        process: dict,
+        signals_enabled: bool = True,
+        pid_width: int = PID_MIN_WIDTH,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._process = process
+        self._pid_width = pid_width
         # False while the listed pids belong to another host (Slurm job focus),
         # where signalling locally would hit an unrelated process.
         self._signals_enabled = signals_enabled
@@ -206,8 +220,8 @@ class ProcessRow(Static):
                 button.disabled = not self._signals_enabled
                 button.tooltip = (
                     f"Send {signal_name} ({number}) to PID {pid}"
-                    if self._signals_enabled else
-                    f"PID {pid} is on a remote node — signals are disabled "
+                    if self._signals_enabled
+                    else f"PID {pid} is on a remote node — signals are disabled "
                     f"while focused on a Slurm job"
                 )
                 yield button
@@ -238,7 +252,9 @@ class ProcessRow(Static):
         except NoMatches:
             return
         width = info.content_size.width or (self.content_size.width - SIG_BUTTON_STRIP)
-        info.update(format_process_line(self._process, max(0, width)))
+        info.update(
+            format_process_line(self._process, max(0, width), pid_width=self._pid_width)
+        )
 
     @on(Button.Pressed, ".sigkill-btn")
     def _send_kill(self) -> None:
@@ -262,7 +278,9 @@ class ProcessRow(Static):
         if not self._signals_enabled:
             logger.warning(
                 "Refusing to send %s to pid %s: that pid belongs to a remote "
-                "node while focused on a Slurm job", sig_name, pid,
+                "node while focused on a Slurm job",
+                sig_name,
+                pid,
             )
             return
         try:
@@ -273,9 +291,13 @@ class ProcessRow(Static):
         except ProcessLookupError:
             logger.error("Signal error: process %s no longer exists", pid)
         except PermissionError:
-            logger.error("Signal error: permission denied sending %s to pid %s", sig_name, pid)
+            logger.error(
+                "Signal error: permission denied sending %s to pid %s", sig_name, pid
+            )
         except Exception as e:
-            logger.error("Signal error: failed sending %s to pid %s: %s", sig_name, pid, e)
+            logger.error(
+                "Signal error: failed sending %s to pid %s: %s", sig_name, pid, e
+            )
 
 
 def _process_list_signature(processes: list) -> tuple:
@@ -287,6 +309,8 @@ def _process_list_signature(processes: list) -> tuple:
 
 class GPUProcessList(Static):
     """Scrollable table of processes, one row each, with per-row K/T/I buttons."""
+
+    SIGNAL_HEADER = "[bold] SIGNAL[/]"
 
     DEFAULT_CSS = """
     GPUProcessList {
@@ -325,6 +349,7 @@ class GPUProcessList(Static):
         super().__init__(**kwargs)
         self._last_sig = None
         self._signals_enabled = signals_enabled
+        self._pid_width = PID_MIN_WIDTH
 
     def set_signals_enabled(self, enabled: bool) -> None:
         """Enable/disable signal buttons on current and future rows."""
@@ -336,7 +361,7 @@ class GPUProcessList(Static):
         with Static(id="gpu-process-header"):
             with Horizontal():
                 yield Static("", classes="header-cols")
-                yield Static("[bold] K  T  I[/]", classes="header-buttons")
+                yield Static(self.SIGNAL_HEADER, classes="header-buttons")
         yield Vertical(id="gpu-process-rows")
 
     def on_mount(self) -> None:
@@ -351,8 +376,14 @@ class GPUProcessList(Static):
             header = self.query_one(".header-cols", Static)
         except NoMatches:
             return
-        width = header.content_size.width or (self.content_size.width - SIG_BUTTON_STRIP - 2)
-        header.update(format_process_line({}, max(0, width), header=True))
+        width = header.content_size.width or (
+            self.content_size.width - SIG_BUTTON_STRIP - 2
+        )
+        header.update(
+            format_process_line(
+                {}, max(0, width), header=True, pid_width=self._pid_width
+            )
+        )
 
     def update_processes(self, processes: list) -> None:
         """Replace contents only when the process list (PIDs/names) has changed to avoid flicker."""
@@ -360,13 +391,21 @@ class GPUProcessList(Static):
         if sig == self._last_sig:
             return
         self._last_sig = sig
+        self._pid_width = _pid_width(processes)
+        self._render_header()
         container = self.query_one("#gpu-process-rows", Vertical)
         for child in list(container.children):
             child.remove()
         if not processes:
             return
         for p in processes:
-            container.mount(ProcessRow(p, signals_enabled=self._signals_enabled))
+            container.mount(
+                ProcessRow(
+                    p,
+                    signals_enabled=self._signals_enabled,
+                    pid_width=self._pid_width,
+                )
+            )
 
 
 class GPUWidget(MetricWidget):
@@ -443,14 +482,21 @@ class GPUWidget(MetricWidget):
                 False when the panel shows a remote host's processes (Slurm job
                 focus), where the pids do not refer to local processes.
         """
-        super().__init__(title=title, color=get_rich_color("gpu_ram", "#00FF00"), history_size=history_size, id=id)
+        super().__init__(
+            title=title,
+            color=get_rich_color("gpu_ram", "#00FF00"),
+            history_size=history_size,
+            id=id,
+        )
         self.gpu_ram_history = deque(maxlen=history_size)
         self.gpu_usage_history = deque(maxlen=history_size)
         self.first = True
         self.title = title
         self.border_title = title
         self.usage_is_available = True
-        self._initial_tab = initial_tab if initial_tab in ("plot", "processes") else "plot"
+        self._initial_tab = (
+            initial_tab if initial_tab in ("plot", "processes") else "plot"
+        )
         self.max_val = 1
         self._last_processes = None
         # Raw per-GPU metric dict for the telemetry line, and whether that line
@@ -467,7 +513,8 @@ class GPUWidget(MetricWidget):
                 yield Static("", id="gpu-telemetry", classes="metric-value")
             with TabPane("Processes", id="processes"):
                 yield GPUProcessList(
-                    id="gpu-processes", classes="gpu-processes-pane",
+                    id="gpu-processes",
+                    classes="gpu-processes-pane",
                     signals_enabled=self._signals_enabled,
                 )
 
@@ -533,8 +580,11 @@ class GPUWidget(MetricWidget):
             # and by what. Severe reasons (thermal, power brake) mean lost
             # throughput now; a software power cap is normal under load.
             severe = t.get("throttle_severe")
-            color = (get_rich_color("alert_crit", "#FF0000") if severe
-                     else get_rich_color("alert_warn", "#FFA500"))
+            color = (
+                get_rich_color("alert_crit", "#FF0000")
+                if severe
+                else get_rich_color("alert_warn", "#FFA500")
+            )
             marker = "■" if severe else "▲"
             text = f"{marker} {', '.join(reasons)}"
             segments.append((text, f"[{color}]{text}[/]"))
@@ -571,9 +621,14 @@ class GPUWidget(MetricWidget):
         if state:
             segments.append((str(state), f"[dim]{state}[/]"))
 
-        codec = [(label, value) for label, value in
-                 (("ENC", t.get("enc_percent")), ("DEC", t.get("dec_percent")))
-                 if value]
+        codec = [
+            (label, value)
+            for label, value in (
+                ("ENC", t.get("enc_percent")),
+                ("DEC", t.get("dec_percent")),
+            )
+            if value
+        ]
         for label, value in codec:
             text = f"{label} {value:.0f}%"
             segments.append((text, f"[dim]{text}[/]"))
@@ -692,7 +747,9 @@ class GPUWidget(MetricWidget):
             self.call_after_refresh(self.rerender)
 
         try:
-            self.query_one("#history-plot").update(self.get_dual_plot(plot_width, plot_height))
+            self.query_one("#history-plot").update(
+                self.get_dual_plot(plot_width, plot_height)
+            )
             self.query_one("#current-value").update(
                 self.create_center_bar(
                     self.gpu_ram_history[-1], self.gpu_usage_history[-1], bar_width
@@ -719,7 +776,12 @@ class GPUWidget(MetricWidget):
             pass  # DOM not ready yet; the flag is applied when rows are built
 
     def update_content(
-        self, gpu_name, gpu_usage, mem_used, mem_total, processes=None,
+        self,
+        gpu_name,
+        gpu_usage,
+        mem_used,
+        mem_total,
+        processes=None,
         telemetry=None,
     ):
         """Update plot/bar and optionally the processes list. processes: list of dicts with pid, name, gpu_memory, username, command, script.
@@ -739,7 +801,11 @@ class GPUWidget(MetricWidget):
         n_proc = len(processes) if processes else 0
         logger.info(
             "gpu_name: %s, gpu_usage: %.1f, mem_used_gb: %.2f, mem_total_gb: %.2f, processes_count: %d",
-            gpu_name, gpu_usage, mem_used, mem_total, n_proc,
+            gpu_name,
+            gpu_usage,
+            mem_used,
+            mem_total,
+            n_proc,
         )
         self.rerender()
         if processes is not None:

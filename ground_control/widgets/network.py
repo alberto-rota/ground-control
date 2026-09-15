@@ -5,7 +5,12 @@ from textual.widgets import Static
 from textual.css.query import NoMatches
 from .base import MetricWidget
 import plotext as plt
-from ..utils.formatting import ansi2rich, format_throughput, recolor, substitute_plot_timeframe
+from ..utils.formatting import (
+    ansi2rich,
+    format_throughput,
+    recolor,
+    substitute_plot_timeframe,
+)
 from ..utils.colors import get_rich_color
 
 logger = logging.getLogger("ground-control.network")
@@ -27,23 +32,32 @@ class NetworkIOWidget(MetricWidget):
     @staticmethod
     def download_color() -> str:
         """Colour of the download series — used for both the plot line and the bar."""
-        return get_rich_color("network_plot_download", get_rich_color("network_download", "#FF8C00"))
+        return get_rich_color(
+            "network_plot_download", get_rich_color("network_download", "#FF8C00")
+        )
 
     @staticmethod
     def upload_color() -> str:
         """Colour of the upload series — used for both the plot line and the bar."""
-        return get_rich_color("network_plot_upload", get_rich_color("network_upload", "#00FF00"))
+        return get_rich_color(
+            "network_plot_upload", get_rich_color("network_upload", "#00FF00")
+        )
 
     def __init__(
         self, title: str, id: str = None, color: str = "blue", history_size: int = 120
     ):
-        super().__init__(title=title, color=get_rich_color("default_plot", "#0080FF"), history_size=history_size, id=id)
+        super().__init__(
+            title=title,
+            color=get_rich_color("default_plot", "#0080FF"),
+            history_size=history_size,
+            id=id,
+        )
         self.download_history = deque(maxlen=history_size)
         self.upload_history = deque(maxlen=history_size)
         self.max_net = 100
         self.first = True
         self.title = title
-        self.border_title = title #f"{title}"  # [blue]MB/s[/]"
+        self.border_title = title  # f"{title}"  # [blue]MB/s[/]"
 
     def compose(self) -> ComposeResult:
         yield Static("", id="history-plot", classes="metric-plot")
@@ -82,16 +96,16 @@ class NetworkIOWidget(MetricWidget):
             upload_series = [x + 0.1 for x in self.upload_history]
             download_series = [-x - 0.1 for x in self.download_history]
 
-            # Find the maximum value between uploads and downloads to set symmetric y-axis limits
+            # Symmetric y-axis with bounds following the data in the window, like
+            # the memory and disk panels. A fixed 10 MB/s floor used to squash
+            # everyday sub-10 MB/s traffic into a flat line against the zero axis.
+            # Floor of 1 keeps an idle link (max_value ~0.1 after the offsets)
+            # from collapsing the plot and bar to a bare zero line.
             max_value = max(
                 max(self.upload_history, default=0),
                 max(download_series, key=abs, default=0),
             )
-
-            # Add some padding to the max value
-            y_limit = max_value
-            if y_limit < 10:
-                y_limit = 10
+            y_limit = max(max_value, 1)
             self.max_net = y_limit
 
             # Set y-axis limits symmetrically around zero
@@ -145,13 +159,19 @@ class NetworkIOWidget(MetricWidget):
         """Re-draw plot and bar from stored history at the current region size."""
         if not self.download_history:
             return
-        plot_width, plot_height = self.plot_region("#history-plot", reserve_height=self.BAR_HEIGHT)
+        plot_width, plot_height = self.plot_region(
+            "#history-plot", reserve_height=self.BAR_HEIGHT
+        )
         bar_width, _ = self.region_size("#current-value")
         try:
-            self.query_one("#history-plot").update(self.get_dual_plot(plot_width, plot_height))
+            self.query_one("#history-plot").update(
+                self.get_dual_plot(plot_width, plot_height)
+            )
             self.query_one("#current-value").update(
                 self.create_center_bar(
-                    self.download_history[-1], self.upload_history[-1], total_width=bar_width
+                    self.download_history[-1],
+                    self.upload_history[-1],
+                    total_width=bar_width,
                 )
             )
         except NoMatches:
@@ -165,6 +185,7 @@ class NetworkIOWidget(MetricWidget):
         self.upload_history.append(upload_speed)
         logger.info(
             "download_speed_mb_s: %.2f, upload_speed_mb_s: %.2f",
-            download_speed, upload_speed,
+            download_speed,
+            upload_speed,
         )
         self.rerender()

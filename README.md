@@ -1,8 +1,8 @@
 # 🚀 Ground Control - The Ultimate Terminal System Monitor
 
-![Ground Control Banner](https://github.com/alberto-rota/ground-control/blob/main/assets/hero.gif?raw=true)
+![Ground Control Banner](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/hero.gif)
 
-[![PyPI version](https://badge.fury.io/py/groundcontrol.svg)](https://badge.fury.io/py/groundcontrol)
+[![PyPI version](https://img.shields.io/pypi/v/ground-control-tui.svg)](https://pypi.org/project/ground-control-tui/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.6+](https://img.shields.io/badge/python-3.6+-blue.svg)](https://www.python.org/downloads/)
 
@@ -66,15 +66,15 @@ gc
 
 ### Grid Layout
 A structured layout displaying all widgets neatly in a grid. When you first launch **Ground Control**, it will show this layout — every panel the machine has to offer, on screen at once.
-![Grid Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/hero.gif?raw=true)
+![Grid Layout](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/hero.gif)
 
 ### Horizontal Layout
 All widgets aligned in a single row. If you like working with wide shell spaces, split a TMUX session horizontally and use this layout! The recording below switches grid → horizontal → grid with `g` and `h`, on live data.
-![Horizontal Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/layouts.gif?raw=true)
+![Horizontal Layout](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/layouts.gif)
 
 #### Vertical Layout
 A column-based layout, ideal for narrow shell spaces. If you like working with tall shell spaces, split a TMUX session verticall and use this layout!
-![Vertical Layout](https://github.com/alberto-rota/ground-control/blob/main/assets/vertical.gif?raw=true)
+![Vertical Layout](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/vertical.gif)
 
 ### 🖥️ Widget Breakdown
 Each panel in Ground Control represents a different system metric:
@@ -84,14 +84,14 @@ Each panel in Ground Control represents a different system metric:
 - Displays each core's utilization in a compact bar chart format
 - Updates in real-time with color-coded bars showing load intensity
 
-![CPU widget](https://github.com/alberto-rota/ground-control/blob/main/assets/cpu.gif?raw=true)
+![CPU widget](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/cpu.gif)
 
 ### 🔹 **Memory Utilization**
 - Dual plot showing RAM (positive axis) and SWAP (negative axis) usage in GB
 - Center bar with color-coded sections showing used/free RAM and SWAP
 - Title displays total RAM and SWAP capacity in GB
 
-![Memory widget](https://github.com/alberto-rota/ground-control/blob/main/assets/memory.gif?raw=true)
+![Memory widget](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/memory.gif)
 
 ### 🔹 **Temperature Monitoring**
 - Multi-line plot tracking temperature over time in °C for up to 4 key sensors
@@ -99,7 +99,7 @@ Each panel in Ground Control represents a different system metric:
 - Right panel shows current temperatures with dynamic color bars based on heat levels
 - Prioritizes CPU, GPU, and motherboard sensors
 
-![Temperature widget](https://github.com/alberto-rota/ground-control/blob/main/assets/temperature.gif?raw=true)
+![Temperature widget](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/temperature.gif)
 
 ### 🔹 **Disk I/O**
 - Dual plot showing read (positive axis) and write (negative axis) speeds for each mounted disk/partition
@@ -108,14 +108,14 @@ Each panel in Ground Control represents a different system metric:
 - Each mounted disk/partition gets its own widget (except boot/EFI partitions)
 - Automatically detects and displays all mounted disks and partitions
 
-![Disk widget](https://github.com/alberto-rota/ground-control/blob/main/assets/disk.gif?raw=true)
+![Disk widget](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/disk.gif)
 
 ### 🔹 **Network Traffic**
 - Dual plot showing upload (positive axis) and download (negative axis) speeds
 - Shows current transfer rates with color-coded indicators
 - Tracks cumulative data transfer amounts
 
-![Network widget](https://github.com/alberto-rota/ground-control/blob/main/assets/network.gif?raw=true)
+![Network widget](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/network.gif)
 
 ### 🔹 **GPU Metrics (NVIDIA Only)**
 - Dual plot showing GPU usage % (positive axis) and memory usage GB (negative axis)
@@ -123,7 +123,7 @@ Each panel in Ground Control represents a different system metric:
 - A telemetry line underneath reports power draw against its limit, temperature, SM clock, memory-bandwidth utilization and any clock-throttle reason
 - Shows "Usage UNAV" when GPU utilization cannot be detected
 
-![GPU widget](https://github.com/alberto-rota/ground-control/blob/main/assets/gpu.gif?raw=true)
+![GPU widget](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/gpu.gif)
 
 ### 🔹 **Slurm Jobs**
 Shown automatically wherever `squeue` is on `PATH` — no flag needed (`gc --slurm` shows *only* this panel, like the other widget filters).
@@ -145,7 +145,7 @@ Any panel that crosses a threshold paints its border and prefixes its title with
 - Sensible defaults ship for every metric. GPU utilization is **off** by default — a pegged GPU is usually the goal, not an incident — as are network rates, which have no site-independent ceiling.
 - Press `a` to toggle alerting at runtime; `alerts_enabled`, `alert_sticky_seconds` and `thresholds` persist it.
 
-![Threshold alerts](https://github.com/alberto-rota/ground-control/blob/main/assets/alerts.gif?raw=true)
+![Threshold alerts](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/alerts.gif)
 
 ## 🛠️ Configuring Ground Control
 Ground Control offers extensive customization options to tailor your monitoring experience. You might not want to see all the widgets all at once, or you may want to focus on specific system metrics.
@@ -172,12 +172,12 @@ You can switch between different layouts instantly:
 - Press `h` or click `Horizontal Layout` for single-row alignment
 - Press `v` or click `Vertical Layout` for column-based display
 
-![Settings tab](https://github.com/alberto-rota/ground-control/blob/main/assets/settings.gif?raw=true)
+![Settings tab](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/settings.gif)
 
 ### 🔹 **Themes**
 Twenty built-in palettes ship with Ground Control, dark and light. Pick one in the Settings tab, or press `t` to cycle through them without leaving the dashboard — plots, bars and borders all repaint live.
 
-![Themes](https://github.com/alberto-rota/ground-control/blob/main/assets/themes.gif?raw=true)
+![Themes](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/themes.gif)
 
 ### 🔹 **Editing Individual Colours**
 A theme is a starting point, not a straitjacket. The Settings tab lists every colour key grouped by widget; press **enter** on any of them to open the picker — a hue/shade swatch grid, plus H/S/V steppers for the shade the grid does not have (hold shift for ×10).
@@ -186,7 +186,7 @@ The preview pane on the right is a **real metric widget being fed real data**, n
 
 Save the result as your own named theme from the Settings tab, or with `gc theme --save-as NAME`.
 
-![Colour picker](https://github.com/alberto-rota/ground-control/blob/main/assets/colorpicker.gif?raw=true)
+![Colour picker](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/colorpicker.gif)
 
 ### 🔹 **Persistent Configuration**
 All your customizations are automatically saved when you quit Ground Control. When you launch it again, you'll see the same layout and widget configuration you previously selected, ensuring a consistent monitoring experience.
@@ -242,7 +242,7 @@ Two details worth knowing: throughput figures are *deltas*, so `--once` primes t
 
 For continuous collection, `gc --stream` emits one compact JSON object per line, flushed immediately, until stopped or `--stream-max-seconds` expires.
 
-![gc --once](https://github.com/alberto-rota/ground-control/blob/main/assets/snapshot.gif?raw=true)
+![gc --once](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/snapshot.gif)
 
 ## ⛔ Current Known Limitations/Bugs
 - In heavy-duty HPC systems, with multiple disks, cores and GPUs to be monitored, metric collection and plotting might get bottlenecked and groundcontrol might run slow. Consider **directly editing the config file with a text editor** to avoid 
