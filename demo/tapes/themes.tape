@@ -6,13 +6,13 @@ Output assets/themes.gif
 # whatever this tape set -- a mismatched frame around every other theme.
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 21
+Set FontSize 10
 # Smaller canvas than the other grid tapes on purpose: a theme change repaints
 # every cell on screen, and vhs silently drops capture frames it cannot keep up
 # with -- which does not stretch the GIF, it makes it play fast. Fewer pixels
 # per frame keeps the timing honest.
-Set Width 2040
-Set Height 1200
+Set Width 1020
+Set Height 600
 Set Padding 0
 Set Framerate 20
 Set TypingSpeed 60ms

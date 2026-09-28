@@ -17,8 +17,9 @@ demo/record.sh --no-load    # skip the synthetic load
 | `tapes/*.tape` | One [VHS](https://github.com/charmbracelet/vhs) tape per GIF |
 | `tapes/themes/*.tape` | Generated terminal-colour fragments, one per app theme |
 | `record.sh` | Sets up the environment, starts the load, renders tapes |
-| `loadgen.py` | Synthetic CPU / memory / disk / network / GPU load |
-| `gpu_wave.cu` | The GPU half of it, compiled on demand by `loadgen.py` |
+| `loadgen.py` | Synthetic CPU / memory / disk / network load |
+| `train_load.py` | Real PyTorch training jobs for the GPU (and some CPU) load |
+| `gpu_wave.cu` | Fallback CUDA load if no CUDA torch is available |
 | `prepare_config.py` | Writes each recording's throwaway config |
 | `gen_theme_tapes.py` | Regenerates `tapes/themes/` from `ground_control/themes/` |
 | `retime_gif.py` | Stretches a GIF that lost frames back to its intended length |
@@ -37,18 +38,35 @@ demo/record.sh --no-load    # skip the synthetic load
 
   A userspace copy with no root needed:
   `pip install playwright && playwright install chromium`.
-- **nvcc**, optionally. Without it the GPU generator is skipped and the GPU
-  panel records idle.
+- **nvcc**, optionally. Used only as a fallback GPU load (`gpu_wave.cu`) when
+  no CUDA-enabled PyTorch is available for `train_load.py`.
+- **CUDA PyTorch**, preferred for GPU recordings. `record.sh` looks for
+  `$GC_DEMO_WORK/train-venv` (or `$GC_DEMO_TRAIN_PYTHON`) and runs
+  `train_load.py` — three differently-sized training processes on random
+  tensors, so util / VRAM / power / bandwidth and the process rows look like a
+  real training node.
+
+  ```sh
+  python3.12 -m venv demo/.work/train-venv
+  demo/.work/train-venv/bin/pip install torch setproctitle \
+      --index-url https://download.pytorch.org/whl/cu128
+  ```
 
 ## Why there is a load generator
 
 An idle machine makes a dull recording: flat lines, empty bars, `0%` on
-everything. `loadgen.py` drives every metric the TUI reads with signals built to
-look like real work rather than a test pattern — two sine waves whose periods
-are deliberately non-harmonic (23 s and 7.3 s), plus noise and decaying spikes,
-so nothing repeats inside a 20-second GIF.
+everything. Two processes fill that in:
 
-Two details in there are worth knowing before you change them:
+- **`train_load.py`** runs real PyTorch training steps on synthetic batches
+  (three jobs: `train_resnet`, `train_vit`, `train_llm`). GPU util, VRAM,
+  power, clocks, memory-bandwidth and the process list all come from actual
+  CUDA work — not a duty-cycled burn kernel.
+- **`loadgen.py`** still drives CPU, memory, disk and network with signals
+  built to look like real work rather than a test pattern — two sine waves
+  whose periods are deliberately non-harmonic (23 s and 7.3 s), plus noise and
+  decaying spikes, so nothing repeats inside a 20-second GIF.
+
+Two details in the CPU generator are worth knowing before you change them:
 
 - **`PHASE_SPREAD`** controls how far the per-core CPU phases are spread. At
   `1.0` the heatmap ripples beautifully and the *aggregate* CPU trace flattens
@@ -117,7 +135,11 @@ shrinks the text and adds columns; scaling the font alone drops columns until a
 panel gives up and prints `too small`. The current tapes are a 1.5× pass over
 the originals (font 14 → 21 for the grid tapes, 15 → 22 for the single-panel
 ones), verified by probe: font 14 @1500×900 and font 21 @2250×1350 both give
-48 rows.
+48 rows. The current checked-in tapes are a further **½×** pass (font ~10–11,
+canvas ~1126×676 for the grid tapes) so the README can put two GIFs side by
+side in a table without dominating the page. Width and Height must stay
+**even** — vhs's ffmpeg pipeline is yuv420p, and an odd canvas fails the
+encode with a silent zero-byte GIF.
 
 More pixels per frame is also more work per captured frame, which is the main
 way a GIF ends up short — see below. If you scale up much further, expect to

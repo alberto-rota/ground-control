@@ -3,11 +3,11 @@ Output assets/cpu.gif
 
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 22
-Set Width 1936
-Set Height 852
-Set Padding 18
-Set BorderRadius 10
+Set FontSize 11
+Set Width 968
+Set Height 426
+Set Padding 9
+Set BorderRadius 5
 Set Framerate 20
 Set TypingSpeed 60ms
 
@@ -27,8 +27,9 @@ Hide
 Sleep 122s
 Show
 
-# The load generator drives each core with a phase-shifted duty cycle, so the
-# heatmap ripples rather than flickering at random.
+# The load generator drives each core with a phase-shifted duty cycle, and
+# train_load.py adds real PyTorch workers on top, so the heatmap ripples
+# rather than flickering at random.
 Sleep 8s
 
 # Panel bindings need the panel focused first.

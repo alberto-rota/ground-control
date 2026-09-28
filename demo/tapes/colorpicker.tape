@@ -3,11 +3,11 @@ Output assets/colorpicker.gif
 
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 21
-Set Width 2250
-Set Height 1350
-Set Padding 18
-Set BorderRadius 10
+Set FontSize 10
+Set Width 1126
+Set Height 676
+Set Padding 9
+Set BorderRadius 5
 Set Framerate 20
 Set TypingSpeed 60ms
 

@@ -3,11 +3,11 @@ Output assets/hero.gif
 
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 21
-Set Width 2250
-Set Height 1350
-Set Padding 18
-Set BorderRadius 10
+Set FontSize 10
+Set Width 1126
+Set Height 676
+Set Padding 9
+Set BorderRadius 5
 Set Framerate 20
 Set TypingSpeed 60ms
 
@@ -31,8 +31,8 @@ Hide
 Sleep 122s
 Show
 
-# The waveform's slow component has a 23s period, so 20s of frames never
-# repeats itself.
+# The training load's util waveform has a 23s slow component, so 20s of
+# frames never repeats itself.
 Sleep 20s
 
 Hide

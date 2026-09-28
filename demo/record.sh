@@ -15,7 +15,7 @@
 # background load generator, and the environment every tape needs.
 #
 # Requirements: vhs (which needs ttyd, ffmpeg and a Chromium binary), a
-# JetBrains Mono Nerd Font, and optionally nvcc for the GPU load.
+# JetBrains Mono Nerd Font, and optionally a CUDA PyTorch for the training load.
 
 set -euo pipefail
 
@@ -138,7 +138,12 @@ unset COLUMNS LINES
 # --------------------------------------------------------------------------- #
 
 LOAD_PID=""
+TRAIN_PID=""
 cleanup() {
+  if [[ -n "$TRAIN_PID" ]] && kill -0 "$TRAIN_PID" 2>/dev/null; then
+    kill -TERM "$TRAIN_PID" 2>/dev/null || true
+    wait "$TRAIN_PID" 2>/dev/null || true
+  fi
   if [[ -n "$LOAD_PID" ]] && kill -0 "$LOAD_PID" 2>/dev/null; then
     kill -TERM "$LOAD_PID" 2>/dev/null || true
     wait "$LOAD_PID" 2>/dev/null || true
@@ -157,13 +162,42 @@ if [[ $WITH_LOAD -eq 1 ]]; then
   # the motherboard sensor towards its own 80C warning line, and a recording in
   # which every panel is alerting demonstrates nothing.
   #
+  # GPU load is owned by train_load.py (real PyTorch steps), so loadgen only
+  # drives the non-GPU generators here.
+  #
   # Do not run two of these at once. Two concurrent renders halve each other's
   # capture rate, and the symptom -- every GIF exactly half its intended length
   # -- looks convincingly like a load problem instead of what it is.
   "$PYTHON" "$DEMO_DIR/loadgen.py" --profile "$PROFILE" \
+    --only cpu,mem,disk,net \
     --workdir "$WORK_DIR/load" --intensity "0.8,cpu=0.55" \
-    --max-mem-gb 12 --vram-gb 30 --gpu-workers 3 &
+    --max-mem-gb 12 &
   LOAD_PID=$!
+
+  # Real ML training for the GPU panel: three differently-sized jobs so the
+  # process rows, VRAM split, util/power/bandwidth and telemetry all look like
+  # a training node rather than a duty-cycled CUDA kernel.
+  TRAIN_PY="${GC_DEMO_TRAIN_PYTHON:-}"
+  if [[ -z "$TRAIN_PY" && -x "$WORK_DIR/train-venv/bin/python" ]]; then
+    TRAIN_PY="$WORK_DIR/train-venv/bin/python"
+  fi
+  if [[ -n "$TRAIN_PY" ]] && "$TRAIN_PY" -c "import torch" 2>/dev/null; then
+    echo "==> starting ML training load ($TRAIN_PY)"
+    "$TRAIN_PY" "$DEMO_DIR/train_load.py" \
+      --workers 3 --vram-gb "${GC_DEMO_VRAM_GB:-12}" --batch-base 80 &
+    TRAIN_PID=$!
+  else
+    echo "==> no CUDA torch found; falling back to gpu_wave via loadgen" >&2
+    # Restart loadgen with GPU included if training is unavailable.
+    kill -TERM "$LOAD_PID" 2>/dev/null || true
+    wait "$LOAD_PID" 2>/dev/null || true
+    "$PYTHON" "$DEMO_DIR/loadgen.py" --profile "$PROFILE" \
+      --workdir "$WORK_DIR/load" --intensity "0.8,cpu=0.55" \
+      --max-mem-gb 12 --vram-gb 30 --gpu-workers 3 &
+    LOAD_PID=$!
+    TRAIN_PID=""
+  fi
+
   # Let the plots fill with history before the first frame is captured;
   # otherwise every GIF opens on an empty chart that fills in as it plays.
   echo "==> priming metric history (25s)"

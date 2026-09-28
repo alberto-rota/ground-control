@@ -3,11 +3,11 @@ Output assets/snapshot.gif
 
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 24
-Set Width 1860
-Set Height 1110
-Set Padding 21
-Set BorderRadius 10
+Set FontSize 12
+Set Width 930
+Set Height 556
+Set Padding 10
+Set BorderRadius 5
 Set Framerate 20
 Set TypingSpeed 45ms
 

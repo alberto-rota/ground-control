@@ -3,11 +3,11 @@ Output assets/temperature.gif
 
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 22
-Set Width 1936
-Set Height 822
-Set Padding 18
-Set BorderRadius 10
+Set FontSize 11
+Set Width 968
+Set Height 412
+Set Padding 9
+Set BorderRadius 5
 Set Framerate 20
 Set TypingSpeed 60ms
 

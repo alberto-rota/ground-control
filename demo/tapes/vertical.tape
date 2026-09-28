@@ -3,14 +3,14 @@ Output assets/vertical.gif
 
 Source demo/tapes/themes/gruvbox.tape
 Set FontFamily "JetBrainsMono Nerd Font Mono"
-Set FontSize 20
+Set FontSize 10
 # Tall and narrow, i.e. one side of a vertical tmux split. Six panels in a
 # column need the height: in a landscape terminal they get ~7 rows each and the
 # plots collapse, which is what layouts.tape avoids showing.
-Set Width 1324
-Set Height 1846
-Set Padding 18
-Set BorderRadius 10
+Set Width 662
+Set Height 924
+Set Padding 9
+Set BorderRadius 5
 Set Framerate 20
 Set TypingSpeed 60ms
 
