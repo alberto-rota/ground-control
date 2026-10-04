@@ -122,6 +122,13 @@ enough that the demo load reliably breaches them (on a healthy machine the
 shipped defaults are never crossed, which would make `snapshot.tape` a demo of
 `--check` that only ever prints `0`).
 
+## Why the `gc` shim unsets `NO_COLOR`
+
+vhs/ttyd export `NO_COLOR=1` into the recorded session. Textual treats that as
+a hard switch to monochrome (`App.no_color` → greyscale filter), so every GIF
+would come out black-and-white even with a colourful theme applied. The `gc`
+shim clears `NO_COLOR` (and ensures `COLORTERM=truecolor`) before exec.
+
 ## Resolution, and the one rule about geometry
 
 `Width` and `Height` are pixels, but what the app actually lays out against is

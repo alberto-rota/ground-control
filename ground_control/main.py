@@ -367,6 +367,14 @@ def get_default_config():
     }
 
 @cli.command()
+def mcp():
+    """Serve read-only local hardware metrics over MCP (stdio)."""
+    from .mcp import serve
+
+    serve()
+
+
+@cli.command()
 @click.option('--reset', is_flag=True, help='Reset configuration to default values')
 @click.option('--path', is_flag=True, help='Display the path of the config file')
 def config(reset, path):

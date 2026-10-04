@@ -113,6 +113,11 @@ SHIM_DIR="$WORK_DIR/bin"
 mkdir -p "$SHIM_DIR"
 cat > "$SHIM_DIR/gc" <<EOF
 #!/bin/sh
+# vhs/ttyd exports NO_COLOR=1 into the session. Textual reads that and
+# converts the whole app to monochrome (see textual.app.App.no_color), which
+# is why recordings came out black-and-white despite a colourful theme.
+unset NO_COLOR
+export COLORTERM="\${COLORTERM:-truecolor}"
 exec "$VENV/bin/gc" "\$@"
 EOF
 cat > "$SHIM_DIR/gc-prepare" <<EOF
@@ -123,6 +128,11 @@ exec "$VENV/bin/python" "$DEMO_DIR/prepare_config.py" "\$@"
 EOF
 chmod +x "$SHIM_DIR/gc" "$SHIM_DIR/gc-prepare"
 export PATH="$SHIM_DIR:$PATH"
+
+# Belt-and-braces for anything else the tapes invoke (python probes, etc.).
+unset NO_COLOR
+export COLORTERM="${COLORTERM:-truecolor}"
+
 
 # Every recording gets a fresh config tree. Nothing under the user's real
 # ~/.config is read or written for the whole run.

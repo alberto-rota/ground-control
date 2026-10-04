@@ -31,6 +31,7 @@ I use it inside [tmux](https://github.com/tmux/tmux), and I have run it in Windo
 - [Themes and colours](#themes-and-colours)
 - [Settings](#settings)
 - [Scripting and health checks](#scripting-and-health-checks)
+- [MCP for AI clients](#mcp-for-ai-clients)
 - [Keyboard](#keyboard)
 - [Where things are saved](#where-things-are-saved)
 - [CLI reference](#cli-reference)
@@ -204,6 +205,38 @@ Rates are deltas, so `--once` samples twice and prints the second reading. `--in
 The dashboard's mount filter applies here too. `--all-mounts` includes the ones that are normally hidden.
 
 `gc --stream` flushes every line, so a reader can sit on `readline`. It stops on `SIGTERM`, `SIGINT`, `SIGHUP`, a closed stdout, or `--stream-max-seconds` (an hour, unless you pass `0`).
+
+## MCP for AI clients
+
+An MCP client can launch the local stdio server through `uvx`, without a separate `gc` install. Until a release containing MCP support is published, install directly from the repository:
+
+```json
+{
+  "mcpServers": {
+    "ground-control": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/alberto-rota/ground-control.git", "gc", "mcp"]
+    }
+  }
+}
+```
+
+OpenCode uses a different configuration shape. Add this under `mcp` in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "ground-control": {
+      "type": "local",
+      "command": ["uvx", "--from", "git+https://github.com/alberto-rota/ground-control.git", "gc", "mcp"]
+    }
+  }
+}
+```
+
+Once MCP support is on PyPI, replace the Git URL with `ground-control-tui`. `uvx` downloads and caches the package on first launch; later launches reuse the cache. For a local checkout use its absolute path after `--from`, or, if `gc` is installed, launch `gc mcp` directly. Use an absolute path to `uvx` if your MCP client does not inherit your shell's `PATH`. Restart your MCP client after changing its configuration.
+
+`get_hardware_status` returns a compact, current health summary with alerts. `get_hardware_metrics` returns the full JSON snapshot, or just one family with `section` set to `cpu`, `memory`, `disk`, `network`, `gpu`, or `temperature_c`. Readings come from the machine running the MCP server, with the same GPU allocation visibility, alert thresholds and disk ignore list as `gc --once`. The first request primes the I/O counters; subsequent requests reuse the collector. No dashboard needs to be running. The server only reads metrics and exits when the client closes its connection.
 
 ## Keyboard
 
