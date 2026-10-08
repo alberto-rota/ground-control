@@ -367,11 +367,18 @@ def get_default_config():
     }
 
 @cli.command()
-def mcp():
-    """Serve read-only local hardware metrics over MCP (stdio)."""
-    from .mcp import serve
+@click.option('--all-gpus', is_flag=True,
+              help='Report every GPU, ignoring CUDA_VISIBLE_DEVICES')
+@click.option('--all-mounts', is_flag=True,
+              help='Report every mount, including disk_ignore_prefixes')
+@click.option('--no-slurm', is_flag=True,
+              help='Do not offer the Slurm job tools even if squeue is available')
+def mcp(all_gpus, all_mounts, no_slurm):
+    """Serve read-only hardware metrics and Slurm job info over MCP (stdio)."""
+    from .mcp import MetricsProvider, serve
 
-    serve()
+    serve(provider=MetricsProvider(all_gpus=all_gpus, all_mounts=all_mounts),
+          slurm_enabled=False if no_slurm else None)
 
 
 @cli.command()

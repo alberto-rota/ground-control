@@ -236,7 +236,22 @@ OpenCode uses a different configuration shape. Add this under `mcp` in `~/.confi
 
 Once MCP support is on PyPI, replace the Git URL with `ground-control-tui`. `uvx` downloads and caches the package on first launch; later launches reuse the cache. For a local checkout use its absolute path after `--from`, or, if `gc` is installed, launch `gc mcp` directly. Use an absolute path to `uvx` if your MCP client does not inherit your shell's `PATH`. Restart your MCP client after changing its configuration.
 
-`get_hardware_status` returns a compact, current health summary with alerts. `get_hardware_metrics` returns the full JSON snapshot, or just one family with `section` set to `cpu`, `memory`, `disk`, `network`, `gpu`, or `temperature_c`. Readings come from the machine running the MCP server, with the same GPU allocation visibility, alert thresholds and disk ignore list as `gc --once`. The first request primes the I/O counters; subsequent requests reuse the collector. No dashboard needs to be running. The server only reads metrics and exits when the client closes its connection.
+Every tool only reads. None of them can cancel, signal or change anything.
+
+| Tool | What it returns |
+|---|---|
+| `get_hardware_status` | Compact current health: alerts, CPU, RAM, disks, network, and GPUs with power and bandwidth. |
+| `get_hardware_metrics` | The full JSON snapshot, or one family with `section` (`cpu`, `memory`, `disk`, `network`, `gpu`, `temperature_c`). |
+| `sample_hardware` | Min/mean/max/last over a short window (`duration_seconds`, `interval_seconds`), plus every alert seen during it. Use it for "is this busy?" questions, because single readings fluctuate. |
+| `diagnose_gpus` | Interpreted findings per GPU: input-starved, throttled, VRAM nearly full, idle but holding memory, hot, or genuinely busy. Pass `job_id` to diagnose a Slurm job's GPUs. |
+| `get_alert_thresholds` | The warn/crit limits in effect, their direction, and the ignored mounts. |
+| `list_slurm_jobs` | Your jobs (or another `user`'s), running first, with GPUs, time used and pending reason. Filter with `state`. |
+| `get_slurm_job` | One job's allocation, whether it is still running (and its final state if it ended), and live `sstat` usage. |
+| `get_slurm_job_metrics` | A snapshot taken *inside* a running job through `srun --overlap`, so the CPUs and GPUs are the job's own. Each call takes a few seconds. |
+
+The three Slurm tools are offered only when `squeue` is on `PATH`; `gc mcp --no-slurm` hides them. The server also provides three prompts, which clients show as slash commands: `diagnose_slow_machine`, `diagnose_gpu_job` (optional `job_id`) and `explain_alerts`.
+
+Local readings come from the machine running the MCP server, with the same GPU allocation visibility, alert thresholds and disk ignore list as `gc --once`. `--all-gpus` and `--all-mounts` widen them, as they do for `gc --once`. On a cluster that machine is usually a login node, so use the Slurm tools to see a job's GPUs. The collector stays alive between calls. After 10 seconds idle the I/O counters are primed again, so rates always describe the present rather than the gap. No dashboard needs to be running. The server exits when the client closes its connection.
 
 ## Keyboard
 
