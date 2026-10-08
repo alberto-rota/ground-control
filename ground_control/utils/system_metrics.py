@@ -1206,9 +1206,19 @@ class SystemMetrics:
                                 pass
                             cpu_pct = None
                             mem_str = ""
+                            cwd = ""
                             try:
                                 host = proc.host
                                 if host is not NA and host is not None:
+                                    try:
+                                        raw_cwd = host.cwd()
+                                        cwd = (
+                                            ""
+                                            if raw_cwd is NA or not raw_cwd
+                                            else str(raw_cwd)
+                                        )
+                                    except Exception:
+                                        cwd = ""
                                     cp = host.cpu_percent()
                                     cpu_pct = (
                                         f"{cp:.1f}%"
@@ -1244,6 +1254,7 @@ class SystemMetrics:
                                     "username": username,
                                     "command": command or "",
                                     "script": script or command[:80] if command else "",
+                                    "cwd": cwd,
                                     "cpu_percent": cpu_pct,
                                     "memory": mem_str,
                                 }

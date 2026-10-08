@@ -34,6 +34,8 @@ logger = logging.getLogger("ground-control.gpu")
 PROC_COLUMNS = (
     ("username", "USER", 10, "left", 3),
     ("pid", "PID", 3, "right", None),
+    # Launch folder survives longer than USER: it is why the row is here.
+    ("launch_dir", "DIR", 18, "left", 4),
 )
 PID_MIN_WIDTH = 3
 COL_GAP = 1
@@ -51,7 +53,20 @@ def _proc_value(process: dict, key: str) -> str:
         return str(process.get("pid", ""))
     if key == "username":
         return str(process.get("username") or "-")
+    if key == "launch_dir":
+        return _launch_dir_name(process.get("cwd"))
     return ""
+
+
+def _launch_dir_name(cwd) -> str:
+    """Basename of the directory the process was launched from."""
+    path = str(cwd or "").strip()
+    if not path:
+        return "-"
+    stripped = path.rstrip("/")
+    if not stripped:
+        return "/"
+    return stripped.rsplit("/", 1)[-1]
 
 
 def _proc_command(process: dict) -> str:

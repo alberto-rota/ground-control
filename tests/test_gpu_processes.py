@@ -1,6 +1,7 @@
 from ground_control.utils.system_metrics import _gpu_process_command_fields
 from ground_control.widgets.gpu import (
     PROC_COLUMNS,
+    _launch_dir_name,
     _pid_width,
     _proc_command,
     format_process_line,
@@ -58,10 +59,31 @@ def test_gpu_process_header_prioritizes_command_over_gpu_memory():
     assert "GPU MEM" not in header
     assert "CPU" not in header
     assert "HOST" not in header
-    assert [column[1] for column in PROC_COLUMNS] == ["USER", "PID"]
+    assert [column[1] for column in PROC_COLUMNS] == ["USER", "PID", "DIR"]
     assert "COMMAND" in header
+    assert "DIR" in header
     assert next(column[2] for column in PROC_COLUMNS if column[0] == "pid") == 3
     assert all(column[0] != "gpu_memory" for column in PROC_COLUMNS)
+
+
+def test_gpu_process_line_shows_launch_folder_name():
+    line = format_process_line(
+        {
+            "pid": 12,
+            "username": "alice",
+            "cwd": "/home/alice/experiments/",
+            "script": "train.py",
+        },
+        80,
+    )
+    assert "experiments" in line
+    assert "train.py" in line
+    assert "/home/alice" not in line
+
+
+def test_gpu_process_launch_folder_missing_is_a_dash():
+    assert _launch_dir_name("") == "-"
+    assert _launch_dir_name("/") == "/"
 
 
 def test_gpu_process_pid_width_matches_largest_pid():

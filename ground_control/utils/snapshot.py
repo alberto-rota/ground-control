@@ -200,6 +200,7 @@ def _gpu_section(gpus) -> List[Dict]:
                     "username": proc.get("username"),
                     "command": proc.get("command"),
                     "script": proc.get("script"),
+                    "cwd": proc.get("cwd"),
                     "cpu_percent": proc.get("cpu_percent"),
                     "memory": proc.get("memory"),
                 }
