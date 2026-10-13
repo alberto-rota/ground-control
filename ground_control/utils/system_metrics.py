@@ -1,4 +1,5 @@
 import psutil
+import socket
 import platform
 import time
 import os
@@ -226,6 +227,143 @@ def _parse_visible_gpu_spec(spec: Optional[str]) -> Optional[object]:
     return {"indices": indices, "uuids": uuids, "order": order}
 
 
+# Where a GPU allocation can be read from. CUDA_VISIBLE_DEVICES (and ROCm-era
+# GPU_DEVICE_ORDINAL) may be *relative* -- Slurm renumbers them from 0 when its
+# cgroup plugin constrains devices -- while SLURM_STEP_GPUS / SLURM_JOB_GPUS are
+# always the node's physical indices. Step before job: a step can hold a subset.
+_CUDA_GPU_VARS = ("CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL")
+_SLURM_GPU_VARS = ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS")
+
+
+def _first_var(environ, names):
+    for name in names:
+        if name in environ:
+            return name
+    return None
+
+
+def _fits_devices(spec, device_count) -> bool:
+    """Whether every index in ``spec`` names a device NVML enumerated."""
+    return device_count is None or all(i < device_count for i in spec["indices"])
+
+
+def _slurm_env_is_local(environ, hostname: str) -> bool:
+    """Whether the ``SLURM_*`` variables describe *this* machine.
+
+    Inside a batch script or job step ``SLURMD_NODENAME`` is set and they do.
+    In an ``salloc`` shell left on the login node they describe the compute
+    node instead, and GPU 1 there says nothing about GPU 1 here.
+    """
+    if environ.get("SLURMD_NODENAME"):
+        return True
+    nodelist = environ.get("SLURM_JOB_NODELIST") or environ.get("SLURM_NODELIST")
+    if not nodelist:
+        return True
+    from .slurm import expand_nodelist
+
+    short = (hostname or "").split(".")[0]
+    nodes = [n.split(".")[0] for n in expand_nodelist(nodelist)]
+    return not nodes or short in nodes
+
+
+def resolve_gpu_scope(environ, device_count: Optional[int] = None,
+                      hostname: str = "", job_lookup=None) -> Dict:
+    """Decide which GPUs this session is allocated, and say why.
+
+    Returns ``{"filter", "source", "spec", "note"}`` where ``filter`` is what
+    :func:`_parse_visible_gpu_spec` returns (``None`` = every device NVML sees).
+
+    The hard case this exists for is a node where NVML can see *every* GPU but
+    the job holds one. That happens when Slurm does not constrain devices
+    (``ConstrainDevices=no``), for an ssh session adopted into a job, and for
+    a step whose ``CUDA_VISIBLE_DEVICES`` is relative while the device list is
+    not. ``device_count`` -- how many GPUs NVML enumerated -- is what tells the
+    cases apart:
+
+    * physical indices that do not fit the enumerated devices mean the node is
+      already restricted to the allocation (a renumbered cgroup), so every
+      visible device *is* the allocation;
+    * a relative ``CUDA_VISIBLE_DEVICES`` that disagrees with Slurm's physical
+      indices, while NVML sees more devices than were allocated, means the
+      relative numbers would pick the wrong card -- trust Slurm's;
+    * with no variables at all, ``job_lookup()`` (``scontrol show job -d``)
+      can still name the physical indices, as ``(job_id, indices)``.
+    """
+    scope = {"filter": None, "source": None, "spec": None, "note": None}
+    cuda_var = _first_var(environ, _CUDA_GPU_VARS)
+    slurm_var = _first_var(environ, _SLURM_GPU_VARS)
+    if slurm_var and not _slurm_env_is_local(environ, hostname):
+        slurm_var = None
+    cuda = _parse_visible_gpu_spec(environ.get(cuda_var)) if cuda_var else None
+    slurm = _parse_visible_gpu_spec(environ.get(slurm_var)) if slurm_var else None
+
+    def physical(spec, source, raw):
+        """Apply a spec of physical indices, unless devices are already scoped."""
+        if spec == "none":
+            return {**scope, "filter": "none", "source": source, "spec": raw,
+                    "note": "the allocation holds no GPUs"}
+        if spec["uuids"]:
+            return {**scope, "filter": spec, "source": source, "spec": raw}
+        if device_count is not None and (
+                not _fits_devices(spec, device_count)
+                or device_count <= len(spec["indices"])):
+            return {**scope, "source": source, "spec": raw,
+                    "note": (f"{device_count} GPU(s) visible for {len(spec['indices'])} "
+                             "allocated: devices are already restricted to the "
+                             "allocation, so all visible GPUs are shown")}
+        return {**scope, "filter": spec, "source": source, "spec": raw}
+
+    if cuda_var:
+        raw = environ.get(cuda_var)
+        if cuda == "none" or cuda["uuids"]:
+            return {**scope, "filter": cuda, "source": cuda_var, "spec": raw}
+        if (isinstance(slurm, dict) and not slurm["uuids"]
+                and len(slurm["indices"]) == len(cuda["indices"])
+                and slurm["indices"] != cuda["indices"]
+                and device_count is not None
+                and device_count > len(slurm["indices"])
+                and _fits_devices(slurm, device_count)):
+            return {**scope, "filter": slurm, "source": slurm_var,
+                    "spec": environ.get(slurm_var),
+                    "note": (f"{cuda_var}={raw} is numbered relative to the job, but "
+                             f"all {device_count} GPUs on the node are visible; using "
+                             f"the physical indices in {slurm_var}")}
+        if device_count is not None and not _fits_devices(cuda, device_count):
+            return {**scope, "source": cuda_var, "spec": raw,
+                    "note": (f"{cuda_var}={raw} names devices beyond the "
+                             f"{device_count} visible: they are already restricted, "
+                             "so all visible GPUs are shown")}
+        return {**scope, "filter": cuda, "source": cuda_var, "spec": raw}
+
+    if slurm_var:
+        return physical(slurm, slurm_var, environ.get(slurm_var))
+
+    # Not for an salloc shell on the login node: the controller can only name
+    # GPUs on the job's own nodes, and asking costs a blocking subprocess at
+    # startup that is certain to come back empty.
+    if job_lookup is not None and _slurm_env_is_local(environ, hostname):
+        try:
+            found = job_lookup()
+        except Exception:  # noqa: BLE001 - a slow controller must not stop startup
+            found = None
+        if found:
+            job_id, indices = found
+            if indices is not None:
+                spec_text = ",".join(str(i) for i in indices)
+                spec = _parse_visible_gpu_spec(spec_text) if indices else "none"
+                return physical(spec, f"scontrol (job {job_id})", spec_text)
+    return scope
+
+
+def _current_username() -> Optional[str]:
+    try:
+        import getpass
+
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 - no passwd entry in some containers
+        return None
+
+
 def _gpu_process_command_fields(cmdline, process_name="", raw_command=""):
     """Return useful command and script labels from a process argv.
 
@@ -291,6 +429,10 @@ class SystemMetrics:
         self.prev_cpu_stats_time = time.time()
         self.prev_cgroup_cpu = None
         self._initialize_counters()
+        # Which GPUs this session is allocated, and why -- filled in by
+        # _get_all_gpu_devices and published in snapshots as "gpu_scope".
+        self.gpu_scope: Dict = {"source": None, "spec": None, "note": None,
+                                "detected": 0, "visible": [], "restricted": False}
         self.devices = (
             self._get_all_gpu_devices() if (NVML_AVAILABLE and NVITOP_AVAILABLE) else []
         )
@@ -1043,6 +1185,168 @@ class SystemMetrics:
 
         return {"download_speed": download_speed, "upload_speed": upload_speed}
 
+    def get_network_details(self) -> Dict:
+        """Interfaces, listening services, connection counts and TCP health.
+
+        Rates here are per-interface and kept on their own counters, separate
+        from :meth:`get_network_metrics`, so the two never steal each other's
+        deltas. Socket enumeration is the expensive part (it walks every
+        process's fd table) and is refreshed every ``SOCKET_REFRESH_SECONDS``;
+        ``sockets_age_seconds`` says how old that part is.
+        """
+        from . import network_details as nd
+
+        now = time.time()
+        if not hasattr(self, "_net_detail_state"):
+            self._net_detail_state = {"nic": None, "nic_time": now, "tcp": None,
+                                      "tcp_time": now, "sockets": None,
+                                      "sockets_time": 0.0}
+        state = self._net_detail_state
+
+        interfaces = self._interface_details(state, now)
+        iface_by_ip = {ip.split("/")[0]: i["name"]
+                       for i in interfaces for ip in i.get("ipv4", []) + i.get("ipv6", [])}
+
+        snmp = nd.parse_proc_net_snmp(_read_text("/proc/net/snmp") or "").get("Tcp")
+        tcp = nd.tcp_health(state["tcp"], snmp, now - state["tcp_time"])
+        state["tcp"], state["tcp_time"] = snmp, now
+
+        if (state["sockets"] is None
+                or now - state["sockets_time"] >= nd.SOCKET_REFRESH_SECONDS):
+            state["sockets"] = self._socket_details(iface_by_ip)
+            state["sockets_time"] = now
+        sockets = state["sockets"]
+        return {
+            "interfaces": nd.sort_interfaces(interfaces),
+            "listening": sockets["listening"],
+            "listening_summary": nd.summarize_listeners(sockets["listening"]),
+            "connections": sockets["connections"],
+            "tcp": tcp,
+            "sockets_age_seconds": round(now - state["sockets_time"], 1),
+        }
+
+    @staticmethod
+    def _interface_details(state: Dict, now: float) -> List[Dict]:
+        from . import network_details as nd
+
+        try:
+            stats = psutil.net_if_stats()
+        except Exception:  # noqa: BLE001
+            stats = {}
+        try:
+            addrs = psutil.net_if_addrs()
+        except Exception:  # noqa: BLE001
+            addrs = {}
+        try:
+            counters = psutil.net_io_counters(pernic=True)
+        except Exception:  # noqa: BLE001
+            counters = {}
+        previous, elapsed = state["nic"], max(now - state["nic_time"], 1e-6)
+        state["nic"], state["nic_time"] = counters, now
+
+        interfaces = []
+        for name in sorted(set(stats) | set(counters)):
+            if name == "lo":
+                continue  # loopback traffic is this host talking to itself
+            stat = stats.get(name)
+            ipv4, ipv6, mac = [], [], None
+            for addr in addrs.get(name, []):
+                family = getattr(addr, "family", None)
+                if family == socket.AF_INET:
+                    ipv4.append(addr.address)
+                elif family == socket.AF_INET6:
+                    if not addr.address.lower().startswith("fe80"):
+                        ipv6.append(addr.address.split("%", 1)[0])
+                elif family == getattr(psutil, "AF_LINK", None):
+                    mac = addr.address
+            entry = {
+                "name": name,
+                "kind": nd.interface_kind(name),
+                "is_up": bool(stat.isup) if stat else None,
+                # psutil reports 0 where the driver does not know (virtual links).
+                "speed_mbit": (stat.speed or None) if stat else None,
+                "mtu": stat.mtu if stat else None,
+                "ipv4": ipv4,
+                "ipv6": ipv6,
+                "mac": mac,
+                "rx_mbps": None,
+                "tx_mbps": None,
+                "errors_per_s": None,
+                "drops_per_s": None,
+            }
+            now_c, old_c = counters.get(name), (previous or {}).get(name)
+            if now_c is not None and old_c is not None:
+                def per_s(new, old, scale=1.0):
+                    return round(max(new - old, 0) / scale / elapsed, 3)
+                entry["rx_mbps"] = per_s(now_c.bytes_recv, old_c.bytes_recv, 1024**2)
+                entry["tx_mbps"] = per_s(now_c.bytes_sent, old_c.bytes_sent, 1024**2)
+                entry["errors_per_s"] = per_s(now_c.errin + now_c.errout,
+                                              old_c.errin + old_c.errout)
+                entry["drops_per_s"] = per_s(now_c.dropin + now_c.dropout,
+                                             old_c.dropin + old_c.dropout)
+            interfaces.append(entry)
+        return interfaces
+
+    def _socket_details(self, iface_by_ip: Dict[str, str]) -> Dict:
+        """Listening sockets (with owners where visible) and TCP state counts.
+
+        Without root, psutil can attribute a socket only to *our own*
+        processes; other users' listeners still appear, with pid None. That is
+        the honest answer, and still useful: the port is taken and exposed.
+        """
+        from . import network_details as nd
+
+        try:
+            conns = psutil.net_connections(kind="inet")
+        except Exception as err:  # noqa: BLE001
+            logger.info("net_connections failed: %s", err)
+            return {"listening": [], "connections": {}}
+        me = _current_username()
+        owners: Dict[int, tuple] = {}
+
+        def owner(pid):
+            if pid is None:
+                return None, None
+            if pid not in owners:
+                try:
+                    proc = psutil.Process(pid)
+                    owners[pid] = (proc.name(), proc.username())
+                except psutil.Error:
+                    owners[pid] = (None, None)
+            return owners[pid]
+
+        rows, states = [], {}
+        for conn in conns:
+            proto = "tcp" if conn.type == socket.SOCK_STREAM else "udp"
+            if proto == "tcp":
+                states[conn.status] = states.get(conn.status, 0) + 1
+            listening = (conn.status == psutil.CONN_LISTEN if proto == "tcp"
+                         else not conn.raddr)
+            if not listening or not conn.laddr:
+                continue
+            name, user = owner(conn.pid)
+            address, port = conn.laddr.ip, conn.laddr.port
+            rows.append({
+                "proto": proto + ("6" if conn.family == socket.AF_INET6 else ""),
+                "address": address,
+                "port": port,
+                "exposure": nd.exposure_of(address, iface_by_ip),
+                "pid": conn.pid,
+                "process": name,
+                "username": user,
+                "mine": bool(user and me and user == me),
+                "service_hint": nd.service_hint(port, proto),
+            })
+        connections = {
+            "established": states.get(psutil.CONN_ESTABLISHED, 0),
+            "listen": states.get(psutil.CONN_LISTEN, 0),
+            "time_wait": states.get(psutil.CONN_TIME_WAIT, 0),
+            "close_wait": states.get(psutil.CONN_CLOSE_WAIT, 0),
+            "syn_sent": states.get(psutil.CONN_SYN_SENT, 0),
+            "tcp_total": sum(states.values()),
+        }
+        return {"listening": nd.merge_listeners(rows), "connections": connections}
+
     def _get_pids_on_device(self, device) -> set:
         """Return set of PIDs running on this GPU device using pynvml (authoritative per-device list)."""
         if not NVML_AVAILABLE:
@@ -1251,6 +1555,12 @@ class SystemMetrics:
                                     "pid": proc.pid,
                                     "name": name,
                                     "gpu_memory": gpu_mem,
+                                    # Numeric twins of the display string, for
+                                    # plotting a subset of processes. SM % is
+                                    # NVML's per-process sample: None where the
+                                    # driver keeps no per-process accounting.
+                                    "gpu_memory_bytes": self._num(proc.gpu_memory),
+                                    "sm_util_percent": self._num(proc.gpu_sm_utilization),
                                     "username": username,
                                     "command": command or "",
                                     "script": script or command[:80] if command else "",
@@ -1419,31 +1729,22 @@ class SystemMetrics:
 
         return memory_data
 
-    def _get_visible_gpu_filter(self):
-        """Resolve which GPUs the current job/session may use.
+    def _job_gpu_lookup(self):
+        """``(job_id, physical indices)`` from the controller, or None.
 
-        Honours (in order) ``CUDA_VISIBLE_DEVICES``, then the Slurm-provided
-        ``SLURM_STEP_GPUS`` / ``SLURM_JOB_GPUS``, then ``GPU_DEVICE_ORDINAL``.
-        Returns the parsed filter from :func:`_parse_visible_gpu_spec`
-        (``None`` = all, ``"none"`` = none, or a dict of indices/uuids).
-
-        When ``self.all_gpus`` is set, restriction is disabled (returns None).
+        Only consulted when no GPU variable is set but this process belongs to
+        a Slurm job -- by ``SLURM_JOB_ID``, or by its cgroup when an ssh session
+        was adopted into a job and inherited no environment at all.
         """
-        if self.all_gpus:
+        from . import slurm as slurm_utils
+
+        job_id = os.environ.get("SLURM_JOB_ID")
+        if not job_id:
+            job_id = slurm_utils.job_id_from_cgroup(_read_text("/proc/self/cgroup") or "")
+        if not job_id or not slurm_utils.slurm_available():
             return None
-        for var in (
-            "CUDA_VISIBLE_DEVICES",
-            "SLURM_STEP_GPUS",
-            "SLURM_JOB_GPUS",
-            "GPU_DEVICE_ORDINAL",
-        ):
-            if var in os.environ:
-                parsed = _parse_visible_gpu_spec(os.environ.get(var))
-                logger.info(
-                    "GPU visibility from %s=%r -> %r", var, os.environ.get(var), parsed
-                )
-                return parsed
-        return None
+        indices = slurm_utils.get_job_gpu_indices(job_id, platform.node())
+        return (job_id, indices) if indices is not None else None
 
     @staticmethod
     def _device_uuid(device) -> Optional[str]:
@@ -1502,26 +1803,45 @@ class SystemMetrics:
 
         Robust to enumeration failures (returns whatever could be collected),
         which matters on Slurm/login nodes with partial or restricted access.
+        Which devices count as "allocated" is decided by
+        :func:`resolve_gpu_scope`, and the decision is kept in ``self.gpu_scope``
+        so a snapshot can explain why a GPU is (not) shown.
 
         Returns:
             List of GPU devices (PhysicalDevice or MigDevice)
         """
+        self.gpu_scope = {"source": None, "spec": None, "note": None,
+                          "detected": 0, "visible": [], "restricted": False}
         if not NVITOP_AVAILABLE:
             return []
-        try:
-            gpu_filter = self._get_visible_gpu_filter()
-        except Exception:  # noqa: BLE001
-            gpu_filter = None
-        if gpu_filter == "none":
-            logger.info(
-                "No GPUs visible to this session (CUDA_VISIBLE_DEVICES/Slurm allocation is empty)"
-            )
-            return []
-
         try:
             physical_devices = list(nvitop.Device.all())
         except Exception as err:  # noqa: BLE001
             logger.warning("nvitop.Device.all() failed: %s", err)
+            return []
+
+        if self.all_gpus:
+            scope = {"filter": None, "source": "--all-gpus", "spec": None, "note": None}
+        else:
+            try:
+                scope = resolve_gpu_scope(
+                    os.environ, device_count=len(physical_devices),
+                    hostname=platform.node(), job_lookup=self._job_gpu_lookup)
+            except Exception as err:  # noqa: BLE001
+                logger.warning("GPU scope resolution failed: %s", err)
+                scope = {"filter": None, "source": None, "spec": None, "note": None}
+        gpu_filter = scope["filter"]
+        logger.info("GPU scope: %s=%r -> %r%s", scope["source"], scope["spec"],
+                    gpu_filter, f" ({scope['note']})" if scope["note"] else "")
+        self.gpu_scope.update({
+            "source": scope["source"], "spec": scope["spec"], "note": scope["note"],
+            "detected": len(physical_devices),
+            "restricted": gpu_filter is not None,
+        })
+        if gpu_filter == "none":
+            logger.info(
+                "No GPUs visible to this session (CUDA_VISIBLE_DEVICES/Slurm allocation is empty)"
+            )
             return []
 
         try:
@@ -1546,18 +1866,29 @@ class SystemMetrics:
                 phys_idx = phys_dev.index
             except Exception:  # noqa: BLE001
                 phys_idx = None
-            # Apply CUDA/Slurm visibility filter at the physical-device level.
-            if not self._device_is_visible(phys_dev, phys_idx, gpu_filter):
-                continue
+            phys_visible = self._device_is_visible(phys_dev, phys_idx, gpu_filter)
             if phys_idx in mig_map:
-                # Physical device runs in MIG mode: expose its MIG instances.
+                # Physical device runs in MIG mode: expose its MIG instances --
+                # all of them if the card is allocated, else only the instances
+                # named by UUID (CUDA_VISIBLE_DEVICES=MIG-...), which a filter
+                # on the parent card alone would never match.
                 for mig in mig_map[phys_idx]:
+                    if not (phys_visible
+                            or self._device_is_visible(mig, None, gpu_filter)):
+                        continue
                     if self._device_accessible(mig):
                         combined_devices.append(mig)
-            else:
-                if self._device_accessible(phys_dev):
-                    combined_devices.append(phys_dev)
+            elif phys_visible and self._device_accessible(phys_dev):
+                combined_devices.append(phys_dev)
 
+        visible = []
+        for device in combined_devices:
+            try:
+                idx = device.index
+                visible.append(list(idx) if isinstance(idx, tuple) else idx)
+            except Exception:  # noqa: BLE001
+                visible.append(None)
+        self.gpu_scope["visible"] = visible
         logger.info(
             "Detected %d usable GPU device(s)%s",
             len(combined_devices),

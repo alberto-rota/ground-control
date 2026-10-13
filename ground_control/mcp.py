@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import socket
 import sys
 import time
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -98,7 +99,8 @@ def compact_status(snapshot):
             }
             for m in disk.get("mounts", [])
         ],
-        "network": network,
+        "network": _compact_network(network),
+        "gpu_scope": snapshot.get("gpu_scope"),
         "gpus": [
             {
                 "index": g.get("index"),
@@ -117,6 +119,18 @@ def compact_status(snapshot):
     }
 
 
+def _compact_network(network):
+    """Rates plus one-line facts; the full socket list is get_network_details'."""
+    compact = {key: network.get(key) for key in ("download_mbps", "upload_mbps")}
+    if "listening_summary" in network:
+        compact["listening"] = network.get("listening_summary")
+        compact["tcp_retransmit_percent"] = (network.get("tcp") or {}).get(
+            "retransmit_percent")
+        compact["established_connections"] = (network.get("connections") or {}).get(
+            "established")
+    return compact
+
+
 def _select_section(snapshot, section):
     """The snapshot itself, or its header plus one metric family."""
     if not section:
@@ -125,6 +139,8 @@ def _select_section(snapshot, section):
         key: snapshot.get(key)
         for key in ("schema_version", "timestamp_iso", "host", "status", "alerts")
     }
+    if section == "gpu":
+        value["gpu_scope"] = snapshot.get("gpu_scope")
     value["metrics"] = {section: (snapshot.get("metrics") or {}).get(section)}
     return value
 
@@ -229,6 +245,9 @@ def summarize_series(snapshots):
             "network": {
                 "download_mbps": _stats(metric(s, "network", "download_mbps") for s in snapshots),
                 "upload_mbps": _stats(metric(s, "network", "upload_mbps") for s in snapshots),
+                "tcp_retransmit_percent": _stats(
+                    (metric(s, "network", "tcp") or {}).get("retransmit_percent")
+                    for s in snapshots),
             },
             "gpu": gpu_summary,
             "temperature_c": {name: _stats(values) for name, values in sensors.items()} or None,
@@ -259,6 +278,16 @@ def _check_value(key, value, spec):
             return f"'{key}' must be at most {spec['maximum']}"
     elif kind == "boolean" and not isinstance(value, bool):
         return f"'{key}' must be true or false"
+    elif kind == "array":
+        if not isinstance(value, list):
+            return f"'{key}' must be an array"
+        if "maxItems" in spec and len(value) > spec["maxItems"]:
+            return f"'{key}' may hold at most {spec['maxItems']} items"
+        items = spec.get("items") or {}
+        for index, item in enumerate(value):
+            error = _check_value(f"{key}[{index}]", item, items)
+            if error:
+                return error
     return None
 
 
@@ -412,16 +441,19 @@ def _tool_diagnose(server, args, progress):
         gpus = (snapshot.get("metrics") or {}).get("gpu") or []
         basis = f"single reading from inside job {job_id}"
         host = snapshot.get("host")
+        scope = snapshot.get("gpu_scope")
     elif args["duration_seconds"] > 0:
         snapshots = server.sample_window(args["duration_seconds"], 1.0, progress)
         gpus = _mean_gpus(summarize_series(snapshots)["metrics"]["gpu"])
         basis = f"mean over {len(snapshots)} samples"
         host = snapshots[-1].get("host")
+        scope = snapshots[-1].get("gpu_scope")
     else:
         snapshot = server.provider.snapshot()
         gpus = (snapshot.get("metrics") or {}).get("gpu") or []
         basis = "single reading"
         host = snapshot.get("host")
+        scope = snapshot.get("gpu_scope")
 
     result = {
         "host": host,
@@ -434,6 +466,7 @@ def _tool_diagnose(server, args, progress):
             for gpu in gpus
         ],
         "findings": gpu_findings(gpus),
+        "gpu_scope": scope,
     }
     if not gpus:
         note = f"No NVIDIA GPUs are visible on {host}."
@@ -527,6 +560,179 @@ def _tool_job_metrics(server, args, progress):
     return value
 
 
+def _process_rows(snapshots, gpu_index, pids):
+    """Per-process GPU memory and SM % over ``snapshots``, per GPU.
+
+    With one snapshot the stats collapse to a single reading. ``pids`` limits
+    the rows *and* adds a ``selected`` total per GPU -- the same sum the
+    dashboard plots when processes are selected in a GPU panel.
+    """
+    wanted = set(pids) if pids else None
+    per_gpu = {}
+    for snap in snapshots:
+        for gpu in (snap.get("metrics") or {}).get("gpu") or []:
+            if not isinstance(gpu, dict):
+                continue
+            if gpu_index is not None and gpu.get("index") != gpu_index:
+                continue
+            entry = per_gpu.setdefault(gpu.get("index"), {
+                "index": gpu.get("index"), "name": gpu.get("name"),
+                "device_util": [], "device_mem": [], "procs": {}, "selected": []})
+            entry["device_util"].append(gpu.get("utilization_percent"))
+            entry["device_mem"].append(gpu.get("memory_used_gb"))
+            mem_sum = sm_sum = 0.0
+            sm_seen = False
+            for proc in gpu.get("processes") or []:
+                pid = proc.get("pid")
+                if wanted is not None and pid not in wanted:
+                    continue
+                row = entry["procs"].setdefault(pid, {"info": proc, "mem": [], "sm": []})
+                row["info"] = proc
+                mem = proc.get("gpu_memory_bytes")
+                mem_gb = None if mem is None else mem / 1000**3
+                row["mem"].append(mem_gb)
+                row["sm"].append(proc.get("sm_util_percent"))
+                mem_sum += mem_gb or 0.0
+                if proc.get("sm_util_percent") is not None:
+                    sm_sum += proc["sm_util_percent"]
+                    sm_seen = True
+            entry["selected"].append((mem_sum, sm_sum if sm_seen else None))
+
+    result = []
+    for entry in per_gpu.values():
+        gpu = {
+            "index": entry["index"],
+            "name": entry["name"],
+            "utilization_percent": _stats(entry["device_util"]),
+            "memory_used_gb": _stats(entry["device_mem"]),
+            "processes": [
+                {
+                    "pid": pid,
+                    "name": row["info"].get("name"),
+                    "username": row["info"].get("username"),
+                    "command": row["info"].get("command"),
+                    "cwd": row["info"].get("cwd"),
+                    "gpu_memory_gb": _stats(row["mem"]),
+                    "sm_util_percent": _stats(row["sm"]),
+                    "samples_present": len(row["mem"]),
+                }
+                for pid, row in entry["procs"].items()
+            ],
+        }
+        if wanted is not None:
+            gpu["selected"] = {
+                "pids": sorted(wanted),
+                "gpu_memory_gb": _stats(m for m, _ in entry["selected"]),
+                "sm_util_percent": _stats(s for _, s in entry["selected"]),
+            }
+        result.append(gpu)
+    return result
+
+
+def _tool_gpu_processes(server, args, progress):
+    job_id = args.get("job_id")
+    if job_id:
+        if not server.slurm_enabled:
+            raise ToolError("Slurm is not available on this host, so 'job_id' cannot be used.")
+        snapshots = [server.probe_job(job_id, progress)]
+        basis = f"single reading from inside job {job_id}"
+    elif args["duration_seconds"] > 0:
+        snapshots = server.sample_window(args["duration_seconds"], 1.0, progress)
+        basis = f"{len(snapshots)} samples over {args['duration_seconds']}s"
+    else:
+        snapshots = [server.provider.snapshot()]
+        basis = "single reading"
+    gpus = _process_rows(snapshots, args.get("gpu_index"), args.get("pids"))
+    result = {
+        "host": snapshots[-1].get("host"),
+        "basis": basis,
+        "gpu_scope": snapshots[-1].get("gpu_scope"),
+        "gpus": gpus,
+        "note": ("sm_util_percent is NVML's per-process sample of SM activity; "
+                 "summed over processes it need not equal the device utilisation. "
+                 "Process ids refer to the sampled host. 'index' counts the GPUs "
+                 "shown (0..n-1); gpu_scope.visible lists their physical NVML "
+                 "indices, which differ when the host is scoped to an allocation."),
+    }
+    if args.get("pids") and not any(g["processes"] for g in gpus):
+        result["note"] += " None of the requested pids holds a GPU context right now."
+    return result
+
+
+_LISTENING_FILTERS = ("all", "exposed", "mine")
+
+
+def _tunnel_hint(row, host, login_host):
+    """An ssh command that would reach a listening service from a laptop.
+
+    Hints, not instructions: they assume the usual setup (ssh to the login node,
+    compute nodes reachable from it) and say nothing about firewalls.
+    """
+    port = row.get("port")
+    if not port or not str(row.get("proto") or "").startswith("tcp"):
+        return None  # ssh -L forwards TCP only
+    exposure = row.get("exposure")
+    loopback = exposure == "localhost only"
+    # Bound to one address: only that address answers, not localhost and not
+    # necessarily the hostname. IPv6 literals need brackets in -L.
+    address = row.get("address") or ""
+    specific = not loopback and exposure != "all interfaces" and address
+    target = (f"[{address}]" if ":" in address else address) if specific else None
+    if login_host and login_host != host:
+        if loopback:
+            # Bound to the compute node's loopback: hop through the login node.
+            return f"ssh -N -L {port}:localhost:{port} -J {login_host} {host}"
+        return f"ssh -N -L {port}:{target or host}:{port} {login_host}"
+    return f"ssh -N -L {port}:{target or 'localhost'}:{port} {host}"
+
+
+def _tool_network_details(server, args, progress):
+    job_id = args.get("job_id")
+    if job_id:
+        if not server.slurm_enabled:
+            raise ToolError("Slurm is not available on this host, so 'job_id' cannot be used.")
+        snapshot = server.probe_job(job_id, progress)
+        login_host = socket.gethostname()
+    else:
+        snapshot = server.provider.snapshot()
+        login_host = None
+    host = snapshot.get("host")
+    network = (snapshot.get("metrics") or {}).get("network") or {}
+    if "listening" not in network:
+        reason = ("the ground-control in the job may be too old" if job_id
+                  else "the network details collector failed on this host (see its log)")
+        raise ToolError(
+            f"{host} did not report network details: {reason}. Throughput alone is in "
+            "get_hardware_metrics(section='network').")
+    listening = [dict(r) for r in network.get("listening") or [] if isinstance(r, dict)]
+    which = args["listening"]
+    if which == "exposed":
+        listening = [r for r in listening if r.get("exposure") != "localhost only"]
+    elif which == "mine":
+        listening = [r for r in listening if r.get("mine")]
+    for row in listening:
+        if row.get("mine"):
+            row["tunnel_hint"] = _tunnel_hint(row, host, login_host)
+    result = {
+        "host": host,
+        "listening_filter": which,
+        "listening": listening,
+        "listening_summary": network.get("listening_summary"),
+        "connections": network.get("connections"),
+        "tcp": network.get("tcp"),
+        "throughput_mbps": {"download": network.get("download_mbps"),
+                            "upload": network.get("upload_mbps")},
+        "note": ("exposure 'all interfaces' means reachable from the network unless a "
+                 "firewall blocks it. Without root, other users' sockets have no pid or "
+                 "process. service_hint is a guess from the port number."),
+    }
+    if args["include_interfaces"]:
+        result["interfaces"] = network.get("interfaces")
+    if job_id:
+        result["job_id"] = job_id
+    return result
+
+
 TOOLS = [
     Tool(
         "get_hardware_status", "Hardware status",
@@ -574,6 +780,48 @@ TOOLS = [
             "duration_seconds": {"type": "number", "minimum": 0, "maximum": 30,
                                  "default": 5,
                                  "description": "Local averaging window; 0 for one reading."},
+            "job_id": _JOB_ID_ARG,
+        },
+    ),
+    Tool(
+        "get_gpu_processes", "GPU processes",
+        "List the processes on each GPU with their own GPU memory and SM "
+        "utilisation (NVML per-process samples), so GPU load can be attributed to "
+        "a process. 'pids' restricts the list and adds their summed 'selected' "
+        "load -- the same figure the dashboard plots when processes are selected "
+        "in a GPU panel. duration_seconds > 0 returns min/mean/max/last over a "
+        "window; job_id samples inside a running Slurm job instead (~5 s). Also "
+        "reports gpu_scope: which GPUs this host counts as allocated, and why.",
+        _tool_gpu_processes,
+        {
+            "pids": {"type": "array", "items": {"type": "integer", "minimum": 0},
+                     "maxItems": 64,
+                     "description": "Only these process ids (and their total)."},
+            "gpu_index": {"type": "integer", "minimum": 0,
+                          "description": "Only this GPU (the 'index' of get_hardware_metrics)."},
+            "duration_seconds": {"type": "number", "minimum": 0, "maximum": 30,
+                                 "default": 0,
+                                 "description": "Sampling window; 0 for one reading."},
+            "job_id": _JOB_ID_ARG,
+        },
+    ),
+    Tool(
+        "get_network_details", "Network details",
+        "List listening TCP/UDP sockets (port, bind address, who can reach it -- "
+        "'all interfaces' vs 'localhost only' --, owning process and user where "
+        "visible, a service guess such as jupyter or tensorboard), network "
+        "interfaces with addresses, link speed and per-interface rates, TCP "
+        "connection counts and TCP retransmit percentage. The user's own services "
+        "come with an ssh tunnel hint. With job_id it reads the job's compute node "
+        "(~5 s), which is how to find the port of a notebook or dashboard "
+        "running inside a Slurm job.",
+        _tool_network_details,
+        {
+            "listening": {"type": "string", "enum": list(_LISTENING_FILTERS),
+                          "default": "all",
+                          "description": ("'exposed': not bound to loopback only; "
+                                          "'mine': owned by the current user.")},
+            "include_interfaces": {"type": "boolean", "default": True},
             "job_id": _JOB_ID_ARG,
         },
     ),
@@ -645,6 +893,17 @@ PROMPTS = [
         ],
     },
     {
+        "name": "reach_service",
+        "title": "Reach a running service",
+        "description": ("Find the port of a notebook, dashboard or server (e.g. Jupyter, "
+                        "TensorBoard) on this machine or inside a Slurm job, and how to "
+                        "tunnel to it."),
+        "arguments": [
+            {"name": "job_id", "description": "Slurm job id; omit for this machine.",
+             "required": False},
+        ],
+    },
+    {
         "name": "explain_alerts",
         "title": "Explain current alerts",
         "description": "Explain which alerts are active and what thresholds triggered them.",
@@ -692,6 +951,20 @@ def _prompt_text(name, args, slurm_enabled):
                       "list_slurm_jobs with state='running' and diagnose those jobs instead.\n")
         return steps + ("Interpret power_percent and memory_bandwidth_percent, not just "
                         "utilization_percent. Conclude with a verdict and next steps.")
+    if name == "reach_service":
+        job_id = args.get("job_id")
+        where = (f"inside Slurm job {job_id}" if job_id else "on this machine")
+        call_args = f"job_id={job_id!r}, listening='mine'" if job_id else "listening='mine'"
+        return (
+            f"Find the services I am running {where} and tell me how to reach them.\n"
+            f"1. Call get_network_details with {call_args}.\n"
+            "2. For each listener, name what it most likely is (process name first, "
+            "service_hint second), its port, and whether it is bound to localhost only "
+            "or to all interfaces.\n"
+            "3. Give the tunnel_hint command for the one I most likely want, and warn "
+            "if a service is exposed on all interfaces without needing to be.\n"
+            "If nothing is listening, say so and suggest checking the program's log."
+        )
     return (
         "Explain the current ground-control alerts.\n"
         "1. Call get_hardware_status for the active alerts.\n"

@@ -9,15 +9,36 @@ so there is one source of truth for panel proportions and one thing to persist.
 
 This widget owns the geometry; the app owns persistence and reacts to
 :class:`ResizableGrid.TracksResized`.
+
+Panels are positioned by :class:`PanelLayout` rather than Textual's own grid
+layout, from placements computed in :mod:`utils.bento`. That is what makes the
+bento mode possible (panels spanning several rows and columns, wrapped and
+packed), and it means every mode -- uniform or bento -- knows exactly which
+cells each panel covers, so resizing and hit-testing never have to guess.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fractions import Fraction
+from typing import Callable, Dict, List, Optional, Tuple
 
+from textual._resolve import resolve
 from textual.containers import Grid
+from textual.css.scalar import Scalar
+from textual.geometry import NULL_OFFSET, Region, Size
+from textual.layout import ArrangeResult, Layout, WidgetPlacement
 from textual.message import Message
 
+from ..utils.bento import (
+    DEFAULT_COLUMNS,
+    Placement,
+    Span,
+    bento_placements,
+    clamp_columns,
+    row_count,
+    uniform_placements,
+)
 from ..utils.grid_sizing import (
     drag_weights,
     is_default,
@@ -25,6 +46,68 @@ from ..utils.grid_sizing import (
     nudge_weight,
     weights_to_template,
 )
+
+
+class PanelLayout(Layout):
+    """Lay panels out at the placements their :class:`ResizableGrid` computed.
+
+    A trimmed-down ``GridLayout.arrange``: tracks are always ``fr`` weights with
+    no gutter, and each child's cell rectangle comes from the grid instead of
+    from Textual's forward-only placement cursor. Track sizes go through
+    Textual's own ``resolve`` so a weight produces exactly the cells a grid
+    template of the same weights would -- the drag arithmetic depends on that.
+    """
+
+    name = "panels"
+
+    def __init__(self) -> None:
+        # Last resolved tracks as (offset, length) in the container's content
+        # area, kept for drag sizing: the same numbers the panels were placed by.
+        self.columns: List[Tuple[int, int]] = []
+        self.rows: List[Tuple[int, int]] = []
+
+    def arrange(self, parent, children, size: Size, greedy: bool = True) -> ArrangeResult:
+        parent.pre_layout(self)
+        viewport = parent.app.viewport_size
+        placements, column_count, rows_count = parent.compute_placements(children)
+
+        def tracks(weights, count, total):
+            scalars = [Scalar.parse(f"{w:g}fr") for w in normalize_weights(weights, count)]
+            return resolve(scalars, total, 0, size, viewport)
+
+        columns = tracks(parent.column_weights, column_count, size.width)
+        rows = tracks(parent.row_weights, rows_count, size.height)
+        self.columns, self.rows = columns, rows
+
+        result: List[WidgetPlacement] = []
+        for child in children:
+            placement = placements.get(child)
+            if placement is None:
+                continue
+            column, row, width, height = placement
+            if column >= len(columns) or row >= len(rows):
+                continue
+            last_column = columns[min(len(columns) - 1, column + width - 1)]
+            last_row = rows[min(len(rows) - 1, row + height - 1)]
+            x, y = columns[column][0], rows[row][0]
+            cell_size = Size(last_column[0] + last_column[1] - x,
+                             last_row[0] + last_row[1] - y)
+            box_width, box_height, margin = child._get_box_model(
+                cell_size, viewport,
+                Fraction(cell_size.width), Fraction(cell_size.height),
+                constrain_width=True, greedy=greedy,
+            )
+            region = (
+                Region(x, y, int(box_width + margin.width),
+                       int(box_height + margin.height))
+                .crop_size(cell_size)
+                .shrink(margin)
+            )
+            styles = child.styles
+            offset = (styles.offset.resolve(cell_size, viewport)
+                      if styles.has_rule("offset") else NULL_OFFSET)
+            result.append(WidgetPlacement(region, offset, margin, child))
+        return result
 
 
 @dataclass
@@ -63,8 +146,20 @@ class ResizableGrid(Grid):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._panel_layout = PanelLayout()
+        self.styles.layout = self._panel_layout
         self.column_weights: list[float] = []
         self.row_weights: list[float] = []
+        # "uniform": one panel per cell in reading order, track counts set by
+        # the caller (grid / horizontal / vertical). "bento": panels span cells
+        # by `span_for(panel)` and are packed into `bento_columns`.
+        self.mode = "uniform"
+        self.bento_columns = DEFAULT_COLUMNS
+        self.span_for: Optional[Callable[[object], Span]] = None
+        # Placements from the most recent layout pass, by panel. Read by the
+        # app (which cell is the focused panel in) and by hit-testing.
+        self.placements: Dict[object, Placement] = {}
+        self.track_counts: Tuple[int, int] = (1, 1)
         self._drag: _Drag | None = None
         # Swap-drag state, independent of the border-resize `_drag` above --
         # a mousedown that does *not* land on a resize boundary is a candidate
@@ -87,10 +182,8 @@ class ResizableGrid(Grid):
         Called on every rebuild, so it also cancels any drag in flight: the panel
         set may have just changed underneath it and the snapshot is stale.
         """
-        self._drag = None
-        self._swap_candidate = None
-        self._swap_drag = None
-        self._swap_hover = None
+        self._cancel_interactions()
+        self.mode = "uniform"
         self.styles.grid_size_columns = max(1, columns)
         self.styles.grid_size_rows = max(1, rows)
         self.column_weights = normalize_weights(
@@ -99,12 +192,111 @@ class ResizableGrid(Grid):
         self.row_weights = normalize_weights(
             self.row_weights if row_weights is None else row_weights,
             max(1, rows))
+        self.track_counts = (max(1, columns), max(1, rows))
+        self.apply_tracks()
+
+    def set_bento(self, columns: int, span_for: Callable[[object], Span],
+                  column_weights=None, row_weights=None) -> None:
+        """Switch to the bento mode: spans per panel, packed into ``columns``.
+
+        The row count is whatever the packing needs, so it is derived from the
+        displayed panels rather than passed in. Saved weights are padded but
+        never truncated here: the panel set is often still being mounted when
+        this runs, and a transiently short grid must not eat the user's rows.
+        """
+        self._cancel_interactions()
+        self.mode = "bento"
+        self.bento_columns = clamp_columns(columns)
+        self.span_for = span_for
+        if column_weights is not None:
+            self.column_weights = list(column_weights)
+        if row_weights is not None:
+            self.row_weights = list(row_weights)
+        self.sync_tracks()
+
+    def sync_tracks(self) -> None:
+        """Re-derive track counts from the displayed panels and pad the weights.
+
+        Call after anything that can change the packing: a panel shown, hidden,
+        reordered or re-spanned. Uniform modes get their counts from the caller
+        (``set_tracks``), so this only refreshes their placements.
+        """
+        _placements, columns, rows = self.compute_placements(self.displayed_panels())
+        if self.mode == "bento":
+            self.column_weights = normalize_weights(
+                self.column_weights, max(columns, len(self.column_weights)))
+            self.row_weights = normalize_weights(
+                self.row_weights, max(rows, len(self.row_weights)))
+            self.styles.grid_size_columns = columns
+            self.styles.grid_size_rows = rows
         self.apply_tracks()
 
     def apply_tracks(self) -> None:
-        """Write the current weights to the grid's row/column templates."""
-        self.styles.grid_columns = weights_to_template(self.column_weights)
-        self.styles.grid_rows = weights_to_template(self.row_weights)
+        """Write the current weights out and re-run layout.
+
+        The templates are informational (``PanelLayout`` reads the weight lists
+        directly) but keep the styles truthful for anything that inspects them.
+        """
+        columns, rows = self.track_counts
+        self.styles.grid_columns = weights_to_template(
+            normalize_weights(self.column_weights, columns))
+        self.styles.grid_rows = weights_to_template(
+            normalize_weights(self.row_weights, rows))
+        # Weights and spans are this widget's own state, which Textual's
+        # arrangement cache (keyed on size and child list) cannot see; and
+        # refresh(layout=True) only clears the *ancestors'* caches. Without
+        # this a span change can render one step behind.
+        self._clear_arrangement_cache()
+        self.refresh(layout=True)
+
+    def _cancel_interactions(self) -> None:
+        # The panel set may have just changed underneath a drag in flight, so
+        # its snapshot of sizes and panels is stale.
+        self._drag = None
+        self._swap_candidate = None
+        self._swap_drag = None
+        self._swap_hover = None
+
+    # ------------------------------------------------------------- placement
+
+    def displayed_panels(self) -> list:
+        """Children that occupy cells, in order -- hidden panels take none."""
+        return [child for child in self.children if child.display]
+
+    def compute_placements(self, children) -> Tuple[Dict[object, Placement], int, int]:
+        """Placement per child plus the ``(columns, rows)`` track counts.
+
+        Run on every layout pass (it is cheap: a handful of panels), so the
+        placements can never go stale relative to what is on screen.
+        """
+        children = list(children)
+        if self.mode == "bento":
+            columns = self.bento_columns
+            spans = [self._span(child) for child in children]
+            cells = bento_placements(spans, columns)
+            rows = row_count(cells)
+        else:
+            columns = max(1, int(self.styles.grid_size_columns or 1))
+            cells = uniform_placements(len(children), columns)
+            rows = max(int(self.styles.grid_size_rows or 1), row_count(cells))
+        placements = dict(zip(children, cells))
+        self.placements = placements
+        self.track_counts = (columns, rows)
+        return placements, columns, rows
+
+    def _span(self, child) -> Span:
+        if self.span_for is None:
+            return (1, 1)
+        try:
+            return self.span_for(child)
+        except Exception:  # noqa: BLE001 - a bad span must not break layout
+            return (1, 1)
+
+    def placement_of(self, panel) -> Optional[Placement]:
+        """``(column, row, width, height)`` of a displayed panel, or None."""
+        if panel not in self.placements:
+            self.compute_placements(self.displayed_panels())
+        return self.placements.get(panel)
 
     def _weights_for(self, orientation: str) -> list[float]:
         return self.column_weights if orientation == "columns" else self.row_weights
@@ -115,12 +307,30 @@ class ResizableGrid(Grid):
         else:
             self.row_weights = weights
 
+    def _track_count(self, orientation: str) -> int:
+        return self.track_counts[0 if orientation == "columns" else 1]
+
     def nudge(self, orientation: str, index: int, delta: float) -> bool:
         """Grow/shrink one track by ``delta``. False if it could not apply."""
-        weights = self._weights_for(orientation)
-        if len(weights) < 2 or not (0 <= index < len(weights)):
+        return self.nudge_tracks(orientation, [index], delta)
+
+    def nudge_tracks(self, orientation: str, indices, delta: float) -> bool:
+        """Grow/shrink several tracks -- every track a spanning panel covers.
+
+        False if nothing changed: a single-track axis, or every track already
+        at its clamp.
+        """
+        count = self._track_count(orientation)
+        weights = normalize_weights(self._weights_for(orientation),
+                                    max(count, len(self._weights_for(orientation))))
+        indices = sorted({i for i in indices if 0 <= i < count})
+        # Growing every track of an axis keeps the proportions identical: no
+        # visible change, while the weights creep towards their cap.
+        if count < 2 or not indices or len(indices) >= count:
             return False
-        updated = nudge_weight(weights, index, delta)
+        updated = weights
+        for index in indices:
+            updated = nudge_weight(updated, index, delta)
         if updated == weights:
             return False  # already clamped at the limit
         self._store(orientation, updated)
@@ -141,7 +351,7 @@ class ResizableGrid(Grid):
     def apply_order(self, ordered) -> None:
         """Reorder children to match ``ordered``, moving only what's out of place.
 
-        Cell index follows child order (``GridLayout.arrange``), so this is
+        Cell placement follows child order (``compute_placements``), so this is
         also how panel positions are changed -- both the saved-order restore
         on rebuild and a swap go through here. Fixes children left-to-right:
         once position ``idx`` holds the right widget it is never touched
@@ -194,52 +404,46 @@ class ResizableGrid(Grid):
 
     # --------------------------------------------------------------- geometry
 
-    def _cell_bounds(self) -> tuple[dict[int, tuple[int, int]], dict[int, tuple[int, int]]]:
-        """Map column/row index to its ``(start, end)`` in screen coordinates.
+    def _boundaries_at(self, panel, x: int, y: int) -> tuple[int | None, int | None]:
+        """Track boundaries under ``(x, y)`` on ``panel``'s border, per axis.
 
-        Derived from the panels' actual regions rather than by re-deriving the
-        layout arithmetic, so it cannot disagree with what is on screen. Index
-        order matches ``GridLayout.arrange``, which lays out *displayed*
-        children in order -- hidden panels occupy no cell.
+        A boundary is grabbed on a panel's own border, using the placement it
+        was laid out at -- not on a straight line across the grid, because in
+        the bento mode a column boundary in one row can be the middle of a wide
+        panel in the next. The grab zone is still two cells wide, since the
+        neighbour's facing border is the next cell over (there is no gutter).
+        Only internal boundaries qualify: the grid's outer edge resizes nothing.
         """
-        columns: dict[int, tuple[int, int]] = {}
-        rows: dict[int, tuple[int, int]] = {}
-        column_count = max(1, int(self.styles.grid_size_columns or 1))
+        placement = self.placements.get(panel)
+        if placement is None:
+            return None, None
         try:
-            children = [child for child in self.children if child.display]
-            for index, child in enumerate(children):
-                region = child.region
-                if not region.area:
-                    continue
-                columns.setdefault(index % column_count, (region.x, region.right - 1))
-                rows.setdefault(index // column_count, (region.y, region.bottom - 1))
+            region = panel.region
         except Exception:
-            # Regions are unavailable before the first layout; no geometry means
-            # no drag, which is the right outcome rather than an error.
-            return {}, {}
-        return columns, rows
+            # Regions are unavailable before the first layout; no geometry
+            # means no drag, which is the right outcome rather than an error.
+            return None, None
+        if not region.area:
+            return None, None
+        column, row, width, height = placement
+        columns, rows = self.track_counts
+        column_index = row_index = None
+        if x == region.right - 1 and column + width < columns:
+            column_index = column + width - 1
+        elif x == region.x and column > 0:
+            column_index = column - 1
+        if y == region.bottom - 1 and row + height < rows:
+            row_index = row + height - 1
+        elif y == region.y and row > 0:
+            row_index = row - 1
+        return column_index, row_index
 
     @staticmethod
-    def _boundary_at(bounds: dict[int, tuple[int, int]], position: int,
-                     count: int) -> int | None:
-        """Index of the track whose *trailing* border sits under ``position``.
-
-        The grab zone is exactly two cells: the left/top panel's own border and
-        its neighbour's, which are adjacent because the grid has no gutter. Only
-        internal boundaries qualify -- the grid's outer edge resizes nothing.
-        """
-        for index in range(count - 1):
-            if index in bounds and index + 1 in bounds:
-                edge = bounds[index][1]
-                if edge <= position <= edge + 1:
-                    return index
-        return None
-
-    @staticmethod
-    def _sizes(bounds: dict[int, tuple[int, int]], index: int) -> tuple[int, int]:
-        start_a, end_a = bounds[index]
-        start_b, end_b = bounds[index + 1]
-        return (end_a - start_a + 1, end_b - start_b + 1)
+    def _sizes(tracks: List[Tuple[int, int]], index: int) -> tuple[int, int]:
+        """Cell sizes of tracks ``index`` and ``index + 1`` as last laid out."""
+        if not (0 <= index < len(tracks) - 1):
+            return (0, 0)
+        return (tracks[index][1], tracks[index + 1][1])
 
     # ------------------------------------------------------------------ mouse
 
@@ -247,19 +451,21 @@ class ResizableGrid(Grid):
         """Start a border-resize drag, or arm a same-panel drag as a swap candidate."""
         if event.button != 1:
             return
-        columns, rows = self._cell_bounds()
-        column_index = self._boundary_at(columns, event.screen_x, len(self.column_weights))
-        row_index = self._boundary_at(rows, event.screen_y, len(self.row_weights))
+        panel = self._panel_at(event.screen_x, event.screen_y)
+        column_index, row_index = self._boundaries_at(panel, event.screen_x, event.screen_y)
         if column_index is not None or row_index is not None:
             drag = _Drag(origin_x=event.screen_x, origin_y=event.screen_y)
+            column_count, row_count_ = self.track_counts
             if column_index is not None:
                 drag.column_index = column_index
-                drag.column_sizes = self._sizes(columns, column_index)
-                drag.column_weights = list(self.column_weights)
+                drag.column_sizes = self._sizes(self._panel_layout.columns, column_index)
+                drag.column_weights = normalize_weights(
+                    self.column_weights, max(column_count, len(self.column_weights)))
             if row_index is not None:
                 drag.row_index = row_index
-                drag.row_sizes = self._sizes(rows, row_index)
-                drag.row_weights = list(self.row_weights)
+                drag.row_sizes = self._sizes(self._panel_layout.rows, row_index)
+                drag.row_weights = normalize_weights(
+                    self.row_weights, max(row_count_, len(self.row_weights)))
             self._drag = drag
             self.capture_mouse()
             event.stop()
@@ -269,7 +475,7 @@ class ResizableGrid(Grid):
         # candidate, but deliberately do not capture or stop the event yet --
         # this may well just be a click on a button or a tab inside the panel,
         # and that must keep working exactly as if this handler didn't exist.
-        self._swap_candidate = self._panel_at(event.screen_x, event.screen_y)
+        self._swap_candidate = panel
 
     def on_mouse_move(self, event) -> None:
         drag = self._drag

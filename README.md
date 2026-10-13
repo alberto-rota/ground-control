@@ -102,7 +102,9 @@ One panel per mount. Read grows up, write grows down, and the bar is used and fr
 ![Disk](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/disk.gif)
 
 ### Network
-Upload up, download down, with the running totals beside the current rate.
+Upload up, download down, with the running totals beside the current rate. Under the bar, one line: the main interface and its address, how many ports are listening (how many on more than loopback, how many are yours), open connections, and the TCP retransmit rate. Retransmits lead the line, marked, once they pass 2%: a lossy link stalls transfers in a way no throughput plot explains.
+
+`2` lists the interfaces (InfiniBand flagged, link state, address, speed, per-interface rates). `3` lists the listening ports: who bound them, the process when it is yours (without root other users' sockets show no pid), and a guess at the service from the port (`jupyter`, `tensorboard`, `ray dashboard`…). A socket bound to every interface is marked `any ▲`; loopback-only ones are dimmed. In job focus these are the compute node's, which is how to find the port your notebook picked.
 
 ![Network](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/network.gif)
 
@@ -111,6 +113,10 @@ NVIDIA only, one panel per card. Utilization up, memory down. Under the bar is a
 
 `1` (or `p`) is the plot, `2` is the process list. `K`, `T` and `I` send `SIGKILL`, `SIGTERM` and `SIGINT` to that pid. MiG devices show up, and when utilization cannot be read the panel says `Usage UNAV`.
 
+The `○` at the start of a process row selects it for the plot. With any process selected, the plot and bar show only those processes: their summed GPU memory and SM utilization, as NVML samples it per process, history included. The panel's bottom edge says how many are selected; `c` goes back to the whole card. A selected process that exits stays plotted until its samples scroll out of the window.
+
+On a shared node `gc` shows only the GPUs your job holds. It reads `CUDA_VISIBLE_DEVICES` and Slurm's `SLURM_STEP_GPUS` / `SLURM_JOB_GPUS`, and checks them against what NVML can see. That check covers nodes where every card is visible but the job holds one, which happens when Slurm does not fence devices, and when `CUDA_VISIBLE_DEVICES` is numbered relative to the job. If nothing is set but the session belongs to a job (an ssh session adopted into it, say), `scontrol show job -d` names the cards. `gc --once --json` and the MCP tools report the decision as `gpu_scope`; `--all-gpus` turns it off.
+
 > [!CAUTION]
 > Those signal buttons are disabled while a Slurm job is focused. The pids in that list belong to the compute node. Signalling them from the login node would hit whatever local process happens to hold the same number.
 
@@ -118,7 +124,9 @@ NVIDIA only, one panel per card. Utilization up, memory down. Under the bar is a
 
 ## Layouts
 
-`g` is the grid, `h` is one row, `v` is one column. `space` cycles them. A wide tmux pane wants `h`; a tall one wants `v`.
+`g` is the grid, `h` is one row, `v` is one column, `b` is the bento. `space` cycles them. A wide tmux pane wants `h`; a tall one wants `v`.
+
+In the bento, panels come in different sizes. Focus one and `shift+right` / `shift+left` make it span more or fewer columns, and `shift+down` / `shift+up` more or fewer rows. `>` and `<` change how many columns the bento has (1 to 8; 4 to start). Panels are packed in order, each into the first place it fits, so `m` or dragging one panel onto another rearranges it. A gap that nothing fits into goes to the panel beside it. It starts with the CPU and Slurm panels two columns wide and each GPU two by two. `z` puts the spans back to that as well as resetting the track sizes.
 
 ![Switching layouts](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/layouts.gif)
 
@@ -208,14 +216,14 @@ The dashboard's mount filter applies here too. `--all-mounts` includes the ones 
 
 ## MCP for AI clients
 
-An MCP client can launch the local stdio server through `uvx`, without a separate `gc` install. Until a release containing MCP support is published, install directly from the repository:
+An MCP client can launch the local stdio server through `uvx`, without a separate `gc` install:
 
 ```json
 {
   "mcpServers": {
     "ground-control": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/alberto-rota/ground-control.git", "gc", "mcp"]
+      "args": ["--from", "ground-control-tui", "gc", "mcp"]
     }
   }
 }
@@ -228,13 +236,13 @@ OpenCode uses a different configuration shape. Add this under `mcp` in `~/.confi
   "mcp": {
     "ground-control": {
       "type": "local",
-      "command": ["uvx", "--from", "git+https://github.com/alberto-rota/ground-control.git", "gc", "mcp"]
+      "command": ["uvx", "--from", "ground-control-tui", "gc", "mcp"]
     }
   }
 }
 ```
 
-Once MCP support is on PyPI, replace the Git URL with `ground-control-tui`. `uvx` downloads and caches the package on first launch; later launches reuse the cache. For a local checkout use its absolute path after `--from`, or, if `gc` is installed, launch `gc mcp` directly. Use an absolute path to `uvx` if your MCP client does not inherit your shell's `PATH`. Restart your MCP client after changing its configuration.
+MCP support is on PyPI from 2.2.0. For changes not released yet, use `git+https://github.com/alberto-rota/ground-control.git` in place of `ground-control-tui`. `uvx` downloads and caches the package on first launch; later launches reuse the cache. For a local checkout use its absolute path after `--from`, or, if `gc` is installed, launch `gc mcp` directly. Use an absolute path to `uvx` if your MCP client does not inherit your shell's `PATH`. Restart your MCP client after changing its configuration.
 
 Every tool only reads. None of them can cancel, signal or change anything.
 
@@ -244,12 +252,14 @@ Every tool only reads. None of them can cancel, signal or change anything.
 | `get_hardware_metrics` | The full JSON snapshot, or one family with `section` (`cpu`, `memory`, `disk`, `network`, `gpu`, `temperature_c`). |
 | `sample_hardware` | Min/mean/max/last over a short window (`duration_seconds`, `interval_seconds`), plus every alert seen during it. Use it for "is this busy?" questions, because single readings fluctuate. |
 | `diagnose_gpus` | Interpreted findings per GPU: input-starved, throttled, VRAM nearly full, idle but holding memory, hot, or genuinely busy. Pass `job_id` to diagnose a Slurm job's GPUs. |
+| `get_gpu_processes` | Each GPU's processes with their own GPU memory and SM utilization, optionally only some `pids` (plus their total, as the dashboard plots it), over a window, or inside a Slurm job. Includes `gpu_scope`. |
+| `get_network_details` | Listening ports with bind address, exposure, owner and a service guess; interfaces with addresses, speed and rates; connection counts; TCP retransmits. Filter with `listening` (`all`, `exposed`, `mine`). Your own services come with an `ssh -L` tunnel hint. Pass `job_id` to read a job's compute node. |
 | `get_alert_thresholds` | The warn/crit limits in effect, their direction, and the ignored mounts. |
 | `list_slurm_jobs` | Your jobs (or another `user`'s), running first, with GPUs, time used and pending reason. Filter with `state`. |
 | `get_slurm_job` | One job's allocation, whether it is still running (and its final state if it ended), and live `sstat` usage. |
 | `get_slurm_job_metrics` | A snapshot taken *inside* a running job through `srun --overlap`, so the CPUs and GPUs are the job's own. Each call takes a few seconds. |
 
-The three Slurm tools are offered only when `squeue` is on `PATH`; `gc mcp --no-slurm` hides them. The server also provides three prompts, which clients show as slash commands: `diagnose_slow_machine`, `diagnose_gpu_job` (optional `job_id`) and `explain_alerts`.
+The three Slurm tools are offered only when `squeue` is on `PATH`; `gc mcp --no-slurm` hides them. The server also provides four prompts, which clients show as slash commands: `diagnose_slow_machine`, `diagnose_gpu_job` (optional `job_id`), `reach_service` (optional `job_id`: find the port of a notebook or dashboard and how to tunnel to it) and `explain_alerts`.
 
 Local readings come from the machine running the MCP server, with the same GPU allocation visibility, alert thresholds and disk ignore list as `gc --once`. `--all-gpus` and `--all-mounts` widen them, as they do for `gc --once`. On a cluster that machine is usually a login node, so use the Slurm tools to see a job's GPUs. The collector stays alive between calls. After 10 seconds idle the I/O counters are primed again, so rates always describe the present rather than the gap. No dashboard needs to be running. The server exits when the client closes its connection.
 
@@ -260,22 +270,24 @@ The footer shows the keys for the screen you are on. `?` lists all of them, incl
 | Key | Action |
 | --- | --- |
 | `d` / `s` / `l` | Dashboard / Settings / Logs |
-| `g` / `h` / `v` | Grid / horizontal / vertical |
-| `space` | Cycle the three layouts |
+| `g` / `h` / `v` / `b` | Grid / horizontal / vertical / bento |
+| `space` | Cycle the layouts |
 | `r` | Refresh now |
 | `+` / `-` | Refresh faster / slower |
 | `t` | Next theme |
 | `a` | Toggle alerts |
 | `[` / `]` | Previous / next panel |
 | `ctrl+arrows` | Resize the focused panel's row or column |
-| `z` | Reset panel sizes |
+| `shift+arrows` | Bento: make the focused panel span more or fewer columns / rows |
+| `>` / `<` | Bento: more / fewer columns |
+| `z` | Reset panel sizes (and bento spans) |
 | `m` | Swap two panels (press it on each; `esc` cancels) |
 | `x` | Hide the focused panel |
 | `F` | Focus a running Slurm job (`u` in that list to stop) |
 | `?` | Every shortcut |
 | `q` | Quit |
 
-With the CPU panel focused, `1` / `2` / `3` switch all cores, affinity cores, and your user's cores. With a GPU panel focused, `1` or `p` is the plot and `2` is the process list.
+With the CPU panel focused, `1` / `2` / `3` switch all cores, affinity cores, and your user's cores. With a GPU panel focused, `1` or `p` is the plot, `2` is the process list, and `c` clears a process selection. With the network panel focused, `1` / `2` / `3` are the plot, the interfaces and the listening ports.
 
 ## Where things are saved
 

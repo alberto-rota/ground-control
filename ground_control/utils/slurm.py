@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -450,6 +451,106 @@ def first_node(nodelist: Optional[str]) -> Optional[str]:
     if not first:
         return prefix or None
     return f"{prefix}{first}"
+
+
+def expand_nodelist(nodelist: Optional[str]) -> List[str]:
+    """Expand a Slurm hostlist expression into hostnames.
+
+    Covers the forms ``scontrol``/env vars actually print -- ``a1``,
+    ``a[1-3,7]``, ``gpu[01-02],cpu5`` and zero-padded ranges -- with one bracket
+    group per element. Anything stranger is returned as-is rather than guessed.
+    """
+    text = (nodelist or "").strip()
+    if not text or text in ("(null)", "None"):
+        return []
+    elements, depth, current = [], 0, ""
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            elements.append(current)
+            current = ""
+        else:
+            current += ch
+    elements.append(current)
+
+    hosts: List[str] = []
+    for element in filter(None, (e.strip() for e in elements)):
+        match = re.fullmatch(r"([^\[]*)\[([^\]]+)\](.*)", element)
+        if not match:
+            hosts.append(element)
+            continue
+        prefix, body, suffix = match.groups()
+        for part in body.split(","):
+            low, _, high = part.partition("-")
+            if high and low.isdigit() and high.isdigit() and int(high) >= int(low):
+                width = len(low)
+                hosts.extend(f"{prefix}{n:0{width}d}{suffix}"
+                             for n in range(int(low), int(high) + 1))
+            else:
+                hosts.append(f"{prefix}{part}{suffix}")
+    return hosts
+
+
+def _parse_index_list(text: str) -> List[int]:
+    """``"0-1,3"`` -> ``[0, 1, 3]``; malformed pieces are skipped."""
+    indices: List[int] = []
+    for part in text.split(","):
+        low, _, high = part.strip().partition("-")
+        if low.isdigit() and high.isdigit():
+            indices.extend(range(int(low), int(high) + 1))
+        elif low.isdigit() and not high:
+            indices.append(int(low))
+    return indices
+
+
+def parse_job_gpu_indices(output: str, hostname: str) -> Optional[List[int]]:
+    """Physical GPU indices a job holds on ``hostname``, from ``scontrol show job -d``.
+
+    The detailed form prints one line per node group, e.g.::
+
+        Nodes=gpu[01-02] CPU_IDs=0-15 Mem=64000 GRES=gpu:a100:2(IDX:0,2)
+
+    (older releases spell it ``GRES_IDX=gpu(IDX:0-1)``). IDX is the *physical*
+    device index on that node, which is what NVML reports when every GPU on the
+    node is visible. Returns None when nothing names this host -- not ``[]``,
+    which would mean "this job holds no GPUs here".
+    """
+    short = (hostname or "").split(".")[0]
+    for line in (output or "").splitlines():
+        line = line.strip()
+        match = re.match(r"Nodes=(\S+)", line)
+        if not match or "IDX:" not in line:
+            continue
+        nodes = [n.split(".")[0] for n in expand_nodelist(match.group(1))]
+        if short not in nodes:
+            continue
+        indices: List[int] = []
+        for gres, idx in re.findall(r"(gpu[^(\s]*)\(IDX:([^)]*)\)", line):
+            indices.extend(_parse_index_list(idx))
+        return sorted(set(indices))
+    return None
+
+
+def job_id_from_cgroup(text: str) -> Optional[str]:
+    """The Slurm job a process belongs to, from its ``/proc/<pid>/cgroup``.
+
+    Slurm's cgroup plugin names the hierarchy ``.../job_<id>/step_<step>``, and
+    pam_slurm_adopt places an ssh session into the job it adopted it for --
+    so this finds the job even when no ``SLURM_*`` variable was inherited.
+    """
+    match = re.search(r"/job_(\d+)(?:/|$)", text or "", re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def get_job_gpu_indices(jobid: str, hostname: str) -> Optional[List[int]]:
+    """Ask the controller which GPUs ``jobid`` holds on ``hostname`` (or None)."""
+    output = _run(["scontrol", "show", "job", "-d", str(jobid)])
+    if output is None:
+        return None
+    return parse_job_gpu_indices(output, hostname)
 
 
 def _srun_prefix(jobid: str, node: Optional[str] = None) -> List[str]:

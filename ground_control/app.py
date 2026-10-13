@@ -48,6 +48,15 @@ from ground_control.utils.system_metrics import SystemMetrics
 from ground_control.utils import slurm as slurm_utils
 from ground_control.utils.snapshot import metrics_from_snapshot
 from ground_control.utils.grid_sizing import NUDGE_STEP, normalize_weights
+from ground_control.utils.bento import (
+    MAX_COLUMNS as BENTO_MAX_COLUMNS,
+    MIN_COLUMNS as BENTO_MIN_COLUMNS,
+    clamp_columns,
+    clamp_span,
+    default_span,
+    parse_bento_config,
+    resize_span,
+)
 from ground_control.utils.alerts import (
     CRIT as ALERT_CRIT,
     OK as ALERT_OK,
@@ -79,6 +88,8 @@ from textual.screen import ModalScreen, Screen
 # Set up the user-specific config file path
 CONFIG_DIR = user_config_dir("ground-control")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+# Every dashboard layout mode, in the order `space` cycles through them.
+LAYOUT_MODES = ("grid", "horizontal", "vertical", "bento")
 
 # Mountpoints hidden by default: pseudo-filesystems that would otherwise fill the
 # dashboard with one panel per entry (a squashfs mount per installed snap, the ESP).
@@ -453,6 +464,11 @@ class GroundControl(App):
         # of panels, not a geometry, so unlike `_grid_weights` it is not keyed
         # per layout mode. Empty means "the natural mount order".
         self.panel_order: list[str] = []
+        # Bento layout: column count, and each panel's (columns, rows) span by
+        # panel identity. Only spans the user changed are stored; everything
+        # else follows `bento.DEFAULT_SPANS` for its panel type.
+        self.bento_columns: int = clamp_columns(None)
+        self.bento_spans: dict[str, tuple[int, int]] = {}
         # The panel armed by `m` (action_mark_swap_panel), waiting for a
         # second panel to swap with. None when nothing is armed.
         self._swap_armed_panel = None
@@ -816,8 +832,12 @@ class GroundControl(App):
         color: {tok["text_on_accent"]};
     }}
     /* Layout is a 3-option choice: one segmented row instead of a stacked list. */
+    /* Two by two: four modes in one row clip the last one at the width the
+       Settings column has on an ordinary terminal. */
     #layout-radio-set {{
-        layout: horizontal;
+        layout: grid;
+        grid-size: 2;
+        grid-rows: 1;
         width: 100%;
         height: auto;
         background: transparent;
@@ -1073,6 +1093,7 @@ class GroundControl(App):
         Binding("g", "set_grid", "Grid"),
         Binding("h", "set_horizontal", "Horiz"),
         Binding("v", "set_vertical", "Vert"),
+        Binding("b", "set_bento", "Bento"),
         Binding("space", "cycle_layout", "Cycle layout", show=False),
         # Panel proportions. These resize the focused panel's grid *track*, so in
         # grid mode its row-mates get taller with it; drag a border for a
@@ -1082,6 +1103,14 @@ class GroundControl(App):
         Binding("ctrl+down", "heighten_panel", "Taller", show=False),
         Binding("ctrl+up", "shorten_panel", "Shorter", show=False),
         Binding("z", "reset_panel_sizes", "Reset sizes", show=False),
+        # Bento: how many cells the focused panel spans, and how many columns
+        # the bento packs into. Spans only exist in the bento layout.
+        Binding("shift+right", "span_wider", "Span wider", show=False),
+        Binding("shift+left", "span_narrower", "Span narrower", show=False),
+        Binding("shift+down", "span_taller", "Span taller", show=False),
+        Binding("shift+up", "span_shorter", "Span shorter", show=False),
+        Binding("greater_than_sign", "bento_more_columns", "More columns", show=False),
+        Binding("less_than_sign", "bento_fewer_columns", "Fewer columns", show=False),
         # Swap two panels' grid positions: arm the focused one, then confirm on
         # another (or drag one panel onto another with the mouse -- see
         # ResizableGrid). Escape cancels an arm; it is a no-op otherwise.
@@ -1169,7 +1198,7 @@ class GroundControl(App):
         btn = event.pressed
         if btn and btn.id:
             layout = btn.id.replace("layout-", "")
-            if layout in {"grid", "horizontal", "vertical"}:
+            if layout in LAYOUT_MODES:
                 self.set_layout(layout)
 
     @on(Input.Submitted, "#disk-ignore-prefixes")
@@ -1288,6 +1317,8 @@ class GroundControl(App):
                         self.alert_sticky_seconds = 30.0
                     self.thresholds = merge_thresholds(config.get("thresholds"))
                     self._grid_weights = self._parse_grid_weights(config.get("grid_weights"))
+                    self.bento_columns, self.bento_spans = parse_bento_config(
+                        config.get("bento"))
                     raw_order = config.get("panel_order", [])
                     self.panel_order = [str(t) for t in raw_order] if isinstance(raw_order, list) else []
                     raw_selected = config.get("selected", {})
@@ -1310,7 +1341,7 @@ class GroundControl(App):
         result: dict[str, dict[str, list[float]]] = {}
         if not isinstance(raw, dict):
             return result
-        for mode in ("grid", "horizontal", "vertical"):
+        for mode in LAYOUT_MODES:
             entry = raw.get(mode)
             if not isinstance(entry, dict):
                 continue
@@ -1358,6 +1389,10 @@ class GroundControl(App):
                 "layout": getattr(self, "current_layout", "grid"),
                 "grid_weights": self._grid_weights,
                 "panel_order": self.panel_order,
+                "bento": {
+                    "columns": self.bento_columns,
+                    "spans": {key: list(span) for key, span in self.bento_spans.items()},
+                },
                 "widget_tabs": self._widget_tab_states,
                 "disk_ignore_prefixes": ", ".join(self.disk_ignore_prefixes),
                 "alerts_enabled": self.alerts_enabled,
@@ -1754,7 +1789,8 @@ class GroundControl(App):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r") as f:   
-                    return json.load(f).get("layout", "grid")
+                    layout = json.load(f).get("layout", "grid")
+                return layout if layout in LAYOUT_MODES else "grid"
             except json.JSONDecodeError:
                 return "grid"
         return "grid"
@@ -1794,6 +1830,20 @@ class GroundControl(App):
         """
         if self.grid is None:
             return
+        if self.current_layout == "bento":
+            # The bento's row count follows from packing the panels' spans, so
+            # the grid derives it itself; only the columns are configured.
+            saved = self._grid_weights.get("bento", {})
+            # `[]`, not None, when nothing is saved: None means "keep the
+            # current weights", which would carry another mode's proportions
+            # into this one, where they mean nothing.
+            self.grid.set_bento(
+                self.bento_columns, self._bento_span,
+                column_weights=saved.get("columns", []),
+                row_weights=saved.get("rows", []),
+            )
+            self._store_grid_weights(save=False)
+            return
         grid_columns = max(1, self.get_layout_columns(visible_count))
         if self.current_layout == "horizontal":
             rows, cols = 1, grid_columns
@@ -1805,8 +1855,8 @@ class GroundControl(App):
         saved = self._grid_weights.get(self.current_layout, {})
         self.grid.set_tracks(
             cols, rows,
-            column_weights=saved.get("columns"),
-            row_weights=saved.get("rows"),
+            column_weights=saved.get("columns", []),
+            row_weights=saved.get("rows", []),
         )
         # Store back normalized: the counts may have just changed, and the saved
         # lists should describe the grid that actually exists.
@@ -1951,36 +2001,36 @@ class GroundControl(App):
             node = node.parent
         return None
 
-    def _focused_cell(self) -> tuple[int, int] | None:
-        """``(column, row)`` of the focused panel's grid cell, or None.
+    def _focused_cell(self) -> tuple[int, int, int, int] | None:
+        """``(column, row, width, height)`` of the focused panel's cells, or None.
 
-        Mirrors ``GridLayout.arrange``: displayed children fill cells in order,
-        so a hidden panel shifts everything after it. No spans are used, so the
-        index arithmetic is exact.
+        Read from the placements the grid laid the panels out at, so it is
+        exact in every mode -- including the bento, where a panel spans several
+        tracks and its index in the child list says nothing about its cell.
         """
         panel = self._focused_panel()
-        if panel is None:
+        if panel is None or not panel.display:
             return None
-        displayed = [child for child in self.grid.children if child.display]
-        if panel not in displayed:
-            return None
-        cols = max(1, int(self.grid.styles.grid_size_columns or 1))
-        index = displayed.index(panel)
-        return index % cols, index // cols
+        return self.grid.placement_of(panel)
 
     def _resize_focused_panel(self, orientation: str, delta: float) -> None:
-        """Nudge the row or column containing the focused panel."""
+        """Nudge the row(s) or column(s) the focused panel covers."""
         cell = self._focused_cell()
         if cell is None:
             self.notify("Focus a panel first — ] and [ move between panels",
                         title="Panel size", severity="warning")
             return
-        index = cell[0] if orientation == "columns" else cell[1]
-        if not self.grid.nudge(orientation, index, delta):
+        column, row, width, height = cell
+        indices = (range(column, column + width) if orientation == "columns"
+                   else range(row, row + height))
+        if not self.grid.nudge_tracks(orientation, list(indices), delta):
             axis = "columns" if orientation == "columns" else "rows"
-            count = len(self.grid.column_weights if orientation == "columns"
-                        else self.grid.row_weights)
-            if count < 2:
+            count = self.grid.track_counts[0 if orientation == "columns" else 1]
+            if count >= 2 and len(indices) >= count:
+                self.notify(
+                    f"This panel spans every {axis[:-1]} — nothing to resize against",
+                    title="Panel size", severity="warning")
+            elif count < 2:
                 self.notify(
                     f"This layout has a single {axis[:-1]} — nothing to resize against",
                     title="Panel size", severity="warning")
@@ -2000,11 +2050,94 @@ class GroundControl(App):
         self._resize_focused_panel("rows", -NUDGE_STEP)
 
     def action_reset_panel_sizes(self) -> None:
-        """Return every row and column to an equal share."""
-        if self.grid is None or not self.grid.reset_tracks():
+        """Return every row and column to an equal share (and, in bento, spans too)."""
+        if self.grid is None:
+            return
+        spans_reset = self.current_layout == "bento" and bool(self.bento_spans)
+        if spans_reset:
+            self.bento_spans = {}
+            self.grid.sync_tracks()
+        if not self.grid.reset_tracks() and not spans_reset:
             return
         self._store_grid_weights()
-        self.notify("Panel sizes reset", title="Panel size", severity="information")
+        self.notify("Panel sizes and spans reset" if spans_reset else "Panel sizes reset",
+                    title="Panel size", severity="information")
+
+    # ------------------------------------------------------------------ bento
+
+    def _bento_span(self, widget) -> tuple[int, int]:
+        """The (columns, rows) a panel covers in the bento layout."""
+        span = self.bento_spans.get(self._panel_identity(widget))
+        if span is None:
+            span = default_span(self._get_widget_type(widget))
+        return clamp_span(span, self.bento_columns)
+
+    def _change_focused_span(self, axis: str, delta: int) -> None:
+        if self.current_layout != "bento":
+            self.notify("Spans apply to the bento layout — press b to switch to it",
+                        title="Panel span", severity="warning")
+            return
+        panel = self._focused_panel()
+        if panel is None or not panel.display:
+            self.notify("Focus a panel first — ] and [ move between panels",
+                        title="Panel span", severity="warning")
+            return
+        # Start from what is on screen: a panel stretched into a gap is drawn
+        # larger than its saved span, and growing from the saved one would take
+        # presses with no visible effect.
+        saved = self._bento_span(panel)
+        drawn = self.grid.placement_of(panel)
+        current = (max(saved[0], drawn[2]), max(saved[1], drawn[3])) if drawn else saved
+        updated = resize_span(current, axis, delta, self.bento_columns)
+        if updated is None:
+            limit = "the bento's width" if axis == "columns" else "the tallest span"
+            self.notify(f"This panel is already at {'its smallest size' if delta < 0 else limit}",
+                        title="Panel span", severity="warning")
+            return
+        self.bento_spans[self._panel_identity(panel)] = updated
+        self.grid.sync_tracks()
+        self._store_grid_weights()
+        after = self.grid.placement_of(panel)
+        if drawn is not None and after is not None and after[2:] == drawn[2:]:
+            # Shrinking a panel that fills a gap: nothing else fits there, so
+            # the gap-filling pass stretches it right back.
+            self.notify("Nothing else fits in the space this panel fills, so it "
+                        "keeps its size — reorder panels with m to change that",
+                        title="Panel span", severity="information")
+
+    def action_span_wider(self) -> None:
+        self._change_focused_span("columns", 1)
+
+    def action_span_narrower(self) -> None:
+        self._change_focused_span("columns", -1)
+
+    def action_span_taller(self) -> None:
+        self._change_focused_span("rows", 1)
+
+    def action_span_shorter(self) -> None:
+        self._change_focused_span("rows", -1)
+
+    def _change_bento_columns(self, delta: int) -> None:
+        if self.current_layout != "bento":
+            self.notify("Column count applies to the bento layout — press b to switch to it",
+                        title="Bento", severity="warning")
+            return
+        columns = clamp_columns(self.bento_columns + delta)
+        if columns == self.bento_columns:
+            limit = BENTO_MAX_COLUMNS if delta > 0 else BENTO_MIN_COLUMNS
+            self.notify(f"The bento is already at {limit} column{'s' if limit != 1 else ''}",
+                        title="Bento", severity="warning")
+            return
+        self.bento_columns = columns
+        self._apply_grid_layout_dimensions(0)
+        self.save_config()
+        self.notify(f"Bento: {columns} columns", title="Bento", severity="information")
+
+    def action_bento_more_columns(self) -> None:
+        self._change_bento_columns(1)
+
+    def action_bento_fewer_columns(self) -> None:
+        self._change_bento_columns(-1)
 
     def _get_shortcuts_banner_text(self) -> str:
         """Build Rich markup text listing all key bindings, grouped by purpose."""
@@ -2015,7 +2148,8 @@ class GroundControl(App):
         lines.append("[bold]Views[/]")
         lines += [row("d", "Dashboard"), row("s", "Settings (jumps to widget list)"), row("l", "Logs")]
         lines.append("\n[bold]Layout[/]")
-        lines += [row("g", "Grid"), row("h", "Horizontal"), row("v", "Vertical"), row("space", "Cycle layout")]
+        lines += [row("g", "Grid"), row("h", "Horizontal"), row("v", "Vertical"),
+                  row("b", "Bento (panels of different sizes)"), row("space", "Cycle layout")]
         lines.append("\n[bold]Panel size[/]")
         lines += [
             row("ctrl+←→", "Narrow / widen the focused panel's column"),
@@ -2025,6 +2159,16 @@ class GroundControl(App):
         ]
         lines.append("  [dim]Keys resize a whole row/column, so panels sharing it follow;[/]")
         lines.append("  [dim]a dragged border moves only the two panels either side of it.[/]")
+        lines.append("\n[bold]Bento layout[/]")
+        lines += [
+            row("shift+→←", "Focused panel spans more / fewer columns"),
+            row("shift+↓↑", "Focused panel spans more / fewer rows"),
+            row("> / <", "More / fewer bento columns"),
+            row("m, drag", "Swap panels to reorder the bento"),
+            row("z", "Reset sizes and spans"),
+        ]
+        lines.append("  [dim]Panels are packed in order, each over as many cells as it spans;[/]")
+        lines.append("  [dim]gaps are filled by stretching a neighbour.[/]")
         lines.append("\n[bold]Refresh & theme[/]")
         lines += [
             row("r", "Refresh now"),
@@ -2049,6 +2193,8 @@ class GroundControl(App):
         lines += [
             row("1 2 3", "CPU: All cores / Affinity / My processes"),
             row("1 2 / p", "GPU: Plot / Processes"),
+            row("○ / c", "GPU: pick processes to plot (Processes tab) / plot all"),
+            row("1 2 3", "Network: Plot / Links / listening Ports"),
         ]
         lines.append("\n[bold]Slurm[/]")
         lines += [
@@ -2112,6 +2258,7 @@ class GroundControl(App):
                                     yield RadioButton("Grid", id="layout-grid")
                                     yield RadioButton("Horizontal", id="layout-horizontal")
                                     yield RadioButton("Vertical", id="layout-vertical")
+                                    yield RadioButton("Bento", id="layout-bento")
                             with Horizontal(id="settings-timing-row"):
                                 with Vertical(classes="settings-block") as block:
                                     block.border_title = "Refresh rate"
@@ -2304,7 +2451,9 @@ class GroundControl(App):
             self.disk_widgets = []
             self.gpu_widgets = []
             self.temperature_widget = None
-            network_widget = NetworkIOWidget("Network")
+            network_widget = NetworkIOWidget(
+                "Network", initial_tab=self._widget_tab_states.get("Network", "plot"),
+                history_size=int(self.history_size))
         
             await self.grid.mount(cpu_widget)
             await self.grid.mount(memory_widget)
@@ -2372,6 +2521,9 @@ class GroundControl(App):
             # temperature, disks, network, GPUs, Slurm); apply any custom order
             # the user has arranged via swapping.
             self._apply_panel_order()
+            # The bento's packing depends on which panels exist and in what
+            # order, neither of which was known when the tracks were set above.
+            self.grid.sync_tracks()
 
             # Update selection list after widgets are created
             self.create_selection_list()
@@ -2477,10 +2629,21 @@ class GroundControl(App):
         "slurm": ["slurm"],
     }
 
+    # Collected for a widget when available, but never a reason to skip it: an
+    # older remote gc in job focus sends no network details, and the panel must
+    # still plot throughput.
+    _WIDGET_TYPE_OPTIONAL_METRICS = {
+        "net": ["network_details"],
+    }
+
     def _get_required_metric_types(self, widget) -> set:
         """Return the set of metric type strings required by this widget."""
         t = self._get_widget_type(widget)
         return set(self._WIDGET_TYPE_REQUIRED_METRICS.get(t, []))
+
+    def _get_optional_metric_types(self, widget) -> set:
+        t = self._get_widget_type(widget)
+        return set(self._WIDGET_TYPE_OPTIONAL_METRICS.get(t, []))
 
     @on(TabbedContent.TabActivated)
     def _on_any_tab_changed(self, event: TabbedContent.TabActivated) -> None:
@@ -2498,7 +2661,7 @@ class GroundControl(App):
         # Walk up to find the parent MetricWidget
         node = event.tabbed_content
         while node is not None:
-            if isinstance(node, (CPUWidget, GPUWidget)):
+            if isinstance(node, (CPUWidget, GPUWidget, NetworkIOWidget)):
                 break
             node = node.parent
         if node is not None and hasattr(node, "title"):
@@ -2570,6 +2733,7 @@ class GroundControl(App):
             required_types = set()
             for w in active_widgets:
                 required_types |= self._get_required_metric_types(w)
+                required_types |= self._get_optional_metric_types(w)
             if preview_widget is not None:
                 required_types |= self._get_required_metric_types(preview_widget)
 
@@ -2580,6 +2744,7 @@ class GroundControl(App):
                 "disk": self.system_metrics.get_disk_metrics,
                 "memory": self.system_metrics.get_memory_metrics,
                 "network": self.system_metrics.get_network_metrics,
+                "network_details": self.system_metrics.get_network_details,
                 "gpu": self.system_metrics.get_gpu_metrics,
                 "temperature": self.system_metrics.get_temperature_metrics,
                 "slurm": self._slurm_monitor.poll,
@@ -2765,7 +2930,8 @@ class GroundControl(App):
                     await self._update_disk_widget(widget, disk)
                     return
         elif isinstance(widget, NetworkIOWidget):
-            await self._update_network_widget(widget, metrics_by_type["network"])
+            await self._update_network_widget(widget, metrics_by_type["network"],
+                                              metrics_by_type.get("network_details"))
         elif isinstance(widget, GPUWidget):
             gpu_metrics = metrics_by_type["gpu"]
             if self.gpu_indices is not None:
@@ -2905,11 +3071,12 @@ class GroundControl(App):
             disk['disk_total']
         )
 
-    async def _update_network_widget(self, widget, network_metrics):
+    async def _update_network_widget(self, widget, network_metrics, details=None):
         """Update Network widget (plot operations on main thread due to plotext)."""
         widget.update_content(
             network_metrics['download_speed'],
-            network_metrics['upload_speed']
+            network_metrics['upload_speed'],
+            details=details,
         )
 
     async def _update_gpu_widget(self, widget, gpu_metric):
@@ -2963,9 +3130,12 @@ class GroundControl(App):
     def action_set_grid(self) -> None:
         self._apply_layout_from_key("grid")
 
+    def action_set_bento(self) -> None:
+        self._apply_layout_from_key("bento")
+
     def action_cycle_layout(self) -> None:
-        """Cycle grid -> horizontal -> vertical -> grid (single-key)."""
-        order = ["grid", "horizontal", "vertical"]
+        """Cycle grid -> horizontal -> vertical -> bento -> grid (single-key)."""
+        order = list(LAYOUT_MODES)
         cur = getattr(self, "current_layout", "grid")
         nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else "grid"
         self._apply_layout_from_key(nxt)
@@ -3557,7 +3727,7 @@ class GroundControl(App):
         #         self.set_layout("grid")
 
     def set_layout(self, layout: str):
-        """Set layout (grid/horizontal/vertical). Rebuilds widgets only when layout actually changes."""
+        """Set layout (grid/horizontal/vertical/bento). Rebuilds widgets only when layout actually changes."""
         layout_changed = layout != self.current_layout
         if layout_changed and self.grid is not None:
             self.grid.remove_class(self.current_layout)
@@ -3599,6 +3769,7 @@ class GroundControl(App):
                 is_visible = bool(self.selected_widgets.get(widget.title, True))
                 widget.styles.display = "block" if is_visible else "none"
             logger.debug("Widget %s visible: %s", widget.title, widget.styles.display != "none")
+        self.grid.sync_tracks()
 
     def _update_widget_history_sizes(self, new_size: int) -> None:
         """Update history size for all existing widgets without recreating them"""
@@ -3666,6 +3837,8 @@ class GroundControl(App):
                     gpu_widget.gpu_ram_history = gpu_widget.gpu_ram_history.__class__(maxlen=new_size)
                 if hasattr(gpu_widget, 'gpu_usage_history'):
                     gpu_widget.gpu_usage_history = gpu_widget.gpu_usage_history.__class__(maxlen=new_size)
+                if hasattr(gpu_widget, 'proc_history'):
+                    gpu_widget.proc_history = gpu_widget.proc_history.__class__(maxlen=new_size)
             except Exception:
                 if self._debug_mode:
                     raise

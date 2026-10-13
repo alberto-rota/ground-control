@@ -74,6 +74,8 @@ def collect_metrics_by_type(system_metrics, include_gpu: bool = True) -> Dict:
         "network": safe(system_metrics.get_network_metrics, {}),
         "temperature": safe(system_metrics.get_temperature_metrics, None),
     }
+    details = getattr(system_metrics, "get_network_details", None)
+    metrics["network_details"] = safe(details, None) if details else None
     metrics["gpu"] = safe(system_metrics.get_gpu_metrics, []) if include_gpu else []
     return metrics
 
@@ -163,6 +165,38 @@ def _disk_section(disk: Optional[Dict]) -> Optional[Dict]:
     }
 
 
+def _network_section(network: Optional[Dict], details: Optional[Dict]) -> Dict:
+    """Throughput plus, when collected, what is behind it.
+
+    The detail keys are additive: a reader of schema 1 that only knows the two
+    rates keeps working, and a missing detail collector yields the two rates
+    alone rather than nulls.
+    """
+    network = network or {}
+    section = {
+        "download_mbps": round(network.get("download_speed") or 0.0, 3),
+        "upload_mbps": round(network.get("upload_speed") or 0.0, 3),
+    }
+    if isinstance(details, dict):
+        section["interfaces"] = [
+            {key: iface.get(key) for key in (
+                "name", "kind", "is_up", "speed_mbit", "mtu", "ipv4", "ipv6", "mac",
+                "rx_mbps", "tx_mbps", "errors_per_s", "drops_per_s")}
+            for iface in details.get("interfaces") or [] if isinstance(iface, dict)
+        ]
+        section["listening"] = [
+            {key: row.get(key) for key in (
+                "proto", "address", "port", "exposure", "pid", "pids", "process",
+                "username", "mine", "service_hint")}
+            for row in details.get("listening") or [] if isinstance(row, dict)
+        ]
+        section["listening_summary"] = dict(details.get("listening_summary") or {})
+        section["connections"] = dict(details.get("connections") or {})
+        section["tcp"] = dict(details.get("tcp") or {})
+        section["sockets_age_seconds"] = details.get("sockets_age_seconds")
+    return section
+
+
 def _gpu_section(gpus) -> List[Dict]:
     section = []
     for index, gpu in enumerate(gpus or []):
@@ -197,6 +231,8 @@ def _gpu_section(gpus) -> List[Dict]:
                     "pid": proc.get("pid"),
                     "name": proc.get("name"),
                     "gpu_memory": proc.get("gpu_memory"),
+                    "gpu_memory_bytes": proc.get("gpu_memory_bytes"),
+                    "sm_util_percent": proc.get("sm_util_percent"),
                     "username": proc.get("username"),
                     "command": proc.get("command"),
                     "script": proc.get("script"),
@@ -245,7 +281,6 @@ def build_snapshot(system_metrics, thresholds: Optional[Dict] = None,
     metrics["disk"] = filter_disk_metrics(metrics.get("disk"), disk_ignore_prefixes)
     _, breaches = evaluate_snapshot(metrics, thresholds)
 
-    network = metrics.get("network") or {}
     temperatures = metrics.get("temperature")
 
     return {
@@ -256,14 +291,15 @@ def build_snapshot(system_metrics, thresholds: Optional[Dict] = None,
         "platform": platform.platform(),
         "status": worst([b.level for b in breaches]),
         "alerts": [b.as_dict() for b in breaches],
+        # Which GPUs this host considers allocated, and on what evidence --
+        # the answer to "why is GPU 3 (not) listed" on a shared node.
+        "gpu_scope": dict(getattr(system_metrics, "gpu_scope", None) or {}) or None,
         "metrics": {
             "cpu": _cpu_section(metrics.get("cpu")),
             "memory": _memory_section(metrics.get("memory")),
             "disk": _disk_section(metrics.get("disk")),
-            "network": {
-                "download_mbps": round(network.get("download_speed") or 0.0, 3),
-                "upload_mbps": round(network.get("upload_speed") or 0.0, 3),
-            },
+            "network": _network_section(metrics.get("network"),
+                                        metrics.get("network_details")),
             "gpu": _gpu_section(metrics.get("gpu")),
             "temperature_c": ({k: round(v, 1) for k, v in temperatures.items()}
                               if isinstance(temperatures, dict) else None),
@@ -383,6 +419,14 @@ def metrics_from_snapshot(snapshot: Optional[Dict]) -> Dict:
             "download_speed": network.get("download_mbps") or 0.0,
             "upload_speed": network.get("upload_mbps") or 0.0,
         }
+        # Only from a remote gc new enough to send them; the panel keeps
+        # plotting throughput either way.
+        if "listening" in network or "interfaces" in network:
+            result["network_details"] = {
+                key: network.get(key) for key in (
+                    "interfaces", "listening", "listening_summary", "connections",
+                    "tcp", "sockets_age_seconds")
+            }
 
     # -- gpu ---------------------------------------------------------------- #
     gpus = metrics.get("gpu")
@@ -507,6 +551,17 @@ def render_text(snapshot: Dict) -> str:
     network = metrics.get("network") or {}
     lines.append(f"Network  {network.get('download_mbps', 0):.2f} MB/s down  "
                  f"{network.get('upload_mbps', 0):.2f} MB/s up")
+    summary = network.get("listening_summary") or {}
+    retrans = (network.get("tcp") or {}).get("retransmit_percent")
+    if summary.get("listening") or retrans is not None:
+        parts = []
+        if summary.get("listening"):
+            parts.append(f"{summary['listening']} listening "
+                         f"({summary.get('exposed', 0)} on non-loopback, "
+                         f"{summary.get('mine', 0)} yours)")
+        if retrans is not None:
+            parts.append(f"TCP retransmits {retrans:.1f}%")
+        lines.append("         " + "   ".join(parts))
 
     for gpu in metrics.get("gpu") or []:
         util = gpu.get("utilization_percent")

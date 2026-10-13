@@ -292,7 +292,7 @@ def test_prompts():
     server = McpServer(FakeProvider(), slurm_enabled=False)
     prompts = server.handle(request("prompts/list", 1))["result"]["prompts"]
     assert {p["name"] for p in prompts} == {
-        "diagnose_slow_machine", "diagnose_gpu_job", "explain_alerts"}
+        "diagnose_slow_machine", "diagnose_gpu_job", "reach_service", "explain_alerts"}
     text = server.handle(request("prompts/get", 2, {"name": "diagnose_gpu_job"}))[
         "result"]["messages"][0]["content"]["text"]
     assert "diagnose_gpus" in text and "list_slurm_jobs" not in text
@@ -381,3 +381,106 @@ def test_parse_error_and_blank_lines():
     replies = [json.loads(line) for line in output.getvalue().splitlines()]
     assert len(replies) == 1 and replies[0]["error"]["code"] == -32700
     assert sys.stdout is not None
+
+
+# --------------------------------------------------------------- new tools
+
+def snapshot_with_processes(sm_a, sm_b, host="node1"):
+    snap = make_snapshot()
+    snap["host"] = host
+    snap["gpu_scope"] = {"source": "SLURM_STEP_GPUS", "spec": "3", "restricted": True}
+    snap["metrics"]["gpu"][0]["processes"] = [
+        {"pid": 1, "name": "train", "gpu_memory_bytes": 2e9, "sm_util_percent": sm_a},
+        {"pid": 2, "name": "eval", "gpu_memory_bytes": 1e9, "sm_util_percent": sm_b},
+        {"pid": 3, "name": "other", "gpu_memory_bytes": 4e9, "sm_util_percent": 5},
+    ]
+    snap["metrics"]["network"].update({
+        "listening": [
+            {"proto": "tcp", "address": "127.0.0.1", "port": 8888, "exposure": "localhost only",
+             "pid": 7, "process": "jupyter-lab", "username": "me", "mine": True},
+            {"proto": "tcp", "address": "0.0.0.0", "port": 6006, "exposure": "all interfaces",
+             "pid": 8, "process": "tensorboard", "username": "me", "mine": True},
+            {"proto": "tcp", "address": "0.0.0.0", "port": 22, "exposure": "all interfaces",
+             "pid": None, "process": None, "username": None, "mine": False},
+        ],
+        "listening_summary": {"listening": 3, "exposed": 2, "mine": 2},
+        "connections": {"established": 4},
+        "tcp": {"retransmit_percent": 0.4},
+        "interfaces": [{"name": "ib0"}],
+    })
+    return snap
+
+
+def test_gpu_processes_attributes_load_and_sums_a_selection():
+    provider = FakeProvider([snapshot_with_processes(30, 10), snapshot_with_processes(50, 20)])
+    server = McpServer(provider, slurm_enabled=False, sleep=lambda s: None)
+    value = server.handle(call("get_gpu_processes", 1, pids=[1, 2],
+                               duration_seconds=1))["result"]["structuredContent"]
+    gpu = value["gpus"][0]
+    assert [p["pid"] for p in gpu["processes"]] == [1, 2]
+    assert gpu["processes"][0]["sm_util_percent"]["mean"] == 40.0
+    assert gpu["selected"]["sm_util_percent"]["last"] == 70.0
+    assert gpu["selected"]["gpu_memory_gb"]["last"] == 3.0
+    assert value["gpu_scope"]["source"] == "SLURM_STEP_GPUS"
+
+    everything = server.handle(call("get_gpu_processes", 2))["result"]["structuredContent"]
+    assert len(everything["gpus"][0]["processes"]) == 3
+    assert "selected" not in everything["gpus"][0]
+
+
+def test_array_arguments_are_validated_per_item():
+    server = McpServer(FakeProvider(), slurm_enabled=False)
+    bad = server.handle(call("get_gpu_processes", 1, pids=[1, "x"]))["result"]
+    assert bad["isError"] and "pids[1]" in bad["content"][0]["text"]
+    bad = server.handle(call("get_gpu_processes", 2, pids=7))["result"]
+    assert bad["isError"] and "array" in bad["content"][0]["text"]
+
+
+def test_network_details_filters_and_hints_tunnels():
+    server = McpServer(FakeProvider([snapshot_with_processes(1, 1, host="ws1")]),
+                       slurm_enabled=False)
+    value = server.handle(call("get_network_details", 1, listening="mine",
+                               include_interfaces=False))["result"]["structuredContent"]
+    assert [r["port"] for r in value["listening"]] == [8888, 6006]
+    assert value["listening"][0]["tunnel_hint"] == "ssh -N -L 8888:localhost:8888 ws1"
+    assert "interfaces" not in value
+    exposed = server.handle(call("get_network_details", 2, listening="exposed"))[
+        "result"]["structuredContent"]
+    assert [r["port"] for r in exposed["listening"]] == [6006, 22]
+    assert "tunnel_hint" not in exposed["listening"][1]
+
+
+def test_network_details_inside_a_job_tunnels_through_the_login_node(fake_slurm, monkeypatch):
+    monkeypatch.setattr(mcp.socket, "gethostname", lambda: "login1")
+    fake_slurm["probe"] = snapshot_with_processes(1, 1, host="node1")
+    server = McpServer(FakeProvider(), slurm_enabled=True)
+    value = server.handle(call("get_network_details", 1, job_id="10",
+                               listening="mine"))["result"]["structuredContent"]
+    hints = {r["port"]: r["tunnel_hint"] for r in value["listening"]}
+    # Loopback-bound on the compute node needs a jump; all-interfaces does not.
+    assert hints[8888] == "ssh -N -L 8888:localhost:8888 -J login1 node1"
+    assert hints[6006] == "ssh -N -L 6006:node1:6006 login1"
+
+
+def test_network_details_missing_names_the_likely_cause():
+    server = McpServer(FakeProvider(), slurm_enabled=False)
+    reply = server.handle(call("get_network_details", 1))["result"]
+    assert reply["isError"] and "collector failed" in reply["content"][0]["text"]
+
+
+def test_tunnel_hints_follow_the_bind_address_and_skip_udp():
+    hint = mcp._tunnel_hint
+    row = {"proto": "tcp", "port": 8888, "exposure": "eth0 only", "address": "10.0.0.5"}
+    assert hint(row, "ws1", None) == "ssh -N -L 8888:10.0.0.5:8888 ws1"
+    assert hint(row, "node1", "login1") == "ssh -N -L 8888:10.0.0.5:8888 login1"
+    v6 = dict(row, proto="tcp6", address="fd00::5")
+    assert hint(v6, "ws1", None) == "ssh -N -L 8888:[fd00::5]:8888 ws1"
+    assert hint(dict(row, proto="udp"), "ws1", None) is None
+
+
+def test_status_carries_compact_network_and_scope():
+    server = McpServer(FakeProvider([snapshot_with_processes(1, 1)]), slurm_enabled=False)
+    status = server.handle(call("get_hardware_status", 1))["result"]["structuredContent"]
+    assert status["network"]["listening"] == {"listening": 3, "exposed": 2, "mine": 2}
+    assert "interfaces" not in status["network"]
+    assert status["gpu_scope"]["restricted"] is True

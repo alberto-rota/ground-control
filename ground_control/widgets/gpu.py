@@ -3,6 +3,7 @@ import signal as signal_module
 from collections import deque
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.widgets import Static, TabbedContent, TabPane, Button
 from textual import on
 from textual.css.query import NoMatches
@@ -45,6 +46,54 @@ CMD_MIN_WIDTH = 8
 # occupy, which the header must reserve so its columns line up with the rows.
 SIG_BUTTON_WIDTH = 3
 SIG_BUTTON_STRIP = 3 * (SIG_BUTTON_WIDTH + 1)
+# The plot-selection toggle at the start of each row, plus its right margin.
+SELECT_STRIP = SIG_BUTTON_WIDTH + 1
+SELECT_HEADER = "PLT"
+
+
+def process_sample(processes) -> dict:
+    """``{pid: (gpu_memory_gb, sm_percent)}`` for one tick of a process list.
+
+    GB uses the same 1000**3 the device-wide reading does, so a filtered plot
+    and the unfiltered one share a scale. Either value may be None when NVML
+    does not account it per process.
+    """
+    sample = {}
+    for proc in processes or []:
+        if not isinstance(proc, dict) or proc.get("pid") is None:
+            continue
+        mem = proc.get("gpu_memory_bytes")
+        sm = proc.get("sm_util_percent")
+        sample[proc["pid"]] = (
+            None if mem is None else float(mem) / 1000**3,
+            None if sm is None else float(sm),
+        )
+    return sample
+
+
+def selected_series(proc_history, pids):
+    """Summed GPU memory and SM % of the ``pids`` over every recorded tick.
+
+    Returns ``(ram_gb, usage_percent, usage_available)``. A process absent from
+    a tick contributes nothing to it -- it was not running, or not yet -- which
+    is exactly what a plot of "these processes only" should show. Usage is
+    unavailable only if no selected process ever reported an SM sample, so one
+    process with no per-process accounting does not hide the others.
+    """
+    pids = set(pids)
+    ram, usage = [], []
+    usage_available = False
+    for tick in proc_history:
+        mem_total = sm_total = 0.0
+        for pid in pids & tick.keys():
+            mem, sm = tick[pid]
+            mem_total += mem or 0.0
+            if sm is not None:
+                sm_total += sm
+                usage_available = True
+        ram.append(mem_total)
+        usage.append(min(sm_total, 100.0))
+    return ram, usage, usage_available
 
 
 def _proc_value(process: dict, key: str) -> str:
@@ -203,21 +252,39 @@ class ProcessRow(Static):
         margin: 0 0 0 1;
         text-style: bold;
     }
+    ProcessRow .sel-btn {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        min-height: 1;
+        border: none;
+        padding: 0;
+        margin: 0 1 0 0;
+    }
     ProcessRow .sigkill-btn { background: #c00; color: white; }
     ProcessRow .sigterm-btn { background: #e85d00; color: white; }
     ProcessRow .sigint-btn  { background: #bb0; color: black; }
     """
+
+    class SelectToggled(Message):
+        """The row's plot toggle was pressed: add/remove this pid from the plot."""
+
+        def __init__(self, pid) -> None:
+            super().__init__()
+            self.pid = pid
 
     def __init__(
         self,
         process: dict,
         signals_enabled: bool = True,
         pid_width: int = PID_MIN_WIDTH,
+        selected: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._process = process
         self._pid_width = pid_width
+        self._selected = selected
         # False while the listed pids belong to another host (Slurm job focus),
         # where signalling locally would hit an unrelated process.
         self._signals_enabled = signals_enabled
@@ -225,6 +292,10 @@ class ProcessRow(Static):
     def compose(self) -> ComposeResult:
         pid = self._process.get("pid", "?")
         with Horizontal():
+            select = Button("", classes="sel-btn")
+            select.tooltip = (f"Plot only the selected processes — toggle PID {pid} "
+                              "(c on the panel clears the selection)")
+            yield select
             yield Static("", classes="process-info")
             for label, cls, signal_name, number in (
                 ("K", "sigkill-btn", "SIGKILL", 9),
@@ -255,6 +326,30 @@ class ProcessRow(Static):
 
     def on_mount(self) -> None:
         self._render_info()
+        self._render_selected()
+
+    def set_selected(self, selected: bool) -> None:
+        """Mark/unmark this row as part of the plotted subset, in place."""
+        if selected != self._selected:
+            self._selected = selected
+            self._render_selected()
+
+    def _render_selected(self) -> None:
+        try:
+            button = self.query_one(".sel-btn", Button)
+        except NoMatches:
+            return
+        if self._selected:
+            button.label = f"[bold {get_rich_color('gpu_usage', '#00FFFF')}]●[/]"
+        else:
+            button.label = "[dim]○[/]"
+
+    @on(Button.Pressed, ".sel-btn")
+    def _toggle_selected(self, event: Button.Pressed) -> None:
+        event.stop()
+        pid = self._process.get("pid")
+        if pid is not None:
+            self.post_message(self.SelectToggled(pid))
 
     def on_resize(self, event) -> None:
         # Column set depends on the width available, so re-render on every
@@ -266,7 +361,8 @@ class ProcessRow(Static):
             info = self.query_one(".process-info", Static)
         except NoMatches:
             return
-        width = info.content_size.width or (self.content_size.width - SIG_BUTTON_STRIP)
+        width = info.content_size.width or (
+            self.content_size.width - SIG_BUTTON_STRIP - SELECT_STRIP)
         info.update(
             format_process_line(self._process, max(0, width), pid_width=self._pid_width)
         )
@@ -342,6 +438,11 @@ class GPUProcessList(Static):
     GPUProcessList #gpu-process-header Horizontal {
         height: 1;
     }
+    GPUProcessList .header-select {
+        width: 4;
+        min-width: 4;
+        height: 1;
+    }
     GPUProcessList .header-cols {
         width: 1fr;
         min-width: 0;
@@ -365,6 +466,13 @@ class GPUProcessList(Static):
         self._last_sig = None
         self._signals_enabled = signals_enabled
         self._pid_width = PID_MIN_WIDTH
+        self._selected_pids: set = set()
+
+    def set_selected_pids(self, pids) -> None:
+        """Reflect the plotted subset on current and future rows."""
+        self._selected_pids = set(pids)
+        for row in self.query(ProcessRow).results(ProcessRow):
+            row.set_selected(row._process.get("pid") in self._selected_pids)
 
     def set_signals_enabled(self, enabled: bool) -> None:
         """Enable/disable signal buttons on current and future rows."""
@@ -375,6 +483,7 @@ class GPUProcessList(Static):
     def compose(self) -> ComposeResult:
         with Static(id="gpu-process-header"):
             with Horizontal():
+                yield Static(f"[bold]{SELECT_HEADER}[/]", classes="header-select")
                 yield Static("", classes="header-cols")
                 yield Static(self.SIGNAL_HEADER, classes="header-buttons")
         yield Vertical(id="gpu-process-rows")
@@ -392,7 +501,7 @@ class GPUProcessList(Static):
         except NoMatches:
             return
         width = header.content_size.width or (
-            self.content_size.width - SIG_BUTTON_STRIP - 2
+            self.content_size.width - SIG_BUTTON_STRIP - SELECT_STRIP - 2
         )
         header.update(
             format_process_line(
@@ -419,6 +528,7 @@ class GPUProcessList(Static):
                     p,
                     signals_enabled=self._signals_enabled,
                     pid_width=self._pid_width,
+                    selected=p.get("pid") in self._selected_pids,
                 )
             )
 
@@ -433,6 +543,7 @@ class GPUWidget(MetricWidget):
         ("1", "show_plot", "GPU: plot"),
         ("2", "show_processes", "GPU: processes"),
         ("p", "show_plot", "GPU: plot"),
+        ("c", "clear_process_filter", "GPU: plot all processes"),
     ]
 
     # Rows taken by the tab bar (tabs + underline), the split bar and the
@@ -505,6 +616,13 @@ class GPUWidget(MetricWidget):
         )
         self.gpu_ram_history = deque(maxlen=history_size)
         self.gpu_usage_history = deque(maxlen=history_size)
+        # Per-tick {pid: (gpu_memory_gb, sm_percent)}, aligned with the device
+        # histories above, so selecting processes plots their past too instead
+        # of starting an empty plot.
+        self.proc_history = deque(maxlen=history_size)
+        # Pids whose sum the plot shows instead of the whole device; empty
+        # means "the whole device" (the default).
+        self.selected_pids: set = set()
         self.first = True
         self.title = title
         self.border_title = title
@@ -544,6 +662,12 @@ class GPUWidget(MetricWidget):
             return
         try:
             tabbed = self.query_one("#gpu-tabbed")
+            # A focused process-row button sits in the pane being hidden, and
+            # TabbedContent keeps the pane holding focus active -- so the
+            # switch silently did nothing. Take focus back to the panel first.
+            if self.screen.focused is not None and self.screen.focused is not self \
+                    and self in self.screen.focused.ancestors:
+                self.focus()
             tabbed.active = tab_id
         except Exception:
             # Safe no-op if the tab container is not mounted yet.
@@ -670,14 +794,16 @@ class GPUWidget(MetricWidget):
         """
         max_val = self.max_val or 1
         ram_fraction = gpu_ram / max_val
+        # Negative is the "not reported" sentinel; 0.0 % would read as idle.
+        usage_known = gpu_usage >= 0
         return self.build_split_bar(
             content_width,
             left_fraction=ram_fraction,
-            right_fraction=gpu_usage / 100,
+            right_fraction=gpu_usage / 100 if usage_known else 0.0,
             left_color=self.ram_color(warning=ram_fraction >= 0.9),
             right_color=self.usage_color(),
             left_label=format_size(gpu_ram, in_gb=True),
-            right_label=f"{gpu_usage:.1f} %",
+            right_label=f"{gpu_usage:.1f} %" if usage_known else "UNAV",
             # RAM reads as a gauge filling from the left edge towards the centre.
             left_from_centre=False,
         )
@@ -693,12 +819,13 @@ class GPUWidget(MetricWidget):
         plt.plot_size(height=plot_height, width=plot_width)
         plt.theme("pro")
 
+        ram_series, usage_series, usage_available = self.plot_series()
         # Plot GPU RAM as positive values and GPU Usage as negative
-        positive_series = [x + 0.1 for x in self.gpu_usage_history]
-        if not self.usage_is_available:
-            positive_series = [-100 for x in self.gpu_usage_history]
+        positive_series = [x + 0.1 for x in usage_series]
+        if not usage_available:
+            positive_series = [-100 for x in usage_series]
         negative_series = [
-            -100 + (x / self.max_val) * 100 for x in self.gpu_ram_history
+            -100 + (x / (self.max_val or 1)) * 100 for x in ram_series
         ]
 
         # Determine symmetric y-axis limits based on incoming data
@@ -708,22 +835,22 @@ class GPUWidget(MetricWidget):
 
         # if self.usage_is_available:
         plt.ylim(-100, 100)
-        if not self.usage_is_available:
+        if not usage_available:
             plt.ylim(-100, 0)
         plt.plot(
             positive_series,
             marker="braille",
-            label="Usage UNAV" if not self.usage_is_available else "Usage",
+            label="Usage UNAV" if not usage_available else "Usage",
         )
         plt.plot(negative_series, marker="braille", label="RAM")
-        if self.usage_is_available:
+        if usage_available:
             plt.hline(0.0)
         plt.yfrequency(5)
         plt.xfrequency(0)
 
         current_yticks = [-100, -50, 0, 50, 100]
         plt.yticks(current_yticks, [0, 50, 100, 50, 100])
-        if not self.usage_is_available:
+        if not usage_available:
             current_yticks = [-100, -75, -50, -25, 0]
             plt.yticks(current_yticks, [0, 25, 50, 75, 100])
         # Series order fixes the colours: usage is plotted first -> [blue], RAM -> [green].
@@ -736,6 +863,71 @@ class GPUWidget(MetricWidget):
         if len(self.gpu_ram_history) >= self.gpu_ram_history.maxlen:
             build = substitute_plot_timeframe(build, self.gpu_ram_history.maxlen)
         return self.finish_plot(build, plot_width, plot_height)
+
+    # --------------------------------------------------------- process filter
+
+    def plot_series(self):
+        """``(ram_gb, usage_percent, usage_available)`` the plot and bar show.
+
+        The whole device by default; the summed selected processes otherwise.
+        Per-process SM % is a sampled NVML figure and need not add up to the
+        device's utilisation (which only means "a kernel was resident").
+        """
+        if self.selected_pids:
+            return selected_series(self.proc_history, self.selected_pids)
+        return (list(self.gpu_ram_history), list(self.gpu_usage_history),
+                self.usage_is_available)
+
+    def _update_filter_subtitle(self) -> None:
+        count = len(self.selected_pids)
+        if count:
+            noun = "process" if count == 1 else "processes"
+            self.border_subtitle = f"plot: {count} selected {noun} · c = all"
+        else:
+            self.border_subtitle = ""
+
+    def _sync_selection(self) -> None:
+        self._update_filter_subtitle()
+        try:
+            self.query_one("#gpu-processes", GPUProcessList).set_selected_pids(
+                self.selected_pids)
+        except NoMatches:
+            pass
+        self.rerender()
+
+    @on(ProcessRow.SelectToggled)
+    def _on_process_select_toggled(self, message: ProcessRow.SelectToggled) -> None:
+        message.stop()
+        self.selected_pids ^= {message.pid}
+        self._sync_selection()
+
+    def action_clear_process_filter(self) -> None:
+        if not self.selected_pids:
+            return
+        self.selected_pids = set()
+        self._sync_selection()
+
+    def select_processes(self, pids) -> None:
+        """Plot only ``pids`` (empty: the whole device). For programmatic use."""
+        self.selected_pids = set(pids)
+        self._sync_selection()
+
+    def _prune_selection(self) -> None:
+        """Forget selected pids that left the whole history window.
+
+        A process that exited still has a past worth plotting, so it stays
+        selected while any of its samples are on screen; after that it can
+        only ever contribute zero, and keeping it would leave the plot filtered
+        down to nothing once its siblings are gone too.
+        """
+        if not self.selected_pids:
+            return
+        seen = set()
+        for tick in self.proc_history:
+            seen.update(tick.keys())
+        if not self.selected_pids <= seen:
+            self.selected_pids &= seen
+            self._sync_selection()
 
     def rerender(self) -> None:
         """Re-draw plot and bar from stored history at the current region sizes."""
@@ -765,9 +957,12 @@ class GPUWidget(MetricWidget):
             self.query_one("#history-plot").update(
                 self.get_dual_plot(plot_width, plot_height)
             )
+            ram_series, usage_series, available = self.plot_series()
             self.query_one("#current-value").update(
                 self.create_center_bar(
-                    self.gpu_ram_history[-1], self.gpu_usage_history[-1], bar_width
+                    ram_series[-1] if ram_series else 0.0,
+                    usage_series[-1] if usage_series and available else -1.0,
+                    bar_width,
                 )
             )
             if telemetry_line is not None and show_telemetry:
@@ -811,6 +1006,8 @@ class GPUWidget(MetricWidget):
             return
         self.gpu_ram_history.append(mem_used)
         self.gpu_usage_history.append(gpu_usage)
+        self.proc_history.append(process_sample(processes))
+        self._prune_selection()
         self.max_val = mem_total
         self.usage_is_available = gpu_usage >= -0.5
         n_proc = len(processes) if processes else 0
