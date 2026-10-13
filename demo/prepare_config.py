@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--theme", default="tokyo-night")
     p.add_argument("--layout", default="grid",
-                   choices=("grid", "horizontal", "vertical"))
+                   choices=("grid", "horizontal", "vertical", "bento"))
     p.add_argument("--refresh", type=float, default=0.5,
                    help="refresh_rate in seconds (fast looks better on film)")
     p.add_argument("--history", type=int, default=120,

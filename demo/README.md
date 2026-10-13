@@ -224,10 +224,20 @@ the order they have actually bitten:
    frame is the house style, and `tapes/themes/` exists for the one tape that
    needs to move off it.
 2. Panel-scoped keys need the panel focused first — press `]`. On CPU those are
-   `1`/`2`/`3`; on GPU, `1` and `2`. (The in-app help offers `p` for the GPU
-   Processes tab, but the widget binds `p` to `show_plot`, so it does nothing
-   useful — use `2`.)
-3. Settings navigation is by focus order: `s` lands on the widget list, and six
+   `1`/`2`/`3`; on GPU, `1` and `2`; on Network, `1`/`2`/`3`. (`p` on the GPU
+   panel is the plot, not the Processes tab — use `2`.)
+3. vhs 0.11 cannot send `Shift+<arrow>` (the tape fails to parse), which the
+   bento's span keys need. Send the xterm sequence instead — `Escape` followed
+   by `Type@0ms "[1;2C"` (`A`/`B`/`C`/`D` for up/down/right/left). Sent back to
+   back, Textual parses them as one `shift+right` (checked with a key-echo
+   app). If they ever arrive split, the app sees a lone `escape` and then `[`,
+   which is "previous panel" — so a bento recording that moves focus instead
+   of resizing points here.
+4. The GPU process rows are reached by `Tab`: from the focused panel, two
+   `Tab`s land on the first row's `○` and each further row is four more
+   (`○`, `K`, `T`, `I`). Get the count wrong and `Enter` presses a `K`, which
+   sends `SIGKILL` to a real process — `gpu.tape` says so where it does this.
+5. Settings navigation is by focus order: `s` lands on the widget list, and six
    `Tab`s reach the colour list.
-4. `record.sh` picks up new tapes automatically; files under `tapes/themes/` are
+6. `record.sh` picks up new tapes automatically; files under `tapes/themes/` are
    fragments and are skipped.

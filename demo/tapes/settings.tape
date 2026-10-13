@@ -47,8 +47,8 @@ Up 1
 Space
 Sleep 2s
 
-# One tab reaches the Layout radio, where the arrow keys switch layout and the
-# dashboard behind follows immediately.
+# One tab reaches the Layout radio, where the arrow keys switch layout (grid,
+# horizontal, vertical, bento) and the dashboard behind follows immediately.
 #
 # The refresh-rate and history dropdowns are deliberately left alone: driving a
 # Select blind takes an arrow count that depends on where the highlight starts,
@@ -60,7 +60,9 @@ Right 1
 Sleep 2s
 Right 1
 Sleep 2s
-Left 2
+Right 1
+Sleep 2s
+Left 3
 Sleep 2s
 
 # A layout round-trip remounts every panel, so the dashboard comes back empty

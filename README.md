@@ -130,6 +130,8 @@ In the bento, panels come in different sizes. Focus one and `shift+right` / `shi
 
 ![Switching layouts](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/layouts.gif)
 
+![Bento](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/bento.gif)
+
 ![Vertical](https://raw.githubusercontent.com/alberto-rota/ground-control/main/assets/vertical.gif)
 
 Two panels that share a grid row share its height. That is how the grid works. `ctrl+left` / `ctrl+right` and `ctrl+up` / `ctrl+down` change the focused panel's column or row, and the other tracks take up the rest. Dragging the border between two panels moves only that pair. `z` resets. `m` marks the focused panel and a second `m` on another one swaps them (`esc` backs out). `x` hides the focused panel; turn it back on from Settings.

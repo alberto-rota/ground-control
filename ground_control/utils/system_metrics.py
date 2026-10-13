@@ -1238,7 +1238,13 @@ class SystemMetrics:
         except Exception:  # noqa: BLE001
             addrs = {}
         try:
-            counters = psutil.net_io_counters(pernic=True)
+            # nowrap=False: psutil's wrap correction is one cache shared by every
+            # caller, and this runs in a different executor thread than
+            # get_network_metrics. A reading that reached the cache after a newer
+            # one looked like a counter wrap, and psutil added loopback's whole
+            # lifetime byte count to the throughput -- a one-tick spike of tens
+            # of GB/s. The deltas below are clamped at zero anyway.
+            counters = psutil.net_io_counters(pernic=True, nowrap=False)
         except Exception:  # noqa: BLE001
             counters = {}
         previous, elapsed = state["nic"], max(now - state["nic_time"], 1e-6)

@@ -143,3 +143,25 @@ def test_collector_returns_the_documented_shape():
     assert {"interfaces", "listening", "listening_summary", "connections", "tcp",
             "sockets_age_seconds"} <= set(details)
     assert all(i["name"] != "lo" for i in details["interfaces"])
+
+
+def test_details_keep_out_of_psutils_shared_wrap_cache(monkeypatch):
+    """Regression: with nowrap=True both collectors share psutil's wrap cache.
+
+    They run in different executor threads, so an older reading could reach the
+    cache after a newer one, read as a counter wrap, and add loopback's
+    lifetime bytes to the throughput plot as a tens-of-GB/s spike.
+    """
+    import psutil
+
+    from ground_control.utils.system_metrics import SystemMetrics
+
+    calls = []
+
+    def fake_counters(*args, **kwargs):
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(psutil, "net_io_counters", fake_counters)
+    SystemMetrics._interface_details({"nic": None, "nic_time": 0.0}, 1.0)
+    assert calls and all(c.get("nowrap") is False for c in calls)
